@@ -227,16 +227,20 @@ func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
 	return nil
 }
 
-type foreignKeySpec struct{ table, from, to, onUpdate, onDelete, match string }
+type foreignKeyMapping struct{ from, to string }
+type foreignKeyGroup struct {
+	table, onUpdate, onDelete, match string
+	mappings                         []foreignKeyMapping
+}
 
-var requiredForeignKeys = map[string][]foreignKeySpec{
-	"assets":             {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
-	"relationships":      {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
-	"coverage":           {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
-	"inventory_state":    {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
-	"asset_state":        {{"assets", "scan_id", "scan_id", "NO ACTION", "NO ACTION", "NONE"}, {"assets", "asset_id", "asset_id", "NO ACTION", "NO ACTION", "NONE"}},
-	"relationship_state": {{"relationships", "scan_id", "scan_id", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "from_id", "from_id", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "kind", "kind", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "to_id", "to_id", "NO ACTION", "NO ACTION", "NONE"}},
-	"inventory_errors":   {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+var requiredForeignKeys = map[string][]foreignKeyGroup{
+	"assets":             {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"relationships":      {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"coverage":           {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"inventory_state":    {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"asset_state":        {{"assets", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"asset_id", "asset_id"}}}},
+	"relationship_state": {{"relationships", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"from_id", "from_id"}, {"kind", "kind"}, {"to_id", "to_id"}}}},
+	"inventory_errors":   {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 }
 
 func verifyForeignKeys(db *sql.DB) error {
@@ -245,28 +249,49 @@ func verifyForeignKeys(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("inspect foreign keys for %s: %w", table, err)
 		}
-		var actual []foreignKeySpec
+		groupsByID := make(map[int]*foreignKeyGroup)
 		for rows.Next() {
 			var id, sequence int
-			var spec foreignKeySpec
-			if err := rows.Scan(&id, &sequence, &spec.table, &spec.from, &spec.to, &spec.onUpdate, &spec.onDelete, &spec.match); err != nil {
+			var targetTable, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &sequence, &targetTable, &from, &to, &onUpdate, &onDelete, &match); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan foreign keys for %s: %w", table, err)
 			}
-			actual = append(actual, spec)
+			group := groupsByID[id]
+			if group == nil {
+				group = &foreignKeyGroup{table: targetTable, onUpdate: onUpdate, onDelete: onDelete, match: match}
+				groupsByID[id] = group
+			}
+			if group.table != targetTable || group.onUpdate != onUpdate || group.onDelete != onDelete || group.match != match || sequence != len(group.mappings) {
+				rows.Close()
+				return fmt.Errorf("required schema table %s has incompatible foreign-key grouping", table)
+			}
+			group.mappings = append(group.mappings, foreignKeyMapping{from: from, to: to})
 		}
 		rows.Close()
-		expected := requiredForeignKeys[table]
-		if len(actual) != len(expected) {
-			return fmt.Errorf("required schema table %s has incompatible foreign keys", table)
+		var actualFingerprints []string
+		for _, group := range groupsByID {
+			actualFingerprints = append(actualFingerprints, foreignKeyFingerprint(*group))
 		}
-		for index := range expected {
-			if actual[index] != expected[index] {
-				return fmt.Errorf("required schema table %s has incompatible foreign keys", table)
-			}
+		var expectedFingerprints []string
+		for _, group := range requiredForeignKeys[table] {
+			expectedFingerprints = append(expectedFingerprints, foreignKeyFingerprint(group))
+		}
+		sort.Strings(actualFingerprints)
+		sort.Strings(expectedFingerprints)
+		if strings.Join(actualFingerprints, "|") != strings.Join(expectedFingerprints, "|") {
+			return fmt.Errorf("required schema table %s has incompatible foreign keys", table)
 		}
 	}
 	return nil
+}
+
+func foreignKeyFingerprint(group foreignKeyGroup) string {
+	var mappings []string
+	for _, mapping := range group.mappings {
+		mappings = append(mappings, mapping.from+">"+mapping.to)
+	}
+	return strings.Join([]string{group.table, group.onUpdate, group.onDelete, group.match, strings.Join(mappings, ",")}, ":")
 }
 
 var requiredIndexFingerprints = map[string][]string{

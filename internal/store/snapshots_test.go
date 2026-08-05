@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -480,6 +481,38 @@ func TestSecretValidationURIAndSafeListBoundaries(t *testing.T) {
 	}
 }
 
+func TestRedactionPlaceholderSemantics(t *testing.T) {
+	placeholders := []string{"[redacted]", "[REDACTED]", "redacted", "REDACTED"}
+	for _, placeholder := range placeholders {
+		t.Run("safe-"+strings.ReplaceAll(placeholder, "[", "bracket-"), func(t *testing.T) {
+			s := openTestStore(t)
+			scan := testScan("safe-placeholder", time.Unix(2, 0).UTC())
+			scan.Coverage = []model.CollectorResult{{
+				Collector: "mcp", Status: model.CoverageComplete,
+				Assets: []model.Asset{{ID: "query", Source: "https://example.test/?access_token=" + url.QueryEscape(placeholder)}},
+			}}
+			inventory := model.Inventory{Assets: []model.Asset{
+				{ID: "fragment", Source: "https://example.test/#access_token=" + url.QueryEscape(placeholder)},
+				{ID: "metadata", Metadata: map[string]string{"raw_token": placeholder}},
+				{ID: "safe-list", Metadata: map[string]string{"env_keys": placeholder}},
+			}}
+			if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
+				t.Fatalf("placeholder %q rejected: %v", placeholder, err)
+			}
+		})
+	}
+	for _, nearMiss := range []string{"REDACTED-secret", "[REDACTED]-secret", "prefix-redacted", "raw-secret"} {
+		t.Run("reject-"+nearMiss, func(t *testing.T) {
+			s := openTestStore(t)
+			inventory := model.Inventory{Assets: []model.Asset{{ID: "asset", Metadata: map[string]string{"raw_token": nearMiss}}}}
+			if err := s.SaveScan(context.Background(), testScan("near-miss", time.Unix(2, 0).UTC()), inventory); !errors.Is(err, ErrSensitiveSnapshot) {
+				t.Fatalf("near miss %q error = %v", nearMiss, err)
+			}
+			assertNoSnapshotRows(t, s)
+		})
+	}
+}
+
 func TestConcurrentCloseAndOperations(t *testing.T) {
 	s := openTestStore(t)
 	var sequence atomic.Int64
@@ -614,6 +647,7 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 		{name: "wrong primary key order", table: "relationships", old: "PRIMARY KEY (scan_id, from_id, kind, to_id)", replacement: "PRIMARY KEY (from_id, scan_id, kind, to_id)"},
 		{name: "wrong foreign key", table: "coverage", old: "REFERENCES scans(id)", replacement: "REFERENCES scans(status)"},
 		{name: "wrong check", table: "asset_state", old: "CHECK (asset_index >= 0)", replacement: "CHECK (asset_index >= -1)"},
+		{name: "split composite foreign key", table: "asset_state", old: "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)", replacement: "FOREIGN KEY (asset_id) REFERENCES assets(asset_id), FOREIGN KEY (scan_id) REFERENCES assets(scan_id)"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(privateTempDir(t), "state.db")

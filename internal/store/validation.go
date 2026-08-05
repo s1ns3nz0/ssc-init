@@ -24,15 +24,18 @@ var sensitiveValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bnpm_[A-Za-z0-9]{20,}\b`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
 	regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`),
-	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`),
-	regexp.MustCompile(`(?i)\b(?:authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*\S+`),
-	regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*\s*=\s*\S+`),
-	regexp.MustCompile(`(?:^|[\s,;])(?:env[._-])?[A-Z_][A-Z0-9_]{1,63}\s*=\s*\S+`),
 }
 
 var embeddedURIPattern = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
 var structuredSecretAssignment = regexp.MustCompile(`(?i)(?:^|[?&#;,\s])(?:access[_-]?token|refresh[_-]?token|authorization|bearer|token|password|passwd|secret|api[_-]?key|credential|env)\s*[:=]\s*([^?&#;,\s]+)`)
 var safeKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+var sensitiveAssignments = []*regexp.Regexp{
+	structuredSecretAssignment,
+	regexp.MustCompile(`(?i)\bBearer\s+(\S+)`),
+	regexp.MustCompile(`(?i)\b(?:authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*(\S+)`),
+	regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*\s*=\s*(\S+)`),
+	regexp.MustCompile(`(?:^|[\s,;])(?:env[._-])?[A-Z_][A-Z0-9_]{1,63}\s*=\s*(\S+)`),
+}
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	for field, value := range map[string]string{
@@ -141,7 +144,7 @@ func validateAsset(asset model.Asset) error {
 			if err := validateSafeKeyList(value); err != nil {
 				return ErrSensitiveSnapshot
 			}
-		} else if metadataKeyCarriesSecret(key) && value != "" {
+		} else if metadataKeyCarriesSecret(key) && value != "" && !isRedactedPlaceholder(value) {
 			return ErrSensitiveSnapshot
 		}
 		if err := validateOptionalString("asset metadata value", value); err != nil {
@@ -192,26 +195,22 @@ func validateOptionalString(field, value string) error {
 }
 
 func containsSensitiveValue(value string) bool {
-	value = strings.ReplaceAll(value, "[redacted]", "")
+	if isRedactedPlaceholder(value) {
+		return false
+	}
 	for _, pattern := range sensitiveValuePatterns {
 		if pattern.MatchString(value) {
 			return true
 		}
 	}
-	for _, match := range structuredSecretAssignment.FindAllStringSubmatch(value, -1) {
-		if len(match) == 2 && match[1] != "" && !strings.EqualFold(match[1], "redacted") {
-			return true
-		}
-	}
-	if sensitiveURI(value) {
-		return true
-	}
+	plainValue := value
 	for _, candidate := range embeddedURIPattern.FindAllString(value, -1) {
 		if sensitiveURI(candidate) {
 			return true
 		}
+		plainValue = strings.ReplaceAll(plainValue, candidate, "")
 	}
-	return false
+	return containsSensitiveAssignment(plainValue)
 }
 
 func sensitiveURI(value string) bool {
@@ -225,7 +224,7 @@ func sensitiveURI(value string) bool {
 		for key, values := range parsed.Query() {
 			if sensitiveQueryKey(key) {
 				for _, queryValue := range values {
-					if queryValue != "" && queryValue != "[redacted]" && queryValue != "redacted" {
+					if queryValue != "" && !isRedactedPlaceholder(queryValue) {
 						return true
 					}
 				}
@@ -238,14 +237,27 @@ func sensitiveURI(value string) bool {
 					return true
 				}
 			}
-			for _, match := range structuredSecretAssignment.FindAllStringSubmatch("&"+fragment, -1) {
-				if len(match) == 2 && match[1] != "" && !strings.EqualFold(match[1], "redacted") {
-					return true
-				}
+			if containsSensitiveAssignment("&" + fragment) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func containsSensitiveAssignment(value string) bool {
+	for _, pattern := range sensitiveAssignments {
+		for _, match := range pattern.FindAllStringSubmatch(value, -1) {
+			if len(match) == 2 && match[1] != "" && !isRedactedPlaceholder(match[1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isRedactedPlaceholder(value string) bool {
+	return strings.EqualFold(value, "redacted") || strings.EqualFold(value, "[redacted]")
 }
 
 func credentialLikeUser(username string) bool {
@@ -302,6 +314,9 @@ func safeListMetadataKey(key string) bool {
 }
 
 func validateSafeKeyList(value string) error {
+	if isRedactedPlaceholder(value) {
+		return nil
+	}
 	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\r\n\t =;:/?#&") || containsSensitiveValue(value) {
 		return ErrSensitiveSnapshot
 	}
