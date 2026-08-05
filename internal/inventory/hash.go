@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -32,20 +33,31 @@ func HashFile(ctx context.Context, filesystem platform.FileSystem, path string, 
 		return "", model.HashUnavailable, err
 	}
 	absolute = filepath.Clean(absolute)
-	directory, name := filepath.Dir(absolute), filepath.Base(absolute)
-	if name == "." || name == string(filepath.Separator) {
+	volumeRoot := filepath.VolumeName(absolute) + string(filepath.Separator)
+	relative, err := filepath.Rel(volumeRoot, absolute)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", model.HashUnavailable, platform.ErrUnsafeRootedPath
 	}
+	components := strings.Split(relative, string(filepath.Separator))
+	name := components[len(components)-1]
 
-	root, err := rooted.OpenRoot(directory)
+	root, err := rooted.OpenRoot(volumeRoot)
 	if err != nil {
 		return "", model.HashUnavailable, err
 	}
 	defer root.Close()
+	parent := root
+	if len(components) > 1 {
+		parent, err = platform.OpenVerifiedRoot(ctx, root, components[:len(components)-1]...)
+		if err != nil {
+			return "", model.HashUnavailable, err
+		}
+		defer parent.Close()
+	}
 	if err := ctx.Err(); err != nil {
 		return "", model.HashUnavailable, err
 	}
-	file, _, _, err := platform.OpenVerifiedFile(root, name)
+	file, _, _, err := platform.OpenVerifiedFile(parent, name)
 	if err != nil {
 		return "", model.HashUnavailable, err
 	}

@@ -3,15 +3,13 @@ package inventory
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"sort"
-	"strings"
-	"unicode"
 
 	"github.com/ssc-init/ssc-init/internal/model"
 )
-
-const maxConflictComponentRunes = 256
 
 // Build merges collector output without mutating the supplied results.
 func Build(results []model.CollectorResult) model.Inventory {
@@ -70,7 +68,7 @@ func Build(results []model.CollectorResult) model.Inventory {
 				inventory.Errors = append(inventory.Errors, model.CoverageError{
 					Code:    "metadata-conflict",
 					Message: "conflicting metadata values omitted",
-					Path:    sanitizeConflictComponent(id) + "#" + sanitizeConflictComponent(key),
+					Path:    conflictFingerprintPath(id, key),
 				})
 				continue
 			}
@@ -187,16 +185,8 @@ func deterministicAssetsByID(assets []model.Asset) map[string]model.Asset {
 	return byID
 }
 
-func sanitizeConflictComponent(value string) string {
-	value = strings.Map(func(character rune) rune {
-		if unicode.IsControl(character) {
-			return '?'
-		}
-		return character
-	}, value)
-	runes := []rune(value)
-	if len(runes) > maxConflictComponentRunes {
-		return string(runes[:maxConflictComponentRunes])
-	}
-	return value
+func conflictFingerprintPath(assetID, metadataKey string) string {
+	assetDigest := sha256.Sum256([]byte(assetID))
+	keyDigest := sha256.Sum256([]byte(metadataKey))
+	return fmt.Sprintf("asset-sha256:%x/metadata-key-sha256:%x", assetDigest, keyDigest)
 }

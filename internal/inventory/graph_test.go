@@ -1,7 +1,9 @@
 package inventory
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -79,18 +81,45 @@ func TestBuildNormalizesDeterministicallyWithoutMutatingInput(t *testing.T) {
 }
 
 func TestBuildSortsMetadataConflictsByAssetAndKey(t *testing.T) {
-	got := Build([]model.CollectorResult{{Assets: []model.Asset{
-		{ID: "z", Metadata: map[string]string{"b": "1", "a": "1"}},
-		{ID: "z", Metadata: map[string]string{"b": "2", "a": "2"}},
-		{ID: "a", Metadata: map[string]string{"z": "1"}},
-		{ID: "a", Metadata: map[string]string{"z": "2"}},
-	}}})
+	homeMarker := "/Users/alice/private-home"
+	tokenMarker := "ghp_RAW_TOKEN_MARKER"
+	assetA := "asset-a:" + homeMarker + ":" + tokenMarker
+	assetZ := "asset-z:" + homeMarker + ":" + tokenMarker
+	keyA := "metadata-a:" + homeMarker + ":" + tokenMarker
+	keyB := "metadata-b:" + homeMarker + ":" + tokenMarker
+	keyZ := "metadata-z:" + homeMarker + ":" + tokenMarker
+	assets := []model.Asset{
+		{ID: assetZ, Metadata: map[string]string{keyB: "1", keyA: "1"}},
+		{ID: assetZ, Metadata: map[string]string{keyB: "2", keyA: "2"}},
+		{ID: assetA, Metadata: map[string]string{keyZ: "1"}},
+		{ID: assetA, Metadata: map[string]string{keyZ: "2"}},
+	}
+	got := Build([]model.CollectorResult{{Assets: assets}})
 	if len(got.Errors) != 3 {
 		t.Fatalf("errors=%#v", got.Errors)
 	}
-	paths := got.Errors[0].Path + "," + got.Errors[1].Path + "," + got.Errors[2].Path
-	if paths != "a#z,z#a,z#b" {
-		t.Fatalf("conflict paths=%q", paths)
+	permuted := Build([]model.CollectorResult{{Assets: []model.Asset{assets[3], assets[1], assets[2], assets[0]}}})
+	if !reflect.DeepEqual(got.Errors, permuted.Errors) {
+		t.Fatalf("permutation changed errors:\nfirst=%#v\n got=%#v", got.Errors, permuted.Errors)
+	}
+	wantPaths := []string{
+		wantConflictFingerprintPath(assetA, keyZ),
+		wantConflictFingerprintPath(assetZ, keyA),
+		wantConflictFingerprintPath(assetZ, keyB),
+	}
+	for index, want := range wantPaths {
+		if got.Errors[index].Path != want {
+			t.Fatalf("error[%d].Path=%q want=%q", index, got.Errors[index].Path, want)
+		}
+	}
+	encoded, err := json.Marshal(got.Errors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawMarker := range []string{"/Users/", "private-home", "ghp_", "RAW_TOKEN_MARKER", homeMarker, tokenMarker, assetA, assetZ, keyA, keyB, keyZ} {
+		if strings.Contains(string(encoded), rawMarker) {
+			t.Fatalf("conflict errors leaked %q: %s", rawMarker, encoded)
+		}
 	}
 }
 
@@ -143,4 +172,10 @@ func cloneCollectorResults(in []model.CollectorResult) []model.CollectorResult {
 		out[index].Errors = append([]model.CoverageError(nil), result.Errors...)
 	}
 	return out
+}
+
+func wantConflictFingerprintPath(assetID, metadataKey string) string {
+	assetDigest := sha256.Sum256([]byte(assetID))
+	keyDigest := sha256.Sum256([]byte(metadataKey))
+	return fmt.Sprintf("asset-sha256:%x/metadata-key-sha256:%x", assetDigest, keyDigest)
 }
