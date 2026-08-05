@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -25,6 +26,17 @@ const (
 )
 
 var errInvalidManifest = errors.New("invalid IDE extension manifest")
+
+var highConfidenceCredentialPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9_])github_pat_[A-Za-z0-9_]{50,120}([^A-Za-z0-9_]|$)`),
+	regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{20,}([^A-Za-z0-9-]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9])sk-(?:ant-)?[A-Za-z0-9_-]{20,}([^A-Za-z0-9_-]|$)`),
+	regexp.MustCompile(`(^|[^A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}([^A-Z0-9]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9])npm_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}([^A-Za-z0-9_-]|$)`),
+	regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`),
+}
 
 type vscodeManifest struct {
 	Name             string                     `json:"name"`
@@ -350,6 +362,9 @@ func sanitizeSelectedMetadata(home, value string, redactSensitiveName bool) (str
 		return "", true
 	}
 	normalized = redactHomeText(home, normalized)
+	if containsHighConfidenceCredential(normalized) {
+		return redactedMetadata, true
+	}
 	if sanitized, found := sanitizeEmbeddedMetadataURL(home, normalized); found {
 		if len(sanitized) > maxMetadataLength {
 			return redactedMetadata, true
@@ -360,6 +375,15 @@ func sanitizeSelectedMetadata(home, value string, redactSensitiveName bool) (str
 		return redactedMetadata, true
 	}
 	return normalized, true
+}
+
+func containsHighConfidenceCredential(value string) bool {
+	for _, pattern := range highConfidenceCredentialPatterns {
+		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeEmbeddedMetadataURL(home, value string) (string, bool) {

@@ -194,16 +194,32 @@ func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.Roo
 	defer jetBrainsRoot.Close()
 
 	budget := newEntryBudget(maxJetBrainsEntries)
+	limitReported := false
+	reportEntryLimit := func() {
+		if limitReported {
+			return
+		}
+		limitReported = true
+		result.Errors = append(result.Errors, coverageError("entry_limit", "JetBrains plugin entry limit reached", home, rootPath))
+	}
 	products, err := budget.readDirectory(ctx, jetBrainsRoot)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		if errors.Is(err, errDirectoryEntryLimit) {
+			reportEntryLimit()
+			return nil
+		}
 		appendJetBrainsTraversalError(err, home, rootPath, result)
 	}
-	for _, product := range products {
+	for productIndex, product := range products {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if budget.remaining == 0 {
+			reportEntryLimit()
+			return nil
 		}
 		productPath := filepath.Join(rootPath, product.Name())
 		productRoot, ok := openChildDirectory(ctx, jetBrainsRoot, product.Name(), home, productPath, result)
@@ -225,13 +241,17 @@ func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.Roo
 			continue
 		}
 		plugins, readErr := budget.readDirectory(ctx, pluginsRoot)
+		stopAfterPlugins := false
 		if readErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				_ = pluginsRoot.Close()
 				return ctxErr
 			}
-			appendJetBrainsTraversalError(readErr, home, filepath.Join(productPath, "plugins"), result)
-			if !errors.Is(readErr, errDirectoryEntryLimit) {
+			if errors.Is(readErr, errDirectoryEntryLimit) {
+				reportEntryLimit()
+				stopAfterPlugins = true
+			} else {
+				appendJetBrainsTraversalError(readErr, home, filepath.Join(productPath, "plugins"), result)
 				_ = pluginsRoot.Close()
 				continue
 			}
@@ -279,6 +299,10 @@ func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.Roo
 			assets[asset.ID] = asset
 		}
 		_ = pluginsRoot.Close()
+		if stopAfterPlugins || budget.remaining == 0 && productIndex < len(products)-1 {
+			reportEntryLimit()
+			return nil
+		}
 	}
 	return nil
 }

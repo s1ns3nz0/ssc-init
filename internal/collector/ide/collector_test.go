@@ -281,6 +281,55 @@ func TestCollectorSanitizesSelectedVSCodeManifestMetadata(t *testing.T) {
 	}
 }
 
+func TestCollectorRedactsStandaloneHighConfidenceCredentialFormats(t *testing.T) {
+	home := t.TempDir()
+	tokens := []string{
+		"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567",
+		"xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx",
+		"sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd",
+		"sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd",
+		"AKIAABCDEFGHIJKLMNOP",
+		"ASIAQRSTUVWXYZ012345",
+		"npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQtdXNlciJ9.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd",
+		"-----BEGIN PRIVATE KEY-----",
+	}
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "tokens", "package.json"), fmt.Sprintf(`{
+		"name":"tokens","publisher":"acme","version":"1.0.0",
+		"main":"https://example.test/%s/extension.js",
+		"activationEvents":["onCommand:acme.safe","event:ghp_short","hash:0123456789abcdef0123456789abcdef","event:%s","event:%s","event:%s","event:%s","event:%s"],
+		"contributes":{"commands":{},%q:{},%q:{}}
+	}`, tokens[0], tokens[2], tokens[3], tokens[4], tokens[5], tokens[6], tokens[7], tokens[8]))
+	writeIDEFile(t, filepath.Join(home, ".cursor", "extensions", "browser-token", "package.json"), fmt.Sprintf(`{
+		"name":"browser-token","publisher":"acme","version":"1.0.0",
+		"browser":"https://example.test/browser.js?artifact=%s",
+		"activationEvents":[%q],"capabilities":{"virtualWorkspaces":{}}
+	}`, tokens[1], tokens[9]))
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.tokens@1.0.0")
+	if main.Metadata["entry_point"] != redactedMetadata || !strings.Contains(main.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(main.Metadata["activation_events"], "event:ghp_short") || !strings.Contains(main.Metadata["activation_events"], "hash:0123456789abcdef0123456789abcdef") || !strings.Contains(main.Metadata["activation_events"], redactedMetadata) || !strings.Contains(main.Metadata["capabilities"], "commands") {
+		t.Fatalf("main metadata=%v", main.Metadata)
+	}
+	browser := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser-token@1.0.0")
+	if browser.Metadata["entry_point"] != redactedMetadata || browser.Metadata["activation_events"] != redactedMetadata || browser.Metadata["capabilities"] != "virtualWorkspaces" {
+		t.Fatalf("browser metadata=%v", browser.Metadata)
+	}
+	encoded, err := json.Marshal(got.Assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range tokens {
+		if strings.Contains(string(encoded), token) {
+			t.Fatalf("credential signature persisted: %s", encoded)
+		}
+	}
+}
+
 func TestCollectorHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -459,6 +508,47 @@ func TestJetBrainsEntryBudgetChargesEachEnumeratedEntryOnce(t *testing.T) {
 	}
 }
 
+func TestCollectorStopsJetBrainsEnumerationGloballyAtExactEntryLimit(t *testing.T) {
+	home := t.TempDir()
+	jetBrains := filepath.Join(home, "Library", "Application Support", "JetBrains")
+	alphaPlugins := filepath.Join(jetBrains, "Alpha", "plugins")
+	zuluPlugins := filepath.Join(jetBrains, "Zulu", "plugins")
+	writeIDEFile(t, filepath.Join(alphaPlugins, "zzzz-valid", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.boundary</id><name>Boundary</name><version>1.0.0</version></idea-plugin>`)
+	if err := os.MkdirAll(zuluPlugins, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadDir(alphaPlugins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alphaEntries := make([]os.DirEntry, 0, maxJetBrainsEntries-2)
+	for index := 0; index < maxJetBrainsEntries-3; index++ {
+		alphaEntries = append(alphaEntries, generatedEntry{name: fmt.Sprintf("aaaa-synthetic-%05d", index)})
+	}
+	alphaEntries = append(alphaEntries, actual[0])
+	zuluReads := 0
+	env := testutil.Environment(t, home)
+	env.FS = jetBrainsCapFileSystem{
+		OSFileSystem: platform.OSFileSystem{},
+		alphaPlugins: alphaPlugins,
+		alphaEntries: alphaEntries,
+		zuluPlugins:  zuluPlugins,
+		zuluReads:    &zuluReads,
+	}
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:jetbrains:org.example.boundary@1.0.0")
+	if zuluReads != 0 {
+		t.Fatalf("later plugins directory read %d times", zuluReads)
+	}
+	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Code != "entry_limit" || got.Errors[0].Path != "$HOME/Library/Application Support/JetBrains" {
+		t.Fatalf("result=%+v", got)
+	}
+}
+
 func writeIDEFile(t *testing.T, path, contents string) {
 	t.Helper()
 	writeIDEBytes(t, path, []byte(contents))
@@ -493,6 +583,88 @@ type boundedVSFileSystem struct {
 	platform.OSFileSystem
 	target  string
 	entries []os.DirEntry
+}
+
+type jetBrainsCapFileSystem struct {
+	platform.OSFileSystem
+	alphaPlugins string
+	alphaEntries []os.DirEntry
+	zuluPlugins  string
+	zuluReads    *int
+}
+
+func (f jetBrainsCapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &jetBrainsCapRoot{
+		RootedDirectory: root,
+		current:         name,
+		alphaPlugins:    f.alphaPlugins,
+		alphaEntries:    f.alphaEntries,
+		zuluPlugins:     f.zuluPlugins,
+		zuluReads:       f.zuluReads,
+	}, nil
+}
+
+type jetBrainsCapRoot struct {
+	platform.RootedDirectory
+	current      string
+	alphaPlugins string
+	alphaEntries []os.DirEntry
+	zuluPlugins  string
+	zuluReads    *int
+}
+
+func (r *jetBrainsCapRoot) Lstat(name string) (os.FileInfo, error) {
+	if r.current == r.alphaPlugins && strings.HasPrefix(name, "aaaa-synthetic-") {
+		return generatedInfo{}, nil
+	}
+	return r.RootedDirectory.Lstat(name)
+}
+
+func (r *jetBrainsCapRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &jetBrainsCapRoot{
+		RootedDirectory: child,
+		current:         filepath.Join(r.current, name),
+		alphaPlugins:    r.alphaPlugins,
+		alphaEntries:    r.alphaEntries,
+		zuluPlugins:     r.zuluPlugins,
+		zuluReads:       r.zuluReads,
+	}, nil
+}
+
+func (r *jetBrainsCapRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if name != "." {
+		return file, nil
+	}
+	switch r.current {
+	case r.alphaPlugins:
+		return &sliceDirectory{RootedFile: file, entries: r.alphaEntries}, nil
+	case r.zuluPlugins:
+		return &countingDirectory{RootedFile: file, reads: r.zuluReads}, nil
+	default:
+		return file, nil
+	}
+}
+
+type countingDirectory struct {
+	platform.RootedFile
+	reads *int
+}
+
+func (d *countingDirectory) ReadDir(int) ([]os.DirEntry, error) {
+	*d.reads++
+	return nil, io.EOF
 }
 
 func (f boundedVSFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
