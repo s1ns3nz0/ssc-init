@@ -12,3 +12,9 @@ func TestRedactHomeOnlyOnPathBoundary(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestRedactHomeRedactsRootHome(t *testing.T) {
+	if got := RedactHome("/", "/private/tmp/file"); got != "$HOME/private/tmp/file" {
+		t.Fatal(got)
+	}
+}

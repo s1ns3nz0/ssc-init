@@ -32,6 +32,9 @@ func RedactHome(home, value string) string {
 	if value == home {
 		return "$HOME"
 	}
+	if home == string(filepath.Separator) && strings.HasPrefix(value, home) {
+		return "$HOME" + value
+	}
 	if strings.HasPrefix(value, home) && len(value) > len(home) && value[len(home)] == filepath.Separator {
 		return "$HOME" + value[len(home):]
 	}
