@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
@@ -20,12 +21,16 @@ const busyTimeoutMilliseconds = 5000
 // testHookAfterDatabaseGuard is a deterministic test seam for pathname replacement.
 var testHookAfterDatabaseGuard func(string) error
 
+// ErrStoreClosed is returned by operations started after Close takes ownership.
+var ErrStoreClosed = errors.New("snapshot store is closed")
+
 // Store is a SQLite-backed immutable snapshot store.
 //
 // The retained guard detects replacement between the verified open and SQLite's
 // first pathname open. Defending against later malicious same-UID replacement or
 // a hostile custom SQLite VFS is outside the foundation store's threat boundary.
 type Store struct {
+	mu    sync.RWMutex
 	db    *sql.DB
 	guard *os.File
 	path  string
@@ -99,6 +104,8 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var closeErrors []error
 	if s.db != nil {
 		if err := secureSQLiteFiles(s.path, s.guard); err != nil {
@@ -116,6 +123,18 @@ func (s *Store) Close() error {
 		s.guard = nil
 	}
 	return errors.Join(closeErrors...)
+}
+
+func (s *Store) beginOperation() (*sql.DB, *os.File, func(), error) {
+	if s == nil {
+		return nil, nil, nil, ErrStoreClosed
+	}
+	s.mu.RLock()
+	if s.db == nil || s.guard == nil {
+		s.mu.RUnlock()
+		return nil, nil, nil, ErrStoreClosed
+	}
+	return s.db, s.guard, s.mu.RUnlock, nil
 }
 
 func sqliteDSN(path string) string {

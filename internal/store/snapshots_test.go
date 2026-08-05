@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -437,6 +439,93 @@ func TestSaveRejectsSensitiveSnapshotsWithoutRows(t *testing.T) {
 	})
 }
 
+func TestSecretValidationURIAndSafeListBoundaries(t *testing.T) {
+	t.Run("safe username-only URIs and key lists", func(t *testing.T) {
+		s := openTestStore(t)
+		scan := testScan("safe-boundaries", time.Unix(2, 0).UTC())
+		scan.Coverage = []model.CollectorResult{{
+			Collector: "mcp", Status: model.CoverageComplete,
+			Assets: []model.Asset{{ID: "coverage", Source: "ssh://git@github.com/repo"}},
+		}}
+		inventory := model.Inventory{Assets: []model.Asset{{
+			ID: "inventory", Source: "https://user@example.test/path", Metadata: map[string]string{"env_keys": "GITHUB_TOKEN,HOME"},
+		}}}
+		if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, tt := range []struct {
+		name     string
+		coverage string
+		metadata string
+	}{
+		{name: "fragment access token", coverage: "https://example.test/callback#access_token=raw-value"},
+		{name: "fragment bearer", coverage: "https://example.test/callback#authorization=Bearer%20abcdefghijklmnop"},
+		{name: "malformed safe list assignment", metadata: "GITHUB_TOKEN=raw-secret"},
+		{name: "token marker in safe list", metadata: "ghp_123456789012345678901234567890123456"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan := testScan("unsafe-boundary", time.Unix(2, 0).UTC())
+			inventory := model.Inventory{Assets: []model.Asset{{ID: "inventory", Metadata: map[string]string{"env_keys": tt.metadata}}}}
+			if tt.coverage != "" {
+				scan.Coverage = []model.CollectorResult{{Collector: "mcp", Status: model.CoverageComplete, Assets: []model.Asset{{ID: "coverage", Source: tt.coverage}}}}
+				inventory.Assets[0].Metadata = nil
+			}
+			if err := s.SaveScan(context.Background(), scan, inventory); !errors.Is(err, ErrSensitiveSnapshot) {
+				t.Fatalf("error = %v", err)
+			}
+			assertNoSnapshotRows(t, s)
+		})
+	}
+}
+
+func TestConcurrentCloseAndOperations(t *testing.T) {
+	s := openTestStore(t)
+	var sequence atomic.Int64
+	var wg sync.WaitGroup
+	errorsOut := make(chan error, 256)
+	for worker := 0; worker < 4; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for attempt := 0; attempt < 20; attempt++ {
+				id := fmt.Sprintf("scan-%d", sequence.Add(1))
+				err := s.SaveScan(context.Background(), testScan(id, time.Unix(sequence.Load()+10, 0).UTC()), model.Inventory{Assets: []model.Asset{{ID: id}}})
+				if err != nil && !errors.Is(err, ErrStoreClosed) {
+					errorsOut <- err
+				}
+				if _, _, err := s.LatestInventory(context.Background()); err != nil && !errors.Is(err, ErrStoreClosed) {
+					errorsOut <- err
+				}
+			}
+		}()
+	}
+	for closer := 0; closer < 8; closer++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.Close(); err != nil {
+				errorsOut <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errorsOut)
+	for err := range errorsOut {
+		t.Errorf("concurrent operation: %v", err)
+	}
+	if err := s.SaveScan(context.Background(), testScan("after-close", time.Unix(100, 0).UTC()), model.Inventory{}); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("SaveScan after close error = %v", err)
+	}
+	if _, _, err := s.LatestInventory(context.Background()); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("LatestInventory after close error = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("repeated Close error = %v", err)
+	}
+}
+
 func TestSaveRejectsInvalidShapeWithoutRows(t *testing.T) {
 	s := openTestStore(t)
 	invalid := model.Inventory{
@@ -493,6 +582,9 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 		{name: "gap", mutate: `DELETE FROM schema_migrations WHERE version = 2`},
 		{name: "future", mutate: `UPDATE schema_migrations SET version = 99 WHERE version = 3`},
 		{name: "missing table", mutate: `DROP TABLE coverage`},
+		{name: "extra column", mutate: `ALTER TABLE coverage ADD COLUMN unexpected TEXT`},
+		{name: "wrong index order", mutate: `DROP INDEX scans_latest_idx; CREATE INDEX scans_latest_idx ON scans(id, finished_at)`},
+		{name: "unexpected trigger", mutate: `CREATE TRIGGER unexpected_scan_trigger AFTER INSERT ON scans BEGIN SELECT 1; END`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -510,6 +602,44 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 			if reopened, err := Open(path); err == nil {
 				reopened.Close()
 				t.Fatal("malformed migration state unexpectedly opened")
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name, table, old, replacement string
+	}{
+		{name: "wrong type", table: "assets", old: "asset_json BLOB NOT NULL", replacement: "asset_json TEXT NOT NULL"},
+		{name: "wrong nullability", table: "scans", old: "status TEXT NOT NULL", replacement: "status TEXT"},
+		{name: "wrong default", table: "inventory_state", old: "asset_count INTEGER NOT NULL DEFAULT 0", replacement: "asset_count INTEGER NOT NULL DEFAULT 1"},
+		{name: "wrong primary key order", table: "relationships", old: "PRIMARY KEY (scan_id, from_id, kind, to_id)", replacement: "PRIMARY KEY (from_id, scan_id, kind, to_id)"},
+		{name: "wrong foreign key", table: "coverage", old: "REFERENCES scans(id)", replacement: "REFERENCES scans(status)"},
+		{name: "wrong check", table: "asset_state", old: "CHECK (asset_index >= 0)", replacement: "CHECK (asset_index >= -1)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(privateTempDir(t), "state.db")
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.db.Exec(`UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = ?`, tt.old, tt.replacement, tt.table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if affected, _ := result.RowsAffected(); affected != 1 {
+				t.Fatalf("affected=%d", affected)
+			}
+			if _, err := s.db.Exec(`PRAGMA writable_schema=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(path); err == nil {
+				reopened.Close()
+				t.Fatal("incompatible schema unexpectedly opened")
 			}
 		})
 	}

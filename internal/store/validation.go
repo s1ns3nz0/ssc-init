@@ -27,9 +27,12 @@ var sensitiveValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`(?i)\b(?:authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*\S+`),
 	regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*\s*=\s*\S+`),
+	regexp.MustCompile(`(?:^|[\s,;])(?:env[._-])?[A-Z_][A-Z0-9_]{1,63}\s*=\s*\S+`),
 }
 
-var embeddedURIPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
+var embeddedURIPattern = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+var structuredSecretAssignment = regexp.MustCompile(`(?i)(?:^|[?&#;,\s])(?:access[_-]?token|refresh[_-]?token|authorization|bearer|token|password|passwd|secret|api[_-]?key|credential|env)\s*[:=]\s*([^?&#;,\s]+)`)
+var safeKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	for field, value := range map[string]string{
@@ -134,7 +137,11 @@ func validateAsset(asset model.Asset) error {
 		if err := validateOptionalString("asset metadata key", key); err != nil {
 			return err
 		}
-		if metadataKeyCarriesSecret(key) && value != "" {
+		if safeListMetadataKey(key) {
+			if err := validateSafeKeyList(value); err != nil {
+				return ErrSensitiveSnapshot
+			}
+		} else if metadataKeyCarriesSecret(key) && value != "" {
 			return ErrSensitiveSnapshot
 		}
 		if err := validateOptionalString("asset metadata value", value); err != nil {
@@ -191,6 +198,11 @@ func containsSensitiveValue(value string) bool {
 			return true
 		}
 	}
+	for _, match := range structuredSecretAssignment.FindAllStringSubmatch(value, -1) {
+		if len(match) == 2 && match[1] != "" && !strings.EqualFold(match[1], "redacted") {
+			return true
+		}
+	}
 	if sensitiveURI(value) {
 		return true
 	}
@@ -206,7 +218,9 @@ func sensitiveURI(value string) bool {
 	parsed, err := url.Parse(value)
 	if err == nil && parsed.Scheme != "" && (parsed.Host != "" || parsed.Opaque != "") {
 		if parsed.User != nil {
-			return true
+			if _, hasPassword := parsed.User.Password(); hasPassword || credentialLikeUser(parsed.User.Username()) {
+				return true
+			}
 		}
 		for key, values := range parsed.Query() {
 			if sensitiveQueryKey(key) {
@@ -216,6 +230,34 @@ func sensitiveURI(value string) bool {
 					}
 				}
 			}
+		}
+		fragment, fragmentErr := url.QueryUnescape(parsed.Fragment)
+		if fragmentErr == nil && fragment != "" {
+			for _, pattern := range sensitiveValuePatterns {
+				if pattern.MatchString(fragment) {
+					return true
+				}
+			}
+			for _, match := range structuredSecretAssignment.FindAllStringSubmatch("&"+fragment, -1) {
+				if len(match) == 2 && match[1] != "" && !strings.EqualFold(match[1], "redacted") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func credentialLikeUser(username string) bool {
+	for _, pattern := range sensitiveValuePatterns[:7] {
+		if pattern.MatchString(username) {
+			return true
+		}
+	}
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(username))
+	for _, marker := range []string{"token", "secret", "password", "passwd", "credential", "authorization", "api_key", "access_key"} {
+		if strings.Contains(normalized, marker) {
+			return true
 		}
 	}
 	return false
@@ -247,6 +289,32 @@ func metadataKeyCarriesSecret(key string) bool {
 		return true
 	}
 	return false
+}
+
+func safeListMetadataKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(key))
+	switch normalized {
+	case "env_keys", "environment_keys", "token_keys", "secret_keys", "credential_keys":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateSafeKeyList(value string) error {
+	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\r\n\t =;:/?#&") || containsSensitiveValue(value) {
+		return ErrSensitiveSnapshot
+	}
+	items := strings.Split(value, ",")
+	if len(items) > 128 {
+		return ErrSensitiveSnapshot
+	}
+	for _, item := range items {
+		if !safeKeyName.MatchString(item) {
+			return ErrSensitiveSnapshot
+		}
+	}
+	return nil
 }
 
 func validCoverageStatus(status model.CoverageStatus) bool {

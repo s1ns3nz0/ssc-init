@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 var migrations = []string{
@@ -133,16 +135,22 @@ func applyMigrations(db *sql.DB) error {
 	return verifySchema(db)
 }
 
-var requiredColumns = map[string][]string{
-	"schema_migrations":  {"version", "applied_at"},
-	"scans":              {"id", "schema_version", "status", "started_at", "finished_at"},
-	"assets":             {"scan_id", "asset_id", "asset_json"},
-	"relationships":      {"scan_id", "from_id", "kind", "to_id"},
-	"coverage":           {"scan_id", "collector", "result_json"},
-	"inventory_state":    {"scan_id", "assets_nil", "relationships_nil", "errors_nil", "asset_count", "relationship_count", "error_count"},
-	"asset_state":        {"scan_id", "asset_id", "asset_index", "metadata_nil"},
-	"relationship_state": {"scan_id", "from_id", "kind", "to_id", "relationship_index"},
-	"inventory_errors":   {"scan_id", "error_index", "error_json"},
+type columnSpec struct {
+	name, typeName, defaultSQL string
+	notNull, primaryKey        int
+	hasDefault                 bool
+}
+
+var requiredColumns = map[string][]columnSpec{
+	"schema_migrations":  {{"version", "INTEGER", "", 0, 1, false}, {"applied_at", "TEXT", "", 1, 0, false}},
+	"scans":              {{"id", "TEXT", "", 0, 1, false}, {"schema_version", "TEXT", "", 1, 0, false}, {"status", "TEXT", "", 1, 0, false}, {"started_at", "TEXT", "", 1, 0, false}, {"finished_at", "TEXT", "", 1, 0, false}},
+	"assets":             {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_json", "BLOB", "", 1, 0, false}},
+	"relationships":      {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}},
+	"coverage":           {{"scan_id", "TEXT", "", 1, 1, false}, {"collector", "TEXT", "", 1, 2, false}, {"result_json", "BLOB", "", 1, 0, false}},
+	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}},
+	"asset_state":        {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}},
+	"relationship_state": {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}, {"relationship_index", "INTEGER", "", 1, 0, false}},
+	"inventory_errors":   {{"scan_id", "TEXT", "", 1, 1, false}, {"error_index", "INTEGER", "", 1, 2, false}, {"error_json", "BLOB", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -151,84 +159,189 @@ func verifySchema(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("inspect required table %s: %w", table, err)
 		}
-		columns := make(map[string]struct{})
-		primaryKeyColumns := make(map[string]int)
+		var actual []columnSpec
 		for rows.Next() {
 			var cid, notNull, primaryKey int
 			var name, columnType string
-			var defaultValue any
+			var defaultValue sql.NullString
 			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan required table %s: %w", table, err)
 			}
-			columns[name] = struct{}{}
-			if primaryKey > 0 {
-				primaryKeyColumns[name] = primaryKey
-			}
+			actual = append(actual, columnSpec{name: name, typeName: normalizeType(columnType), defaultSQL: defaultValue.String, notNull: notNull, primaryKey: primaryKey, hasDefault: defaultValue.Valid})
 		}
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("close required table %s inspection: %w", table, err)
 		}
-		for _, column := range expected {
-			if _, ok := columns[column]; !ok {
-				return fmt.Errorf("required schema column %s.%s is missing", table, column)
+		if len(actual) != len(expected) {
+			return fmt.Errorf("required schema table %s has unexpected column count", table)
+		}
+		for index := range expected {
+			if actual[index] != expected[index] {
+				return fmt.Errorf("required schema table %s has incompatible column %d", table, index)
 			}
 		}
-		if len(primaryKeyColumns) == 0 {
-			return fmt.Errorf("required primary key for %s is missing", table)
+		if err := verifyTableChecksAndTriggers(db, table); err != nil {
+			return err
 		}
 	}
-	for _, table := range []string{"scans", "assets", "relationships", "coverage", "inventory_state", "asset_state", "relationship_state", "inventory_errors"} {
+	if err := verifyForeignKeys(db); err != nil {
+		return err
+	}
+	if err := verifyIndices(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeType(value string) string {
+	return strings.ToUpper(strings.Join(strings.Fields(value), " "))
+}
+
+var requiredChecks = map[string][]string{
+	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)"},
+	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
+	"relationship_state": {"check(relationship_index>=0)"},
+	"inventory_errors":   {"check(error_index>=0)"},
+}
+
+func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
+	var createSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&createSQL); err != nil {
+		return fmt.Errorf("read required table %s definition: %w", table, err)
+	}
+	normalized := strings.ToLower(strings.NewReplacer(" ", "", "\n", "", "\r", "", "\t", "", `"`, "", "`", "", "[", "", "]", "").Replace(createSQL))
+	expected := requiredChecks[table]
+	if strings.Count(normalized, "check(") != len(expected) {
+		return fmt.Errorf("required schema table %s has incompatible checks", table)
+	}
+	for _, check := range expected {
+		if !strings.Contains(normalized, check) {
+			return fmt.Errorf("required schema table %s has incompatible checks", table)
+		}
+	}
+	var triggerCount int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`, table).Scan(&triggerCount); err != nil || triggerCount != 0 {
+		return fmt.Errorf("required schema table %s has unexpected triggers", table)
+	}
+	return nil
+}
+
+type foreignKeySpec struct{ table, from, to, onUpdate, onDelete, match string }
+
+var requiredForeignKeys = map[string][]foreignKeySpec{
+	"assets":             {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+	"relationships":      {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+	"coverage":           {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+	"inventory_state":    {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+	"asset_state":        {{"assets", "scan_id", "scan_id", "NO ACTION", "NO ACTION", "NONE"}, {"assets", "asset_id", "asset_id", "NO ACTION", "NO ACTION", "NONE"}},
+	"relationship_state": {{"relationships", "scan_id", "scan_id", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "from_id", "from_id", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "kind", "kind", "NO ACTION", "NO ACTION", "NONE"}, {"relationships", "to_id", "to_id", "NO ACTION", "NO ACTION", "NONE"}},
+	"inventory_errors":   {{"scans", "scan_id", "id", "NO ACTION", "NO ACTION", "NONE"}},
+}
+
+func verifyForeignKeys(db *sql.DB) error {
+	for table := range requiredColumns {
+		rows, err := db.Query(`PRAGMA foreign_key_list("` + table + `")`)
+		if err != nil {
+			return fmt.Errorf("inspect foreign keys for %s: %w", table, err)
+		}
+		var actual []foreignKeySpec
+		for rows.Next() {
+			var id, sequence int
+			var spec foreignKeySpec
+			if err := rows.Scan(&id, &sequence, &spec.table, &spec.from, &spec.to, &spec.onUpdate, &spec.onDelete, &spec.match); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan foreign keys for %s: %w", table, err)
+			}
+			actual = append(actual, spec)
+		}
+		rows.Close()
+		expected := requiredForeignKeys[table]
+		if len(actual) != len(expected) {
+			return fmt.Errorf("required schema table %s has incompatible foreign keys", table)
+		}
+		for index := range expected {
+			if actual[index] != expected[index] {
+				return fmt.Errorf("required schema table %s has incompatible foreign keys", table)
+			}
+		}
+	}
+	return nil
+}
+
+var requiredIndexFingerprints = map[string][]string{
+	"schema_migrations":  {},
+	"scans":              {"c:0:finished_at,id", "pk:1:id"},
+	"assets":             {"pk:1:scan_id,asset_id"},
+	"relationships":      {"pk:1:scan_id,from_id,kind,to_id"},
+	"coverage":           {"pk:1:scan_id,collector"},
+	"inventory_state":    {"pk:1:scan_id"},
+	"asset_state":        {"pk:1:scan_id,asset_id", "u:1:scan_id,asset_index"},
+	"relationship_state": {"pk:1:scan_id,from_id,kind,to_id", "u:1:scan_id,relationship_index"},
+	"inventory_errors":   {"pk:1:scan_id,error_index"},
+}
+
+func verifyIndices(db *sql.DB) error {
+	for table, expected := range requiredIndexFingerprints {
 		rows, err := db.Query(`PRAGMA index_list("` + table + `")`)
 		if err != nil {
-			return fmt.Errorf("inspect required indices for %s: %w", table, err)
+			return fmt.Errorf("inspect indices for %s: %w", table, err)
 		}
-		foundPrimaryKey := false
+		type indexEntry struct {
+			name, origin string
+			unique       int
+		}
+		var entries []indexEntry
 		for rows.Next() {
 			var sequence, unique, partial int
 			var name, origin string
 			if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
 				rows.Close()
-				return fmt.Errorf("scan required indices for %s: %w", table, err)
+				return fmt.Errorf("scan indices for %s: %w", table, err)
 			}
-			if origin == "pk" {
-				foundPrimaryKey = true
+			entries = append(entries, indexEntry{name: name, origin: origin, unique: unique})
+		}
+		rows.Close()
+		var actual []string
+		for _, entry := range entries {
+			columns, err := indexColumns(db, entry.name)
+			if err != nil {
+				return err
 			}
+			actual = append(actual, fmt.Sprintf("%s:%d:%s", entry.origin, entry.unique, strings.Join(columns, ",")))
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("iterate required indices for %s: %w", table, err)
-		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("close required indices for %s: %w", table, err)
-		}
-		if !foundPrimaryKey {
-			return fmt.Errorf("required primary-key index for %s is missing", table)
+		sort.Strings(actual)
+		want := append([]string(nil), expected...)
+		sort.Strings(want)
+		if strings.Join(actual, "|") != strings.Join(want, "|") {
+			return fmt.Errorf("required schema table %s has incompatible indices", table)
 		}
 	}
 	var indexSQL string
-	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'scans_latest_idx'`).Scan(&indexSQL); err != nil || indexSQL == "" {
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'scans_latest_idx'`).Scan(&indexSQL); err != nil {
 		return errors.New("required schema index scans_latest_idx is missing")
 	}
-	rows, err := db.Query(`PRAGMA index_info("scans_latest_idx")`)
-	if err != nil {
-		return fmt.Errorf("inspect scans_latest_idx columns: %w", err)
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	if normalized != "create index scans_latest_idx on scans(finished_at desc, id desc)" {
+		return errors.New("required schema index scans_latest_idx is incompatible")
 	}
-	var indexColumns []string
+	return nil
+}
+
+func indexColumns(db *sql.DB, index string) ([]string, error) {
+	rows, err := db.Query(`PRAGMA index_info("` + strings.ReplaceAll(index, `"`, `""`) + `")`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect index columns: %w", err)
+	}
+	defer rows.Close()
+	var columns []string
 	for rows.Next() {
 		var sequence, cid int
 		var name string
 		if err := rows.Scan(&sequence, &cid, &name); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan scans_latest_idx columns: %w", err)
+			return nil, fmt.Errorf("scan index columns: %w", err)
 		}
-		indexColumns = append(indexColumns, name)
+		columns = append(columns, name)
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close scans_latest_idx inspection: %w", err)
-	}
-	if len(indexColumns) != 2 || indexColumns[0] != "finished_at" || indexColumns[1] != "id" {
-		return errors.New("required schema index scans_latest_idx has invalid columns")
-	}
-	return nil
+	return columns, rows.Err()
 }

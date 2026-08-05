@@ -20,7 +20,12 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 	if err := validateSnapshot(scan, inventory); err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	db, guard, release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin snapshot transaction: %w", err)
 	}
@@ -82,7 +87,7 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
-	return secureSQLiteFiles(s.path, s.guard)
+	return secureSQLiteFiles(s.path, guard)
 }
 
 // LatestInventory loads the newest inventory by finished time, breaking ties by scan ID.
@@ -90,8 +95,13 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	if err := ctx.Err(); err != nil {
 		return model.Inventory{}, false, err
 	}
+	db, _, release, err := s.beginOperation()
+	if err != nil {
+		return model.Inventory{}, false, err
+	}
+	defer release()
 	var scanID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&scanID)
+	err = db.QueryRowContext(ctx, `SELECT id FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&scanID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Inventory{}, false, nil
 	}
@@ -100,7 +110,7 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	}
 
 	var assetsNil, relationshipsNil, errorsNil, assetCount, relationshipCount, errorCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count FROM inventory_state WHERE scan_id = ?`, scanID).
+	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count FROM inventory_state WHERE scan_id = ?`, scanID).
 		Scan(&assetsNil, &relationshipsNil, &errorsNil, &assetCount, &relationshipCount, &errorCount); err != nil {
 		return model.Inventory{}, false, fmt.Errorf("load inventory state for scan %q: %w", scanID, err)
 	}
@@ -109,7 +119,7 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	}
 
 	inventory := model.Inventory{}
-	assets, err := s.loadAssets(ctx, scanID)
+	assets, err := loadAssets(ctx, db, scanID)
 	if err != nil {
 		return model.Inventory{}, false, err
 	}
@@ -121,7 +131,7 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	} else if len(assets) != 0 {
 		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: assets marked nil but rows exist", scanID)
 	}
-	relationships, err := s.loadRelationships(ctx, scanID)
+	relationships, err := loadRelationships(ctx, db, scanID)
 	if err != nil {
 		return model.Inventory{}, false, err
 	}
@@ -133,7 +143,7 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	} else if len(relationships) != 0 {
 		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: relationships marked nil but rows exist", scanID)
 	}
-	inventoryErrors, err := s.loadInventoryErrors(ctx, scanID)
+	inventoryErrors, err := loadInventoryErrors(ctx, db, scanID)
 	if err != nil {
 		return model.Inventory{}, false, err
 	}
@@ -148,8 +158,8 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	return inventory, true, nil
 }
 
-func (s *Store) loadAssets(ctx context.Context, scanID string) ([]model.Asset, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.asset_id, a.asset_json, st.asset_index, st.metadata_nil
+func loadAssets(ctx context.Context, db *sql.DB, scanID string) ([]model.Asset, error) {
+	rows, err := db.QueryContext(ctx, `SELECT a.asset_id, a.asset_json, st.asset_index, st.metadata_nil
 FROM assets a LEFT JOIN asset_state st ON st.scan_id = a.scan_id AND st.asset_id = a.asset_id
 WHERE a.scan_id = ? ORDER BY st.asset_index`, scanID)
 	if err != nil {
@@ -197,8 +207,8 @@ WHERE a.scan_id = ? ORDER BY st.asset_index`, scanID)
 	return assets, nil
 }
 
-func (s *Store) loadRelationships(ctx context.Context, scanID string) ([]model.Relationship, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.from_id, r.to_id, r.kind, st.relationship_index
+func loadRelationships(ctx context.Context, db *sql.DB, scanID string) ([]model.Relationship, error) {
+	rows, err := db.QueryContext(ctx, `SELECT r.from_id, r.to_id, r.kind, st.relationship_index
 FROM relationships r LEFT JOIN relationship_state st
 ON st.scan_id = r.scan_id AND st.from_id = r.from_id AND st.kind = r.kind AND st.to_id = r.to_id
 WHERE r.scan_id = ? ORDER BY st.relationship_index`, scanID)
@@ -232,8 +242,8 @@ WHERE r.scan_id = ? ORDER BY st.relationship_index`, scanID)
 	return relationships, nil
 }
 
-func (s *Store) loadInventoryErrors(ctx context.Context, scanID string) ([]model.CoverageError, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT error_index, error_json FROM inventory_errors WHERE scan_id = ? ORDER BY error_index`, scanID)
+func loadInventoryErrors(ctx context.Context, db *sql.DB, scanID string) ([]model.CoverageError, error) {
+	rows, err := db.QueryContext(ctx, `SELECT error_index, error_json FROM inventory_errors WHERE scan_id = ? ORDER BY error_index`, scanID)
 	if err != nil {
 		return nil, fmt.Errorf("query inventory errors for scan %q: %w", scanID, err)
 	}
