@@ -6,7 +6,7 @@
 
 ## 1. Product definition
 
-SSC Init is an open-source, snapshot-based developer supply-chain scanner for macOS laptops. Its expanded brand line is **“Software Supply Chain Security, Initialized.”** The repository, package, and CLI identifier is `ssc-init`; the primary tagline is **“Software supply chain security starts here.”**
+SSC Init is an open-source, snapshot-based developer supply-chain scanner for macOS laptops. Its expanded brand line is **“Software Supply Chain Security, Initialized.”** The repository, package, and CLI identifier is `ssc-init`; the primary tagline is **“Initialize Your Software Supply Chain Security.”**
 
 SSC Init inventories and analyzes developer-executable assets across the current user's environment without behaving like an EDR: it does not install kernel components, intercept network packets, recursively scan arbitrary personal files, or continuously monitor processes and filesystem events.
 
