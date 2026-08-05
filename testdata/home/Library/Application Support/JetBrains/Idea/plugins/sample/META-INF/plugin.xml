@@ -1,0 +1,5 @@
+<idea-plugin>
+  <id>org.example.sample</id>
+  <name>Sample Plugin</name>
+  <version>1.0.0</version>
+</idea-plugin>

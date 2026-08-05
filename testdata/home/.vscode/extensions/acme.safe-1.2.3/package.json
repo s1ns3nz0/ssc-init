@@ -1,0 +1,12 @@
+{
+  "name": "safe",
+  "publisher": "acme",
+  "version": "1.2.3",
+  "main": "dist/extension.js",
+  "activationEvents": ["onCommand:acme.safe.run"],
+  "contributes": {
+    "commands": [
+      {"command": "acme.safe.run", "title": "Run safely"}
+    ]
+  }
+}
