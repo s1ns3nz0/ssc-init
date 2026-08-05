@@ -126,11 +126,15 @@ func uniqueSorted(values []string) []string {
 }
 
 func directoryWritable(path string) bool {
+	return directoryWritableWith(path, os.Stat, unix.Access)
+}
+
+func directoryWritableWith(path string, stat func(string) (os.FileInfo, error), access func(string, uint32) error) bool {
 	current := filepath.Clean(path)
 	for {
-		info, err := os.Stat(current)
+		info, err := stat(current)
 		if err == nil {
-			return info.IsDir() && unix.Access(current, unix.W_OK) == nil
+			return info.IsDir() && access(current, unix.W_OK|unix.X_OK) == nil
 		}
 		if !os.IsNotExist(err) {
 			return false

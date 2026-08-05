@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/ssc-init/ssc-init/internal/cli"
@@ -28,20 +29,20 @@ func main() {
 func run(ctx context.Context, args []string) int {
 	app := cli.App{Version: version}
 	if exactArgs(args, "doctor", "--json") {
-		home, paths, ok := hostPaths()
+		_, paths, ok := hostPaths()
 		if !ok {
 			fmt.Fprintln(os.Stderr, "failed to initialize SSC Init")
 			return 1
 		}
+		ecosystems, commands := doctorCatalog()
 		app.Doctor = doctor.New(doctor.Config{
 			Product:          "SSC Init",
 			Version:          version,
 			Paths:            paths,
 			DatabasePath:     filepath.Join(paths.DataDir, "state.db"),
-			Ecosystems:       collectorEcosystems(),
-			OptionalCommands: optionalCommands(),
+			Ecosystems:       ecosystems,
+			OptionalCommands: commands,
 		})
-		_ = home
 		return app.Run(ctx, args, os.Stdout, os.Stderr)
 	}
 	if exactArgs(args, "scan", "--baseline", "--json") || exactArgs(args, "status", "--json") {
@@ -102,10 +103,27 @@ func exactArgs(args []string, want ...string) bool {
 	return true
 }
 
-func collectorEcosystems() []string {
-	return []string{"agents", "bun", "cargo", "docker", "go", "ide", "mcp", "npm", "pip", "pipx", "pnpm", "projects", "uv", "yarn"}
+func doctorCatalog() ([]string, []string) {
+	ecosystems := []string{"agents", "ide", "mcp", "projects"}
+	commands := make([]string, 0)
+	for _, capability := range packages.Capabilities() {
+		ecosystems = append(ecosystems, capability.Ecosystem)
+		commands = append(commands, capability.Executable)
+	}
+	return uniqueSortedStrings(ecosystems), uniqueSortedStrings(commands)
 }
 
-func optionalCommands() []string {
-	return []string{"bun", "cargo", "docker", "go", "npm", "pip", "pipx", "pnpm", "uv", "yarn"}
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for value := range seen {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }

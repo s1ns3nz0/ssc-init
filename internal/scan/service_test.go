@@ -112,6 +112,78 @@ func TestBaselineDefaultIDIsRFC4122Version4(t *testing.T) {
 	}
 }
 
+func TestBaselinePersistsEmptyCoverageAsPartial(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{}, snapshots, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	})
+
+	result, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "partial" || result.Coverage != nil {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(snapshots.saved) != 1 || snapshots.saved[0].Status != "partial" {
+		t.Fatalf("saved=%+v", snapshots.saved)
+	}
+}
+
+func TestBaselineClampsBackwardFinishedTime(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	times := []time.Time{time.Unix(2, 0).UTC(), time.Unix(1, 0).UTC()}
+	now := func() time.Time {
+		value := times[0]
+		times = times[1:]
+		return value
+	}
+	service := NewService(collector.Orchestrator{}, snapshots, now, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	})
+
+	result, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.FinishedAt.Equal(result.StartedAt) {
+		t.Fatalf("started=%s finished=%s", result.StartedAt, result.FinishedAt)
+	}
+}
+
+func TestBaselineRejectsZeroClockBeforePersistence(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		times []time.Time
+	}{
+		{name: "start", times: []time.Time{{}}},
+		{name: "finish", times: []time.Time{fixedTime(), {}}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			snapshots := &memorySnapshots{}
+			times := append([]time.Time(nil), testCase.times...)
+			now := func() time.Time {
+				if len(times) == 0 {
+					return time.Time{}
+				}
+				value := times[0]
+				times = times[1:]
+				return value
+			}
+			service := NewService(collector.Orchestrator{}, snapshots, now, func() string {
+				return "00000000-0000-4000-8000-000000000001"
+			})
+
+			if _, _, _, err := service.Baseline(context.Background()); err == nil {
+				t.Fatal("Baseline error=nil")
+			}
+			if len(snapshots.saved) != 0 {
+				t.Fatalf("saved=%+v", snapshots.saved)
+			}
+		})
+	}
+}
+
 func TestBaselineRejectsMultipleEnvironments(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{}, snapshots, fixedTime, nil, collector.Environment{}, collector.Environment{})

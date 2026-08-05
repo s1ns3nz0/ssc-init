@@ -71,6 +71,9 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	}
 
 	startedAt := s.now().UTC()
+	if startedAt.IsZero() {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("capture scan start time")
+	}
 	results := s.orchestrator.Collect(ctx, s.environment)
 	if err := ctx.Err(); err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
@@ -96,12 +99,19 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	if !validUUIDv4(scanID) {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("create scan identifier")
 	}
+	finishedAt := s.now().UTC()
+	if finishedAt.IsZero() {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("capture scan finish time")
+	}
+	if finishedAt.Before(startedAt) {
+		finishedAt = startedAt
+	}
 	result := model.ScanResult{
 		SchemaVersion: schemaVersion,
 		ScanID:        scanID,
 		Status:        overallStatus(results, current),
 		StartedAt:     startedAt,
-		FinishedAt:    s.now().UTC(),
+		FinishedAt:    finishedAt,
 		Coverage:      results,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
@@ -143,7 +153,7 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 }
 
 func overallStatus(results []model.CollectorResult, current model.Inventory) string {
-	if len(current.Errors) > 0 {
+	if len(results) == 0 || len(current.Errors) > 0 {
 		return "partial"
 	}
 	for _, result := range results {

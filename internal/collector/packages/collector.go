@@ -24,6 +24,13 @@ var errFilesystemAccess = errors.New("package filesystem access incomplete")
 
 type packageCollector struct{}
 
+// Capability describes one package ecosystem probe and the direct executable
+// it requires. Values do not imply that the executable is installed.
+type Capability struct {
+	Ecosystem  string
+	Executable string
+}
+
 type commandProbe struct {
 	ecosystem string
 	command   string
@@ -141,6 +148,17 @@ func probes() []commandProbe {
 		{ecosystem: "brew", command: "brew", args: []string{"list", "--versions"}, parse: parseBrew},
 		{ecosystem: "docker", command: "docker", args: []string{"image", "ls", "--format", "{{json .}}"}, parse: parseDocker},
 	}
+}
+
+// Capabilities returns a fresh, read-only description of the exact probes used
+// by New. Mutating the returned slice cannot change collector behavior.
+func Capabilities() []Capability {
+	probeCatalog := probes()
+	capabilities := make([]Capability, len(probeCatalog))
+	for index, probe := range probeCatalog {
+		capabilities[index] = Capability{Ecosystem: probe.ecosystem, Executable: probe.command}
+	}
+	return capabilities
 }
 
 func executableMissing(err error) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"golang.org/x/sys/unix"
 )
 
 func TestCheckReportsRedactedReadOnlyDiagnostics(t *testing.T) {
@@ -68,5 +70,28 @@ func TestCheckMarksUnwritableDatabaseDirectoryDegraded(t *testing.T) {
 	result := checker.Check(context.Background())
 	if result.Status != "degraded" || result.DatabaseDirectoryWritable {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestDirectoryWritableRequiresWriteAndSearchOnNearestExistingDirectory(t *testing.T) {
+	existing := t.TempDir()
+	target := filepath.Join(existing, "not-created", "state")
+	var gotPath string
+	var gotMode uint32
+
+	got := directoryWritableWith(target, os.Stat, func(path string, mode uint32) error {
+		gotPath = path
+		gotMode = mode
+		return errors.New("search denied")
+	})
+
+	if got {
+		t.Fatal("directoryWritableWith=true")
+	}
+	if gotPath != existing {
+		t.Fatalf("access path=%q want=%q", gotPath, existing)
+	}
+	if gotMode != unix.W_OK|unix.X_OK {
+		t.Fatalf("access mode=%d want=%d", gotMode, unix.W_OK|unix.X_OK)
 	}
 }

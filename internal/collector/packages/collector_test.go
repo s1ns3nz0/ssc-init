@@ -76,6 +76,27 @@ func TestPackagesCollectorUsesFixedProbesAndEmitsPackageURLs(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesMatchFixedProbesAndReturnIndependentSlices(t *testing.T) {
+	want := []Capability{
+		{Ecosystem: "npm", Executable: "npm"},
+		{Ecosystem: "pip", Executable: "python3"},
+		{Ecosystem: "pipx", Executable: "pipx"},
+		{Ecosystem: "uv", Executable: "uv"},
+		{Ecosystem: "cargo", Executable: "cargo"},
+		{Ecosystem: "go", Executable: "go"},
+		{Ecosystem: "brew", Executable: "brew"},
+		{Ecosystem: "docker", Executable: "docker"},
+	}
+	got := Capabilities()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("capabilities=%+v want=%+v", got, want)
+	}
+	got[0] = Capability{Ecosystem: "mutated", Executable: "mutated"}
+	if next := Capabilities(); !reflect.DeepEqual(next, want) {
+		t.Fatalf("shared mutable capabilities=%+v", next)
+	}
+}
+
 func TestPackagesCollectorMarksAllMissingExecutablesSkipped(t *testing.T) {
 	runner := missingRunner()
 	env := testutil.Environment(t, t.TempDir())
