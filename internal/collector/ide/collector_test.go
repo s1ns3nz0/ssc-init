@@ -330,6 +330,99 @@ func TestCollectorRedactsStandaloneHighConfidenceCredentialFormats(t *testing.T)
 	}
 }
 
+func TestCollectorRedactsPercentEncodedCredentialInBenignQueryValue(t *testing.T) {
+	home := t.TempDir()
+	token := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "encoded", "package.json"), `{
+		"name":"encoded","publisher":"acme","version":"1.0.0",
+		"main":"https://example.test/extension.js?artifact=ghp%5FABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&mode=safe"
+	}`)
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.encoded@1.0.0")
+	if !strings.Contains(asset.Metadata["entry_point"], "artifact=%5Bredacted%5D") || !strings.Contains(asset.Metadata["entry_point"], "mode=safe") {
+		t.Fatalf("metadata=%v", asset.Metadata)
+	}
+	encoded, err := json.Marshal(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{token, "ghp%5FABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"} {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("credential marker persisted: %s", encoded)
+		}
+	}
+}
+
+func TestCollectorKeepsNormalSKDashedPathAndRedactsExplicitSecretFamilies(t *testing.T) {
+	home := t.TempDir()
+	legacy := "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
+	project := "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
+	anthropic := "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "sk-shapes", "package.json"), fmt.Sprintf(`{
+		"name":"sk-shapes","publisher":"acme","version":"1.0.0",
+		"main":"dist/sk-language-server-extension.js",
+		"activationEvents":["onCommand:acme.safe","event:%s","event:%s","event:%s"]
+	}`, legacy, project, anthropic))
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.sk-shapes@1.0.0")
+	if asset.Metadata["entry_point"] != "dist/sk-language-server-extension.js" || !strings.Contains(asset.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(asset.Metadata["activation_events"], redactedMetadata) {
+		t.Fatalf("metadata=%v", asset.Metadata)
+	}
+	encoded, err := json.Marshal(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{legacy, project, anthropic} {
+		if strings.Contains(string(encoded), token) {
+			t.Fatalf("secret family persisted: %s", encoded)
+		}
+	}
+}
+
+func TestCollectorRedactsAllGitHubClassicTokenPrefixes(t *testing.T) {
+	home := t.TempDir()
+	tokens := []string{
+		"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+		"ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+	}
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "github-prefixes", "package.json"), fmt.Sprintf(`{
+		"name":"github-prefixes","publisher":"acme","version":"1.0.0",
+		"main":"dist/extension.js",
+		"activationEvents":["event:ghp_short","event:gho_short","event:ghu_short","event:ghs_short","event:ghr_short","event:%s","event:%s","event:%s","event:%s","event:%s"]
+	}`, tokens[0], tokens[1], tokens[2], tokens[3], tokens[4]))
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.github-prefixes@1.0.0")
+	for _, safe := range []string{"event:ghp_short", "event:gho_short", "event:ghu_short", "event:ghs_short", "event:ghr_short"} {
+		if !strings.Contains(asset.Metadata["activation_events"], safe) {
+			t.Fatalf("safe lookalike %q missing: %v", safe, asset.Metadata)
+		}
+	}
+	encoded, err := json.Marshal(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range tokens {
+		if strings.Contains(string(encoded), token) {
+			t.Fatalf("GitHub token persisted: %s", encoded)
+		}
+	}
+}
+
 func TestCollectorHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

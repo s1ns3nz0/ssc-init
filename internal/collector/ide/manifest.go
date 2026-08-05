@@ -28,10 +28,10 @@ const (
 var errInvalidManifest = errors.New("invalid IDE extension manifest")
 
 var highConfidenceCredentialPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
 	regexp.MustCompile(`(^|[^A-Za-z0-9_])github_pat_[A-Za-z0-9_]{50,120}([^A-Za-z0-9_]|$)`),
 	regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{20,}([^A-Za-z0-9-]|$)`),
-	regexp.MustCompile(`(^|[^A-Za-z0-9])sk-(?:ant-)?[A-Za-z0-9_-]{20,}([^A-Za-z0-9_-]|$)`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9])sk-(?:[A-Za-z0-9]{32,64}|(?:proj|ant)-[A-Za-z0-9_-]{24,200})([^A-Za-z0-9_-]|$)`),
 	regexp.MustCompile(`(^|[^A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}([^A-Z0-9]|$)`),
 	regexp.MustCompile(`(^|[^A-Za-z0-9])npm_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
 	regexp.MustCompile(`(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}([^A-Za-z0-9_-]|$)`),
@@ -409,7 +409,7 @@ func sanitizeEmbeddedMetadataURL(home, value string) (string, bool) {
 		}
 		for index, queryValue := range values {
 			queryValue = redactHomeText(home, queryValue)
-			if structuredSensitiveMetadata(queryValue) {
+			if containsHighConfidenceCredential(queryValue) || structuredSensitiveMetadata(queryValue) {
 				queryValue = redactedMetadata
 			}
 			values[index] = queryValue
