@@ -37,8 +37,7 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 		{host: "codex", kind: model.AssetSkill, relative: filepath.Join(".codex", "skills")},
 		{host: "cursor", kind: model.AssetAgentPlugin, relative: filepath.Join(".cursor", "plugins")},
 		{host: "cursor", kind: model.AssetSkill, relative: filepath.Join(".cursor", "skills")},
-		{host: "windsurf", kind: model.AssetAgentPlugin, relative: filepath.Join(".windsurf", "plugins")},
-		{host: "windsurf", kind: model.AssetSkill, relative: filepath.Join(".windsurf", "skills")},
+		{host: "windsurf", kind: model.AssetAgentPlugin, relative: ".windsurf"},
 	}
 
 	for _, root := range roots {
@@ -46,7 +45,7 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 			return result, err
 		}
 		path := filepath.Join(env.Home, root.relative)
-		entries, err := env.FS.ReadDir(path)
+		entries, err := readSafeDirectory(ctx, env.FS, env.Home, path)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return result, ctxErr
 		}
@@ -82,6 +81,44 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 		result.Status = model.CoveragePartial
 	}
 	return result, nil
+}
+
+func readSafeDirectory(ctx context.Context, filesystem platform.FileSystem, root, target string) ([]fs.DirEntry, error) {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fs.ErrInvalid
+	}
+
+	current := root
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, err := filesystem.ReadDir(current)
+		if err != nil {
+			return nil, err
+		}
+		var found fs.DirEntry
+		for _, entry := range entries {
+			if entry.Name() == part {
+				found = entry
+				break
+			}
+		}
+		if found == nil {
+			return nil, fs.ErrNotExist
+		}
+		if found.Type()&fs.ModeSymlink != 0 {
+			return nil, errors.New("symlinked agent path")
+		}
+		if !found.IsDir() {
+			return nil, fs.ErrInvalid
+		}
+		current = filepath.Join(current, part)
+	}
+	return filesystem.ReadDir(target)
 }
 
 func makeAsset(root assetRoot, name, path, home string) model.Asset {

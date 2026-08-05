@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -34,7 +34,7 @@ func TestMCPCollectorRedactsEnvironmentValuesAndCredentials(t *testing.T) {
 		t.Fatalf("command=%q", asset.Metadata["command"])
 	}
 	args := asset.Metadata["args"]
-	for _, want := range []string{"--token\x1f[REDACTED]", "--root=$HOME/Projects", "https://example.test/rpc?api_key=%5BREDACTED%5D&mode=safe"} {
+	for _, want := range []string{"--token\x1f[redacted]", "--root=$HOME/Projects", "https://example.test/rpc?api_key=%5Bredacted%5D&mode=safe"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("args=%q missing=%q", args, want)
 		}
@@ -50,6 +50,58 @@ func TestMCPCollectorRedactsEnvironmentValuesAndCredentials(t *testing.T) {
 	}
 	if got.Status != model.CoverageComplete {
 		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestMCPCollectorSanitizesCommandAndCombinedCredentialArguments(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"command-user-marker", "command-password-marker", "command-query-marker", "command-fragment-marker",
+		"combined-header-marker", "combined-token-marker", "equals-api-marker", "bearer-value-marker",
+		"split-header-marker", "split-token-marker", "arg-user-marker", "arg-password-marker",
+		"arg-query-marker", "arg-fragment-marker", "environment-value-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"sensitive": {
+				"command": "https://command-user-marker:command-password-marker@example.test/run?token=command-query-marker&mode=safe#command-fragment-marker",
+				"args": [
+					"-HAuthorization: Bearer combined-header-marker",
+					"--tokencombined-token-marker",
+					"--api-key=equals-api-marker",
+					"Bearer bearer-value-marker",
+					"-H", "Authorization: Bearer split-header-marker",
+					"--token", "split-token-marker",
+					"--endpoint=https://arg-user-marker:arg-password-marker@example.test/mcp?access_token=arg-query-marker#arg-fragment-marker"
+				],
+				"env": {"TOKEN": "environment-value-marker"}
+			}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:sensitive")
+	if !strings.Contains(asset.Metadata["command"], "https://example.test/run") || !strings.Contains(asset.Metadata["command"], "redacted") {
+		t.Fatalf("command=%q", asset.Metadata["command"])
+	}
+	args := asset.Metadata["args"]
+	for _, want := range []string{"-H[redacted]", "--token[redacted]", "--api-key=[redacted]", "Bearer [redacted]", "--token\x1f[redacted]", "--endpoint=https://example.test/mcp"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("args=%q missing=%q", args, want)
+		}
+	}
+	encoded, marshalErr := json.Marshal(asset)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, marker := range markers {
+		if bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
 	}
 }
 
@@ -77,6 +129,104 @@ func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
 	asset := testutil.AssertAsset(t, got.Assets, "mcp:vscode:workspace")
 	if asset.Metadata["url"] != "https://example.test/mcp" || len(got.Assets) != 1 || got.Status != model.CoverageComplete || len(got.Errors) != 0 {
 		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestMCPCollectorRejectsNonCanonicalProjectPathAssets(t *testing.T) {
+	home := t.TempDir()
+	marker := "project-path-injection-marker"
+	canonicalPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
+	writeMCPFile(t, canonicalPath, `{"servers":{"`+marker+`":{"url":"https://example.test"}}}`)
+	redacted := "$HOME/Projects/app/.vscode/mcp.json"
+	assets := []model.Asset{
+		{ID: "project-file:mcp:" + canonicalPath, Type: model.AssetProject, Name: "mcp.json", Path: canonicalPath, Source: "mcp"},
+		{ID: "project-file:mcp:$HOME/Projects/../Projects/app/.vscode/mcp.json", Type: model.AssetProject, Name: "mcp.json", Path: "$HOME/Projects/../Projects/app/.vscode/mcp.json", Source: "mcp"},
+		{ID: "project-file:mcp:$HOME/Projects/other/.vscode/mcp.json", Type: model.AssetProject, Name: "mcp.json", Path: redacted, Source: "mcp"},
+		{ID: "project-file:mcp:" + redacted, Type: model.AssetProject, Name: "other.json", Path: redacted, Source: "mcp"},
+	}
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New(assets...).Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if len(got.Assets) != 0 || got.Status != model.CoverageComplete || bytes.Contains(encoded, []byte(marker)) || bytes.Contains(encoded, []byte(home)) {
+		t.Fatalf("result=%s", encoded)
+	}
+}
+
+func TestMCPCollectorRejectsSymlinkedConfigPaths(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		setup    func(*testing.T, string, string) collector.Collector
+		wantPath string
+	}{
+		{
+			name: "config file",
+			setup: func(t *testing.T, home, outside string) collector.Collector {
+				outsideConfig := filepath.Join(outside, "mcp.json")
+				writeMCPFile(t, outsideConfig, `{"mcpServers":{"config-file-symlink-marker":{}}}`)
+				if err := os.Symlink(outsideConfig, filepath.Join(home, ".claude.json")); err != nil {
+					t.Fatal(err)
+				}
+				return mcp.New()
+			},
+			wantPath: "$HOME/.claude.json",
+		},
+		{
+			name: "host root",
+			setup: func(t *testing.T, home, outside string) collector.Collector {
+				writeMCPFile(t, filepath.Join(outside, "mcp.json"), `{"mcpServers":{"root-symlink-marker":{}}}`)
+				if err := os.Symlink(outside, filepath.Join(home, ".cursor")); err != nil {
+					t.Fatal(err)
+				}
+				return mcp.New()
+			},
+			wantPath: "$HOME/.cursor/mcp.json",
+		},
+		{
+			name: "nested project component",
+			setup: func(t *testing.T, home, outside string) collector.Collector {
+				writeMCPFile(t, filepath.Join(outside, ".vscode", "mcp.json"), `{"servers":{"project-symlink-marker":{}}}`)
+				if err := os.MkdirAll(filepath.Join(home, "Projects"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(home, "Projects", "linked")); err != nil {
+					t.Fatal(err)
+				}
+				path := "$HOME/Projects/linked/.vscode/mcp.json"
+				return mcp.New(model.Asset{ID: "project-file:mcp:" + path, Type: model.AssetProject, Name: "mcp.json", Path: path, Source: "mcp"})
+			},
+			wantPath: "$HOME/Projects/linked/.vscode/mcp.json",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			outside := t.TempDir()
+			collector := testCase.setup(t, home, outside)
+			env := testutil.Environment(t, home)
+
+			got, err := collector.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, marshalErr := json.Marshal(got)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Path != testCase.wantPath || len(got.Assets) != 0 {
+				t.Fatalf("result=%s", encoded)
+			}
+			for _, sensitive := range []string{"symlink-marker", outside} {
+				if bytes.Contains(encoded, []byte(sensitive)) {
+					t.Fatalf("outside data persisted: %s", encoded)
+				}
+			}
+		})
 	}
 }
 
@@ -126,12 +276,13 @@ func TestMCPCollectorChecksSizeAfterReadAndSanitizesAccessFailures(t *testing.T)
 		readErr  error
 		wantCode string
 	}{
-		{name: "grew after stat", readData: bytes.Repeat([]byte("x"), maxConfigBytes+1), wantCode: "config_oversized"},
+		{name: "grew after pre-read check", readData: bytes.Repeat([]byte("x"), maxConfigBytes+1), wantCode: "config_oversized"},
 		{name: "access failure", readErr: fs.ErrPermission, wantCode: "config_unavailable"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, ".claude.json")
+			writeMCPFile(t, path, `{}`)
 			env := testutil.Environment(t, home)
 			env.FS = mcpFaultFS{FileSystem: platform.OSFileSystem{}, path: path, readData: testCase.readData, readErr: testCase.readErr}
 
@@ -194,25 +345,9 @@ type mcpFaultFS struct {
 	readErr  error
 }
 
-func (f mcpFaultFS) Stat(path string) (os.FileInfo, error) {
-	if path == f.path {
-		return staticFileInfo{size: 2}, nil
-	}
-	return f.FileSystem.Stat(path)
-}
-
 func (f mcpFaultFS) ReadFile(path string) ([]byte, error) {
 	if path == f.path {
 		return f.readData, f.readErr
 	}
 	return f.FileSystem.ReadFile(path)
 }
-
-type staticFileInfo struct{ size int64 }
-
-func (i staticFileInfo) Name() string       { return "mcp.json" }
-func (i staticFileInfo) Size() int64        { return i.size }
-func (i staticFileInfo) Mode() fs.FileMode  { return 0o600 }
-func (i staticFileInfo) ModTime() time.Time { return time.Time{} }
-func (i staticFileInfo) IsDir() bool        { return false }
-func (i staticFileInfo) Sys() any           { return nil }

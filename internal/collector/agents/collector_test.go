@@ -1,6 +1,7 @@
 package agents_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -55,9 +56,60 @@ func TestAgentCollectorStaysWithinExplicitRootsAndFindsSkills(t *testing.T) {
 	}
 }
 
+func TestAgentCollectorFindsDirectWindsurfAsset(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".windsurf", "direct-tool", "README.md"), "safe")
+	env := testutil.Environment(t, home)
+
+	got, err := agents.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "agent-plugin:windsurf:direct-tool")
+	if asset.Path != "$HOME/.windsurf/direct-tool" || asset.Type != model.AssetAgentPlugin {
+		t.Fatalf("asset=%+v", asset)
+	}
+}
+
+func TestAgentCollectorRejectsSymlinkedCatalogRootsAndEntries(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	marker := "outside-agent-marker"
+	writeAgentFile(t, filepath.Join(outside, "plugins", marker, "plugin.json"), `{}`)
+	if err := os.Symlink(outside, filepath.Join(home, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe", "plugin.json"), `{}`)
+	if err := os.Symlink(filepath.Join(outside, "plugins", marker), filepath.Join(home, ".claude", "plugins", "linked")); err != nil {
+		t.Fatal(err)
+	}
+	env := testutil.Environment(t, home)
+
+	got, err := agents.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe")
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if got.Status != model.CoveragePartial || len(got.Errors) != 2 || len(got.Assets) != 1 || bytes.Contains(encoded, []byte(marker)) || bytes.Contains(encoded, []byte(outside)) {
+		t.Fatalf("result=%s", encoded)
+	}
+	for _, coverageErr := range got.Errors {
+		if !strings.HasPrefix(coverageErr.Path, "$HOME/.codex/") {
+			t.Fatalf("error=%+v", coverageErr)
+		}
+	}
+}
+
 func TestAgentCollectorSanitizesAccessFailures(t *testing.T) {
 	home := t.TempDir()
 	blocked := filepath.Join(home, ".cursor", "plugins")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	env := testutil.Environment(t, home)
 	env.FS = agentFaultFS{FileSystem: platform.OSFileSystem{}, blocked: blocked}
 

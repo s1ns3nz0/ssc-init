@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/url"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +18,10 @@ import (
 )
 
 const maxMCPConfigBytes = 4 << 20
+
+const redactedValue = "[redacted]"
+
+var errSymlinkPath = errors.New("symlinked path component")
 
 type mcpCollector struct {
 	projectAssets []model.Asset
@@ -107,12 +112,8 @@ func (c *mcpCollector) projectTargets(ctx context.Context, home string) []config
 		if ctx.Err() != nil {
 			break
 		}
-		if asset.Type != model.AssetProject || asset.Source != "mcp" || asset.Name != "mcp.json" ||
-			!strings.HasPrefix(asset.ID, "project-file:mcp:") {
-			continue
-		}
-		path, ok := resolveProjectPath(home, asset.Path)
-		if !ok || filepath.Base(path) != "mcp.json" || filepath.Base(filepath.Dir(path)) != ".vscode" {
+		path, ok := canonicalProjectPath(home, asset)
+		if !ok {
 			continue
 		}
 		targets = append(targets, configTarget{host: "vscode", path: path})
@@ -121,31 +122,35 @@ func (c *mcpCollector) projectTargets(ctx context.Context, home string) []config
 	return targets
 }
 
-func resolveProjectPath(home, path string) (string, bool) {
-	if path == "$HOME" {
-		return filepath.Clean(home), true
-	}
-	prefix := "$HOME/"
-	if strings.HasPrefix(filepath.ToSlash(path), prefix) {
-		relative := strings.TrimPrefix(filepath.ToSlash(path), prefix)
-		resolved := filepath.Clean(filepath.Join(home, filepath.FromSlash(relative)))
-		rel, err := filepath.Rel(filepath.Clean(home), resolved)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", false
-		}
-		return resolved, true
-	}
-	if !filepath.IsAbs(path) {
+func canonicalProjectPath(home string, asset model.Asset) (string, bool) {
+	if asset.Type != model.AssetProject || asset.Source != "mcp" || asset.Name != "mcp.json" {
 		return "", false
 	}
-	return filepath.Clean(path), true
+	redacted := asset.Path
+	if redacted != filepath.ToSlash(redacted) || !strings.HasPrefix(redacted, "$HOME/") || pathpkg.Clean(redacted) != redacted {
+		return "", false
+	}
+	if asset.ID != "project-file:mcp:"+redacted || !strings.HasSuffix(redacted, "/.vscode/mcp.json") {
+		return "", false
+	}
+	relative := strings.TrimPrefix(redacted, "$HOME/")
+	resolved := filepath.Clean(filepath.Join(filepath.Clean(home), filepath.FromSlash(relative)))
+	rel, err := filepath.Rel(filepath.Clean(home), resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	canonicalRedacted := filepath.ToSlash(platform.RedactHome(filepath.Clean(home), resolved))
+	if canonicalRedacted != redacted {
+		return "", false
+	}
+	return resolved, true
 }
 
 func readConfig(ctx context.Context, env collector.Environment, path string) ([]byte, string, string, bool) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", "", false
 	}
-	info, err := env.FS.Stat(path)
+	info, err := safeFileInfo(ctx, env.FS, env.Home, path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, "", "", false
@@ -168,6 +173,48 @@ func readConfig(ctx context.Context, env collector.Environment, path string) ([]
 	return contents, "", "", true
 }
 
+func safeFileInfo(ctx context.Context, filesystem platform.FileSystem, root, target string) (fs.FileInfo, error) {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fs.ErrInvalid
+	}
+
+	current := root
+	parts := strings.Split(relative, string(filepath.Separator))
+	for index, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, err := filesystem.ReadDir(current)
+		if err != nil {
+			return nil, err
+		}
+		var found fs.DirEntry
+		for _, entry := range entries {
+			if entry.Name() == part {
+				found = entry
+				break
+			}
+		}
+		if found == nil {
+			return nil, fs.ErrNotExist
+		}
+		if found.Type()&fs.ModeSymlink != 0 {
+			return nil, errSymlinkPath
+		}
+		if index == len(parts)-1 {
+			return found.Info()
+		}
+		if !found.IsDir() {
+			return nil, fs.ErrInvalid
+		}
+		current = filepath.Join(current, part)
+	}
+	return nil, fs.ErrInvalid
+}
+
 func sanitizeServer(home, host, name string, config serverConfig) model.Asset {
 	keys := make([]string, 0, len(config.Env))
 	for key := range config.Env {
@@ -180,7 +227,7 @@ func sanitizeServer(home, host, name string, config serverConfig) model.Asset {
 		Type: model.AssetMCP,
 		Name: name,
 		Metadata: map[string]string{
-			"command":  redactHomeText(home, config.Command),
+			"command":  sanitizeCommand(home, config.Command),
 			"args":     strings.Join(args, "\x1f"),
 			"url":      sanitizeURL(home, config.URL),
 			"env_keys": strings.Join(keys, ","),
@@ -193,26 +240,77 @@ func sanitizeArgs(home string, args []string) []string {
 	redactNext := false
 	for index, arg := range args {
 		if redactNext {
-			result[index] = "[REDACTED]"
+			result[index] = redactedValue
 			redactNext = false
 			continue
 		}
-		if strings.Contains(arg, "://") {
+		if absoluteURL(arg) {
 			result[index] = sanitizeURL(home, arg)
 			continue
 		}
-		if key, _, found := strings.Cut(arg, "="); found && sensitiveName(key) {
-			result[index] = key + "=[REDACTED]"
+		if key, value, found := strings.Cut(arg, "="); found {
+			switch {
+			case sensitiveName(key):
+				result[index] = key + "=" + redactedValue
+			case strings.Contains(value, "://"):
+				result[index] = key + "=" + sanitizeURL(home, value)
+			default:
+				result[index] = redactHomeText(home, arg)
+			}
 			continue
 		}
-		if sensitiveName(arg) && strings.HasPrefix(arg, "-") {
+		if credentialFlag(arg) {
 			result[index] = arg
 			redactNext = true
+			continue
+		}
+		if prefix, ok := combinedCredentialFlag(arg); ok {
+			result[index] = prefix + redactedValue
+			continue
+		}
+		if safePrefix, ok := sensitiveTextPrefix(arg); ok {
+			result[index] = safePrefix + redactedValue
 			continue
 		}
 		result[index] = redactHomeText(home, arg)
 	}
 	return result
+}
+
+func sanitizeCommand(home, command string) string {
+	command = redactHomeText(home, command)
+	if command == "" {
+		return ""
+	}
+	if absoluteURL(command) {
+		return sanitizeURL(home, command)
+	}
+	if key, value, found := strings.Cut(command, "="); found {
+		if sensitiveName(key) {
+			return key + "=" + redactedValue
+		}
+		if strings.Contains(value, "://") {
+			return key + "=" + sanitizeURL(home, value)
+		}
+	}
+	if prefix, ok := combinedCredentialFlag(command); ok {
+		return prefix + redactedValue
+	}
+	if prefix, ok := sensitiveTextPrefix(command); ok {
+		return prefix + redactedValue
+	}
+	if sensitiveName(command) {
+		return redactedValue
+	}
+	return command
+}
+
+func absoluteURL(value string) bool {
+	if !strings.Contains(value, "://") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme != ""
 }
 
 func sanitizeURL(home, raw string) string {
@@ -221,20 +319,63 @@ func sanitizeURL(home, raw string) string {
 	}
 	parsed, err := url.Parse(redactHomeText(home, raw))
 	if err != nil {
-		return "[REDACTED]"
+		return redactedValue
 	}
 	parsed.User = nil
 	query := parsed.Query()
 	for key := range query {
 		if sensitiveName(key) {
-			query[key] = []string{"[REDACTED]"}
+			query[key] = []string{redactedValue}
 		}
 	}
 	parsed.RawQuery = query.Encode()
 	if parsed.Fragment != "" {
-		parsed.Fragment = "[REDACTED]"
+		parsed.Fragment = redactedValue
 	}
 	return parsed.String()
+}
+
+func credentialFlag(value string) bool {
+	lower := strings.ToLower(value)
+	for _, flag := range []string{
+		"--token", "--api-key", "--apikey", "--password", "--passwd", "--secret",
+		"--credential", "--credentials", "--authorization", "--auth", "--access-key",
+		"--private-key", "--client-secret", "-h", "-e",
+	} {
+		if lower == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func combinedCredentialFlag(value string) (string, bool) {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "-h") && len(value) > 2 {
+		return value[:2], true
+	}
+	for _, flag := range []string{
+		"--client-secret", "--authorization", "--credentials", "--credential", "--private-key",
+		"--access-key", "--password", "--api-key", "--apikey", "--passwd", "--secret", "--token", "--auth",
+	} {
+		if strings.HasPrefix(lower, flag) && len(value) > len(flag) {
+			return value[:len(flag)], true
+		}
+	}
+	return "", false
+}
+
+func sensitiveTextPrefix(value string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.HasPrefix(lower, "authorization:"):
+		return "Authorization: ", true
+	case strings.HasPrefix(lower, "proxy-authorization:"):
+		return "Proxy-Authorization: ", true
+	case strings.HasPrefix(lower, "bearer "):
+		return "Bearer ", true
+	}
+	return "", false
 }
 
 func sensitiveName(value string) bool {
