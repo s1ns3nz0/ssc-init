@@ -388,6 +388,9 @@ func hasSensitiveComponent(value string) bool {
 	if value == "authorizationHelper" || value == "AuthorizationHelper" {
 		return false
 	}
+	if strings.EqualFold(value, "authorizationhelper") {
+		return true
+	}
 	components := semanticComponents(value)
 	for _, component := range components {
 		switch component {

@@ -328,6 +328,64 @@ func TestMCPCollectorSanitizesSensitiveComponentsInsideCompounds(t *testing.T) {
 	}
 }
 
+func TestMCPCollectorAllowsOnlyExactAuthorizationHelperSpellings(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"lower-split-marker", "lower-equals-marker", "lower-query-marker",
+		"mixed-split-marker", "mixed-equals-marker", "mixed-query-marker",
+		"upper-split-marker", "upper-equals-marker", "upper-query-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"helper-casing": {
+				"args": [
+					"--authorizationhelper", "lower-split-marker",
+					"--authorizationhelper=lower-equals-marker",
+					"--Authorizationhelper", "mixed-split-marker",
+					"--Authorizationhelper=mixed-equals-marker",
+					"--AUTHORIZATIONHELPER", "upper-split-marker",
+					"--AUTHORIZATIONHELPER=upper-equals-marker",
+					"--authorizationHelper=safe-exact-camel",
+					"--AuthorizationHelper=safe-exact-pascal"
+				],
+				"url": "https://example.test/mcp?authorizationhelper=lower-query-marker&Authorizationhelper=mixed-query-marker&AUTHORIZATIONHELPER=upper-query-marker&authorizationHelper=safe-query-camel&AuthorizationHelper=safe-query-pascal"
+			}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:helper-casing")
+	encoded, marshalErr := json.Marshal(asset)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, marker := range markers {
+		if bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
+	}
+	for _, safe := range []string{
+		"--authorizationHelper=safe-exact-camel",
+		"--AuthorizationHelper=safe-exact-pascal",
+	} {
+		if !strings.Contains(asset.Metadata["args"], safe) {
+			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
+		}
+	}
+	for _, safe := range []string{
+		"authorizationHelper=safe-query-camel",
+		"AuthorizationHelper=safe-query-pascal",
+	} {
+		if !strings.Contains(asset.Metadata["url"], safe) {
+			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
+		}
+	}
+}
+
 func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
