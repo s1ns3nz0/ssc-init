@@ -104,6 +104,26 @@ func TestAgentCollectorRejectsSymlinkedCatalogRootsAndEntries(t *testing.T) {
 	}
 }
 
+func TestAgentCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
+	home := t.TempDir()
+	marker := "agent-path-fallback-marker"
+	writeAgentFile(t, filepath.Join(home, ".codex", "plugins", marker, "plugin.json"), `{}`)
+	env := testutil.Environment(t, home)
+	env.FS = pathOnlyAgentFileSystem{FileSystem: platform.OSFileSystem{}}
+
+	got, err := agents.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
+		t.Fatalf("result=%s", encoded)
+	}
+}
+
 func TestAgentCollectorSanitizesAccessFailures(t *testing.T) {
 	home := t.TempDir()
 	blocked := filepath.Join(home, ".cursor", "plugins")
@@ -147,6 +167,40 @@ func writeAgentFile(t *testing.T, path, contents string) {
 type agentFaultFS struct {
 	platform.FileSystem
 	blocked string
+}
+
+func (f agentFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	rooted, ok := f.FileSystem.(platform.RootedFileSystem)
+	if !ok {
+		return nil, fs.ErrInvalid
+	}
+	root, err := rooted.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &agentFaultRoot{RootedDirectory: root, current: name, blocked: f.blocked}, nil
+}
+
+type agentFaultRoot struct {
+	platform.RootedDirectory
+	current string
+	blocked string
+}
+
+func (r *agentFaultRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	path := filepath.Join(r.current, name)
+	if path == r.blocked {
+		return nil, fs.ErrPermission
+	}
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &agentFaultRoot{RootedDirectory: child, current: path, blocked: r.blocked}, nil
+}
+
+type pathOnlyAgentFileSystem struct {
+	platform.FileSystem
 }
 
 func (f agentFaultFS) ReadDir(path string) ([]fs.DirEntry, error) {

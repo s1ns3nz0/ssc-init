@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,6 +30,28 @@ func (*agentCollector) Name() string { return "agents" }
 
 func (c *agentCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
 	result := model.CollectorResult{Collector: c.Name(), Status: model.CoverageComplete}
+	rootedFilesystem, ok := env.FS.(platform.RootedFileSystem)
+	if !ok {
+		result.Status = model.CoveragePartial
+		result.Errors = append(result.Errors, model.CoverageError{
+			Code:    "rooted_access_unavailable",
+			Message: "rooted agent access is unavailable",
+			Path:    "$HOME",
+		})
+		return result, nil
+	}
+	homeRoot, err := rootedFilesystem.OpenRoot(env.Home)
+	if err != nil {
+		result.Status = model.CoveragePartial
+		result.Errors = append(result.Errors, model.CoverageError{
+			Code:    "rooted_access_unavailable",
+			Message: "rooted agent access is unavailable",
+			Path:    "$HOME",
+		})
+		return result, nil
+	}
+	defer homeRoot.Close()
+
 	assetsByID := make(map[string]model.Asset)
 	roots := []assetRoot{
 		{host: "claude", kind: model.AssetAgentPlugin, relative: filepath.Join(".claude", "plugins")},
@@ -45,7 +68,8 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 			return result, err
 		}
 		path := filepath.Join(env.Home, root.relative)
-		entries, err := readSafeDirectory(ctx, env.FS, env.Home, path)
+		components := strings.Split(root.relative, string(filepath.Separator))
+		rootedDirectory, err := platform.OpenVerifiedRoot(ctx, homeRoot, components...)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return result, ctxErr
 		}
@@ -59,17 +83,63 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 			}
 			continue
 		}
+		directoryFile, err := platform.OpenVerifiedDirectory(rootedDirectory)
+		if err != nil {
+			_ = rootedDirectory.Close()
+			result.Errors = append(result.Errors, model.CoverageError{
+				Code:    "path_unavailable",
+				Message: "agent asset path unavailable",
+				Path:    redactPath(env.Home, path),
+			})
+			continue
+		}
+		entries, err := directoryFile.ReadDir(-1)
+		_ = directoryFile.Close()
+		if err != nil {
+			_ = rootedDirectory.Close()
+			result.Errors = append(result.Errors, model.CoverageError{
+				Code:    "path_unavailable",
+				Message: "agent asset path unavailable",
+				Path:    redactPath(env.Home, path),
+			})
+			continue
+		}
 
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
+				_ = rootedDirectory.Close()
 				return result, err
 			}
-			if !entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 || strings.HasPrefix(entry.Name(), ".") {
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			expected, err := rootedDirectory.Lstat(entry.Name())
+			if err != nil || expected.Mode()&fs.ModeSymlink != 0 || !expected.IsDir() {
+				continue
+			}
+			child, err := platform.OpenVerifiedRoot(ctx, rootedDirectory, entry.Name())
+			if err != nil {
+				result.Errors = append(result.Errors, model.CoverageError{
+					Code:    "path_unavailable",
+					Message: "agent asset path unavailable",
+					Path:    redactPath(env.Home, filepath.Join(path, entry.Name())),
+				})
+				continue
+			}
+			opened, openedErr := child.Lstat(".")
+			_ = child.Close()
+			if openedErr != nil || !os.SameFile(expected, opened) {
+				result.Errors = append(result.Errors, model.CoverageError{
+					Code:    "path_unavailable",
+					Message: "agent asset path unavailable",
+					Path:    redactPath(env.Home, filepath.Join(path, entry.Name())),
+				})
 				continue
 			}
 			asset := makeAsset(root, entry.Name(), filepath.Join(path, entry.Name()), env.Home)
 			assetsByID[asset.ID] = asset
 		}
+		_ = rootedDirectory.Close()
 	}
 
 	result.Assets = make([]model.Asset, 0, len(assetsByID))
@@ -81,44 +151,6 @@ func (c *agentCollector) Collect(ctx context.Context, env collector.Environment)
 		result.Status = model.CoveragePartial
 	}
 	return result, nil
-}
-
-func readSafeDirectory(ctx context.Context, filesystem platform.FileSystem, root, target string) ([]fs.DirEntry, error) {
-	root = filepath.Clean(root)
-	target = filepath.Clean(target)
-	relative, err := filepath.Rel(root, target)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, fs.ErrInvalid
-	}
-
-	current := root
-	for _, part := range strings.Split(relative, string(filepath.Separator)) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		entries, err := filesystem.ReadDir(current)
-		if err != nil {
-			return nil, err
-		}
-		var found fs.DirEntry
-		for _, entry := range entries {
-			if entry.Name() == part {
-				found = entry
-				break
-			}
-		}
-		if found == nil {
-			return nil, fs.ErrNotExist
-		}
-		if found.Type()&fs.ModeSymlink != 0 {
-			return nil, errors.New("symlinked agent path")
-		}
-		if !found.IsDir() {
-			return nil, fs.ErrInvalid
-		}
-		current = filepath.Join(current, part)
-	}
-	return filesystem.ReadDir(target)
 }
 
 func makeAsset(root assetRoot, name, path, home string) model.Asset {

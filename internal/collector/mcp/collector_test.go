@@ -105,6 +105,60 @@ func TestMCPCollectorSanitizesCommandAndCombinedCredentialArguments(t *testing.T
 	}
 }
 
+func TestMCPCollectorSanitizesSemanticFlagsWithoutOverRedactingSafeNames(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"header-value-marker", "headers-equals-marker", "env-value-marker", "bearer-value-marker",
+		"signature-value-marker", "github-token-value-marker", "github-token-equals-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"semantic": {
+				"command": "/usr/local/bin/auth-mcp",
+				"args": [
+					"--header", "Authorization: Bearer header-value-marker",
+					"--headers=Authorization: Bearer headers-equals-marker",
+					"--env", "GITHUB_TOKEN=env-value-marker",
+					"--bearer", "bearer-value-marker",
+					"--signature=signature-value-marker",
+					"--github-token", "github-token-value-marker",
+					"--github-token=github-token-equals-marker",
+					"--tokenizer-model", "safe-model", "-hostlocalhost"
+				]
+			}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:semantic")
+	if asset.Metadata["command"] != "/usr/local/bin/auth-mcp" {
+		t.Fatalf("command=%q", asset.Metadata["command"])
+	}
+	args := asset.Metadata["args"]
+	for _, want := range []string{
+		"--header\x1f[redacted]", "--headers=[redacted]", "--env\x1f[redacted]",
+		"--bearer\x1f[redacted]", "--signature=[redacted]", "--github-token\x1f[redacted]",
+		"--github-token=[redacted]", "--tokenizer-model\x1fsafe-model\x1f-hostlocalhost",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("args=%q missing=%q", args, want)
+		}
+	}
+	encoded, marshalErr := json.Marshal(asset)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, marker := range markers {
+		if bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
+	}
+}
+
 func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
@@ -230,6 +284,59 @@ func TestMCPCollectorRejectsSymlinkedConfigPaths(t *testing.T) {
 	}
 }
 
+func TestMCPCollectorRejectsRootedIdentitySwap(t *testing.T) {
+	home := t.TempDir()
+	expectedPath := filepath.Join(home, "expected.json")
+	replacementPath := filepath.Join(home, "replacement.json")
+	writeMCPFile(t, expectedPath, `{}`)
+	marker := "rooted-swap-secret-marker"
+	writeMCPFile(t, replacementPath, `{"mcpServers":{"swapped":{"env":{"TOKEN":"`+marker+`"}}}}`)
+	expectedInfo, err := os.Stat(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := testutil.Environment(t, home)
+	env.FS = swapRootFileSystem{
+		OSFileSystem: platform.OSFileSystem{},
+		root: &swapRootDirectory{
+			expected:    expectedInfo,
+			replacement: replacementPath,
+		},
+	}
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
+		t.Fatalf("result=%s", encoded)
+	}
+}
+
+func TestMCPCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
+	home := t.TempDir()
+	marker := "path-fallback-secret-marker"
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"`+marker+`":{}}}`)
+	env := testutil.Environment(t, home)
+	env.FS = pathOnlyFileSystem{FileSystem: platform.OSFileSystem{}}
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
+		t.Fatalf("result=%s", encoded)
+	}
+}
+
 func TestMCPCollectorRejectsDuplicateKeysAtAnyDepth(t *testing.T) {
 	home := t.TempDir()
 	marker := "duplicate-secret-marker"
@@ -344,6 +451,107 @@ type mcpFaultFS struct {
 	readData []byte
 	readErr  error
 }
+
+func (f mcpFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	rooted, ok := f.FileSystem.(platform.RootedFileSystem)
+	if !ok {
+		return nil, fs.ErrInvalid
+	}
+	root, err := rooted.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &mcpFaultRoot{
+		RootedDirectory: root,
+		current:         name,
+		target:          f.path,
+		readData:        f.readData,
+		readErr:         f.readErr,
+	}, nil
+}
+
+type mcpFaultRoot struct {
+	platform.RootedDirectory
+	current  string
+	target   string
+	readData []byte
+	readErr  error
+}
+
+func (r *mcpFaultRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &mcpFaultRoot{
+		RootedDirectory: child,
+		current:         filepath.Join(r.current, name),
+		target:          r.target,
+		readData:        r.readData,
+		readErr:         r.readErr,
+	}, nil
+}
+
+func (r *mcpFaultRoot) Open(name string) (platform.RootedFile, error) {
+	if filepath.Join(r.current, name) != r.target {
+		return r.RootedDirectory.Open(name)
+	}
+	if r.readErr != nil {
+		return nil, r.readErr
+	}
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &mcpFaultFile{RootedFile: file, reader: bytes.NewReader(r.readData)}, nil
+}
+
+type mcpFaultFile struct {
+	platform.RootedFile
+	reader *bytes.Reader
+}
+
+func (f *mcpFaultFile) Read(buffer []byte) (int, error) {
+	return f.reader.Read(buffer)
+}
+
+type pathOnlyFileSystem struct {
+	platform.FileSystem
+}
+
+type swapRootFileSystem struct {
+	platform.OSFileSystem
+	root platform.RootedDirectory
+}
+
+func (f swapRootFileSystem) OpenRoot(string) (platform.RootedDirectory, error) {
+	return f.root, nil
+}
+
+type swapRootDirectory struct {
+	expected    os.FileInfo
+	replacement string
+}
+
+func (r *swapRootDirectory) Lstat(name string) (os.FileInfo, error) {
+	if name == ".claude.json" {
+		return r.expected, nil
+	}
+	return nil, fs.ErrNotExist
+}
+
+func (r *swapRootDirectory) OpenRoot(string) (platform.RootedDirectory, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (r *swapRootDirectory) Open(name string) (platform.RootedFile, error) {
+	if name != ".claude.json" {
+		return nil, fs.ErrNotExist
+	}
+	return os.Open(r.replacement)
+}
+
+func (*swapRootDirectory) Close() error { return nil }
 
 func (f mcpFaultFS) ReadFile(path string) ([]byte, error) {
 	if path == f.path {
