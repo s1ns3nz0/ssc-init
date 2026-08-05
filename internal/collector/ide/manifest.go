@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	maxMetadataLength   = 4096
 	maxMetadataItems    = 1024
 	metadataListDivider = "\x1f"
+	redactedMetadata    = "[redacted]"
 )
 
 var errInvalidManifest = errors.New("invalid IDE extension manifest")
@@ -62,13 +64,12 @@ func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset,
 	if entryPoint == "" {
 		entryPoint = strings.TrimSpace(manifest.Browser)
 	}
-	entryPoint, ok = normalizeMetadata(entryPoint)
+	entryPoint, ok = sanitizeSelectedMetadata(home, entryPoint, false)
 	if !ok {
 		return model.Asset{}, errInvalidManifest
 	}
-	entryPoint = redactHomeText(home, entryPoint)
 
-	activationEvents, ok := normalizeList(manifest.ActivationEvents)
+	activationEvents, ok := sanitizeMetadataList(home, manifest.ActivationEvents, false)
 	if !ok {
 		return model.Asset{}, errInvalidManifest
 	}
@@ -79,7 +80,7 @@ func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset,
 	for capability := range manifest.Contributes {
 		capabilityNames = append(capabilityNames, capability)
 	}
-	capabilities, ok := normalizeList(capabilityNames)
+	capabilities, ok := sanitizeMetadataList(home, capabilityNames, true)
 	if !ok {
 		return model.Asset{}, errInvalidManifest
 	}
@@ -101,6 +102,9 @@ func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset,
 }
 
 func parseJetBrainsManifest(contents []byte, home, path string) (model.Asset, error) {
+	if err := validateJetBrainsIdentityElements(contents); err != nil {
+		return model.Asset{}, errInvalidManifest
+	}
 	var manifest jetBrainsManifest
 	if err := decodeXML(contents, &manifest); err != nil {
 		return model.Asset{}, errInvalidManifest
@@ -136,6 +140,60 @@ func parseJetBrainsManifest(contents []byte, home, path string) (model.Asset, er
 			"capabilities":      "",
 		},
 	}, nil
+}
+
+func validateJetBrainsIdentityElements(contents []byte) error {
+	decoder := xml.NewDecoder(bytes.NewReader(contents))
+	decoder.Strict = true
+	depth := 0
+	rootSeen := false
+	rootClosed := false
+	seenIdentity := make(map[string]struct{}, 3)
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			if !rootSeen || !rootClosed {
+				return errInvalidManifest
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if !rootSeen {
+				if rootClosed || value.Name.Local != "idea-plugin" {
+					return errInvalidManifest
+				}
+				rootSeen = true
+				depth = 1
+				continue
+			}
+			if rootClosed {
+				return errInvalidManifest
+			}
+			if depth == 1 && (value.Name.Local == "id" || value.Name.Local == "name" || value.Name.Local == "version") {
+				if _, duplicate := seenIdentity[value.Name.Local]; duplicate {
+					return errInvalidManifest
+				}
+				seenIdentity[value.Name.Local] = struct{}{}
+			}
+			depth++
+		case xml.EndElement:
+			if !rootSeen || depth == 0 {
+				return errInvalidManifest
+			}
+			depth--
+			if depth == 0 {
+				rootClosed = true
+			}
+		case xml.CharData:
+			if (!rootSeen || rootClosed) && strings.TrimSpace(string(value)) != "" {
+				return errInvalidManifest
+			}
+		}
+	}
 }
 
 func decodeJSON(contents []byte, destination any) error {
@@ -259,14 +317,14 @@ func normalizeMetadata(value string) (string, bool) {
 	return value, true
 }
 
-func normalizeList(values []string) ([]string, bool) {
+func sanitizeMetadataList(home string, values []string, redactSensitiveName bool) ([]string, bool) {
 	if len(values) > maxMetadataItems {
 		return nil, false
 	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
 	for _, value := range values {
-		normalized, ok := normalizeMetadata(value)
+		normalized, ok := sanitizeSelectedMetadata(home, value, redactSensitiveName)
 		if !ok {
 			return nil, false
 		}
@@ -281,6 +339,127 @@ func normalizeList(values []string) ([]string, bool) {
 	}
 	sort.Strings(result)
 	return result, true
+}
+
+func sanitizeSelectedMetadata(home, value string, redactSensitiveName bool) (string, bool) {
+	normalized, ok := normalizeMetadata(value)
+	if !ok {
+		return "", false
+	}
+	if normalized == "" {
+		return "", true
+	}
+	normalized = redactHomeText(home, normalized)
+	if sanitized, found := sanitizeEmbeddedMetadataURL(home, normalized); found {
+		if len(sanitized) > maxMetadataLength {
+			return redactedMetadata, true
+		}
+		return sanitized, true
+	}
+	if structuredSensitiveMetadata(normalized) || redactSensitiveName && hasSensitiveMetadataComponent(normalized) {
+		return redactedMetadata, true
+	}
+	return normalized, true
+}
+
+func sanitizeEmbeddedMetadataURL(home, value string) (string, bool) {
+	separator := strings.Index(value, "://")
+	if separator < 1 {
+		return "", false
+	}
+	start := separator - 1
+	for start >= 0 && validSchemeCharacter(value[start]) {
+		start--
+	}
+	start++
+	parsed, err := url.Parse(value[start:])
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return redactedMetadata, true
+	}
+	parsed.User = nil
+	query := parsed.Query()
+	for key, values := range query {
+		if hasSensitiveMetadataComponent(key) {
+			query[key] = []string{redactedMetadata}
+			continue
+		}
+		for index, queryValue := range values {
+			queryValue = redactHomeText(home, queryValue)
+			if structuredSensitiveMetadata(queryValue) {
+				queryValue = redactedMetadata
+			}
+			values[index] = queryValue
+		}
+		query[key] = values
+	}
+	parsed.RawQuery = query.Encode()
+	if parsed.Fragment != "" {
+		parsed.Fragment = redactedMetadata
+	}
+	return value[:start] + parsed.String(), true
+}
+
+func validSchemeCharacter(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' || character == '+' || character == '-' || character == '.'
+}
+
+func structuredSensitiveMetadata(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "bearer ") {
+		return true
+	}
+	if key, _, found := strings.Cut(trimmed, "="); found && hasSensitiveMetadataComponent(key) {
+		return true
+	}
+	if key, _, found := strings.Cut(trimmed, ":"); found && hasSensitiveMetadataComponent(key) {
+		return true
+	}
+	fields := strings.Fields(trimmed)
+	return len(fields) > 1 && hasSensitiveMetadataComponent(fields[0])
+}
+
+func hasSensitiveMetadataComponent(value string) bool {
+	for _, component := range semanticMetadataComponents(strings.TrimLeft(value, "-")) {
+		switch component {
+		case "token", "secret", "password", "passwd", "credential", "credentials",
+			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature",
+			"authorization", "auth", "header", "headers", "env", "key":
+			return true
+		}
+	}
+	return false
+}
+
+func semanticMetadataComponents(value string) []string {
+	runes := []rune(value)
+	components := make([]string, 0, 4)
+	for start := 0; start < len(runes); {
+		for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsDigit(runes[start]) {
+			start++
+		}
+		if start == len(runes) {
+			break
+		}
+		end := start
+		for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end])) {
+			end++
+		}
+		word := runes[start:end]
+		wordStart := 0
+		for index := 1; index < len(word); index++ {
+			lowerToUpper := (unicode.IsLower(word[index-1]) || unicode.IsDigit(word[index-1])) && unicode.IsUpper(word[index])
+			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) && index+1 < len(word) && unicode.IsLower(word[index+1])
+			if lowerToUpper || acronymToWord {
+				components = append(components, strings.ToLower(string(word[wordStart:index])))
+				wordStart = index
+			}
+		}
+		components = append(components, strings.ToLower(string(word[wordStart:])))
+		start = end
+	}
+	return components
 }
 
 func redactHomeText(home, value string) string {

@@ -18,16 +18,41 @@ import (
 
 const (
 	maxManifestBytes    = 4 << 20
+	maxVSCodeEntries    = 10_000
 	maxJetBrainsEntries = 10_000
 )
 
-var errJetBrainsEntryLimit = errors.New("JetBrains entry limit reached")
+var errDirectoryEntryLimit = errors.New("directory entry limit reached")
 
 type ideCollector struct{}
 
 type vscodeRoot struct {
 	host       string
 	components []string
+}
+
+type entryBudget struct {
+	remaining int
+}
+
+func newEntryBudget(limit int) *entryBudget {
+	return &entryBudget{remaining: limit}
+}
+
+func (b *entryBudget) charge(entries int) bool {
+	if entries < 0 || entries > b.remaining {
+		return false
+	}
+	b.remaining -= entries
+	return true
+}
+
+func (b *entryBudget) readDirectory(ctx context.Context, root platform.RootedDirectory) ([]os.DirEntry, error) {
+	entries, err := readDirectory(ctx, root, b.remaining)
+	if !b.charge(len(entries)) {
+		return nil, errDirectoryEntryLimit
+	}
+	return entries, err
 }
 
 // New returns a collector restricted to built-in VS Code-family and JetBrains
@@ -97,13 +122,16 @@ func (*ideCollector) collectVSCodeRoot(ctx context.Context, homeRoot platform.Ro
 	}
 	defer extensionsRoot.Close()
 
-	entries, err := readDirectory(ctx, extensionsRoot, -1)
+	entries, err := readDirectory(ctx, extensionsRoot, maxVSCodeEntries)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, rootPath))
-		return nil
+		if errors.Is(err, errDirectoryEntryLimit) {
+			result.Errors = append(result.Errors, coverageError("entry_limit", "IDE extension entry limit reached", home, rootPath))
+		} else {
+			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, rootPath))
+		}
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -165,12 +193,14 @@ func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.Roo
 	}
 	defer jetBrainsRoot.Close()
 
-	remaining := maxJetBrainsEntries
-	products, err := readDirectory(ctx, jetBrainsRoot, remaining)
+	budget := newEntryBudget(maxJetBrainsEntries)
+	products, err := budget.readDirectory(ctx, jetBrainsRoot)
 	if err != nil {
-		return handleJetBrainsTraversalError(ctx, err, home, rootPath, result)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		appendJetBrainsTraversalError(err, home, rootPath, result)
 	}
-	remaining -= len(products)
 	for _, product := range products {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -194,26 +224,23 @@ func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.Roo
 			}
 			continue
 		}
-		plugins, readErr := readDirectory(ctx, pluginsRoot, remaining)
+		plugins, readErr := budget.readDirectory(ctx, pluginsRoot)
 		if readErr != nil {
-			_ = pluginsRoot.Close()
-			if err := handleJetBrainsTraversalError(ctx, readErr, home, filepath.Join(productPath, "plugins"), result); err != nil {
-				return err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				_ = pluginsRoot.Close()
+				return ctxErr
 			}
-			return nil
+			appendJetBrainsTraversalError(readErr, home, filepath.Join(productPath, "plugins"), result)
+			if !errors.Is(readErr, errDirectoryEntryLimit) {
+				_ = pluginsRoot.Close()
+				continue
+			}
 		}
-		remaining -= len(plugins)
 		for _, plugin := range plugins {
 			if err := ctx.Err(); err != nil {
 				_ = pluginsRoot.Close()
 				return err
 			}
-			if remaining == 0 {
-				_ = pluginsRoot.Close()
-				result.Errors = append(result.Errors, coverageError("entry_limit", "JetBrains plugin entry limit reached", home, rootPath))
-				return nil
-			}
-			remaining--
 			pluginPath := filepath.Join(productPath, "plugins", plugin.Name())
 			pluginRoot, ok := openChildDirectory(ctx, pluginsRoot, plugin.Name(), home, pluginPath, result)
 			if !ok {
@@ -288,16 +315,25 @@ func readDirectory(ctx context.Context, root platform.RootedDirectory, limit int
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		batch, err := directory.ReadDir(128)
+		batchSize := 128
+		if limit >= 0 {
+			remainingWithSentinel := limit + 1 - len(entries)
+			if remainingWithSentinel < batchSize {
+				batchSize = remainingWithSentinel
+			}
+		}
+		batch, err := directory.ReadDir(batchSize)
 		entries = append(entries, batch...)
 		if limit >= 0 && len(entries) > limit {
-			return nil, errJetBrainsEntryLimit
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			return entries[:limit], errDirectoryEntryLimit
 		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			return entries, err
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
@@ -338,16 +374,12 @@ func (r *contextReader) Read(buffer []byte) (int, error) {
 	return r.reader.Read(buffer)
 }
 
-func handleJetBrainsTraversalError(ctx context.Context, err error, home, path string, result *model.CollectorResult) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if errors.Is(err, errJetBrainsEntryLimit) {
+func appendJetBrainsTraversalError(err error, home, path string, result *model.CollectorResult) {
+	if errors.Is(err, errDirectoryEntryLimit) {
 		result.Errors = append(result.Errors, coverageError("entry_limit", "JetBrains plugin entry limit reached", home, path))
-		return nil
+		return
 	}
 	result.Errors = append(result.Errors, coverageError("path_unavailable", "JetBrains plugin path is unavailable", home, path))
-	return nil
 }
 
 func manifestError(code, home, path string) model.CoverageError {

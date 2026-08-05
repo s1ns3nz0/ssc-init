@@ -236,6 +236,51 @@ func TestCollectorRedactsHomeAndDoesNotPersistUnselectedManifestData(t *testing.
 	}
 }
 
+func TestCollectorSanitizesSelectedVSCodeManifestMetadata(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"main-user-marker", "main-password-marker", "main-token-marker", "main-fragment-marker",
+		"browser-user-marker", "browser-password-marker", "browser-secret-marker", "browser-fragment-marker",
+		"authorization-marker", "env-assignment-marker", "capability-api-key-marker", "capability-header-marker",
+	}
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "main", "package.json"), `{
+		"name":"main","publisher":"acme","version":"1.0.0",
+		"main":"https://main-user-marker:main-password-marker@example.test/extension.js?mode=safe&token=main-token-marker#main-fragment-marker",
+		"activationEvents":["onCommand:acme.safe","Authorization: Bearer authorization-marker","NODE_ENV=env-assignment-marker"],
+		"contributes":{"commands":{},"api-key=capability-api-key-marker":{},"X-Header: capability-header-marker":{}}
+	}`)
+	writeIDEFile(t, filepath.Join(home, ".cursor", "extensions", "browser", "package.json"), `{
+		"name":"browser","publisher":"acme","version":"1.0.0",
+		"browser":"https://browser-user-marker:browser-password-marker@example.test/browser.js?secret=browser-secret-marker&mode=safe#browser-fragment-marker",
+		"activationEvents":["onStartupFinished"],"capabilities":{"virtualWorkspaces":{}}
+	}`)
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.main@1.0.0")
+	if !strings.Contains(main.Metadata["entry_point"], "https://example.test/extension.js") || !strings.Contains(main.Metadata["entry_point"], "mode=safe") || !strings.Contains(main.Metadata["entry_point"], "redacted") ||
+		!strings.Contains(main.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(main.Metadata["activation_events"], "redacted") ||
+		!strings.Contains(main.Metadata["capabilities"], "commands") || !strings.Contains(main.Metadata["capabilities"], "redacted") {
+		t.Fatalf("main metadata=%v", main.Metadata)
+	}
+	browser := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser@1.0.0")
+	if !strings.Contains(browser.Metadata["entry_point"], "https://example.test/browser.js") || !strings.Contains(browser.Metadata["entry_point"], "mode=safe") || !strings.Contains(browser.Metadata["entry_point"], "redacted") ||
+		browser.Metadata["activation_events"] != "onStartupFinished" || browser.Metadata["capabilities"] != "virtualWorkspaces" {
+		t.Fatalf("browser metadata=%v", browser.Metadata)
+	}
+	encoded, err := json.Marshal(got.Assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range markers {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
+	}
+}
+
 func TestCollectorHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -268,6 +313,58 @@ func TestCollectorUsesOnlyTheBoundedJetBrainsManifestPattern(t *testing.T) {
 	}
 }
 
+func TestCollectorContinuesAfterOneJetBrainsProductCannotBeRead(t *testing.T) {
+	home := t.TempDir()
+	blocked := filepath.Join(home, "Library", "Application Support", "JetBrains", "Alpha", "plugins")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeIDEFile(t, filepath.Join(home, "Library", "Application Support", "JetBrains", "Zulu", "plugins", "good", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.good</id><name>Good</name><version>1.0.0</version></idea-plugin>`)
+	env := testutil.Environment(t, home)
+	env.FS = ideReadDirFaultFileSystem{OSFileSystem: platform.OSFileSystem{}, blocked: blocked}
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:jetbrains:org.example.good@1.0.0")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Path != "$HOME/Library/Application Support/JetBrains/Alpha/plugins" || strings.Contains(string(encoded), home) || strings.Contains(string(encoded), "permission denied") {
+		t.Fatalf("result=%s", encoded)
+	}
+}
+
+func TestCollectorRejectsRepeatedDirectJetBrainsIdentityElements(t *testing.T) {
+	home := t.TempDir()
+	plugins := filepath.Join(home, "Library", "Application Support", "JetBrains", "Idea", "plugins")
+	writeIDEFile(t, filepath.Join(plugins, "good", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.good</id><name>Good</name><version>1.0.0</version><vendor><id>nested-id-ignored</id></vendor></idea-plugin>`)
+	marker := "duplicate-jetbrains-secret-marker"
+	writeIDEFile(t, filepath.Join(plugins, "duplicate-id", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.ambiguous</id><id>org.example.`+marker+`</id><name>Ambiguous</name><version>1.0.0</version></idea-plugin>`)
+	writeIDEFile(t, filepath.Join(plugins, "duplicate-name", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.name</id><name>Ambiguous</name><name>`+marker+`</name><version>1.0.0</version></idea-plugin>`)
+	writeIDEFile(t, filepath.Join(plugins, "duplicate-version", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.version</id><name>Ambiguous</name><version>1.0.0</version><version>`+marker+`</version></idea-plugin>`)
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:jetbrains:org.example.good@1.0.0")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.CoveragePartial || len(got.Assets) != 1 || len(got.Errors) != 3 || strings.Contains(string(encoded), marker) || strings.Contains(string(encoded), "nested-id-ignored") {
+		t.Fatalf("result=%s", encoded)
+	}
+	for _, coverageErr := range got.Errors {
+		if coverageErr.Code != "manifest_invalid" {
+			t.Fatalf("error=%+v", coverageErr)
+		}
+	}
+}
+
 func TestJetBrainsDirectoryReadStopsAtEntryLimit(t *testing.T) {
 	home := t.TempDir()
 	rooted, err := platform.OSFileSystem{}.OpenRoot(home)
@@ -278,7 +375,7 @@ func TestJetBrainsDirectoryReadStopsAtEntryLimit(t *testing.T) {
 	generated := &generatedRoot{RootedDirectory: rooted, entries: maxJetBrainsEntries + 1}
 
 	_, err = readDirectory(context.Background(), generated, maxJetBrainsEntries)
-	if !errors.Is(err, errJetBrainsEntryLimit) {
+	if !errors.Is(err, errDirectoryEntryLimit) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -293,8 +390,72 @@ func TestJetBrainsDirectoryReadRejectsEntriesWhenBudgetIsExhausted(t *testing.T)
 	generated := &generatedRoot{RootedDirectory: rooted, entries: 1}
 
 	_, err = readDirectory(context.Background(), generated, 0)
-	if !errors.Is(err, errJetBrainsEntryLimit) {
+	if !errors.Is(err, errDirectoryEntryLimit) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDirectoryReadReturnsDeterministicBoundedPrefixAtLimit(t *testing.T) {
+	home := t.TempDir()
+	rooted, err := platform.OSFileSystem{}.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	generated := &generatedRoot{RootedDirectory: rooted, entries: 3}
+
+	entries, err := readDirectory(context.Background(), generated, 2)
+	if !errors.Is(err, errDirectoryEntryLimit) {
+		t.Fatalf("error=%v", err)
+	}
+	got := make([]string, len(entries))
+	for index, entry := range entries {
+		got[index] = entry.Name()
+	}
+	if want := []string{"entry-00000", "entry-00001"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries=%v want=%v", got, want)
+	}
+}
+
+func TestCollectorMarksVSCodeRootPartialAndProcessesPrefixAtEntryLimit(t *testing.T) {
+	home := t.TempDir()
+	extensions := filepath.Join(home, ".vscode", "extensions")
+	writeIDEFile(t, filepath.Join(extensions, "aaa-good", "package.json"), `{"name":"good","publisher":"acme","version":"1.0.0"}`)
+	actual, err := os.ReadDir(extensions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]os.DirEntry, 0, maxVSCodeEntries+1)
+	entries = append(entries, actual[0])
+	for index := 0; index < maxVSCodeEntries; index++ {
+		entries = append(entries, generatedEntry{name: fmt.Sprintf("zzzz-synthetic-%05d", index)})
+	}
+	env := testutil.Environment(t, home)
+	env.FS = boundedVSFileSystem{OSFileSystem: platform.OSFileSystem{}, target: extensions, entries: entries}
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.good@1.0.0")
+	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Code != "entry_limit" || got.Errors[0].Path != "$HOME/.vscode/extensions" {
+		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestJetBrainsEntryBudgetChargesEachEnumeratedEntryOnce(t *testing.T) {
+	budget := newEntryBudget(maxJetBrainsEntries)
+	if !budget.charge(1) || !budget.charge(5_000) {
+		t.Fatal("product plus 5,000 plugins must fit")
+	}
+	if budget.remaining != 4_999 {
+		t.Fatalf("remaining=%d want=4999", budget.remaining)
+	}
+	if !budget.charge(4_999) {
+		t.Fatal("exact 10,000-entry boundary must fit")
+	}
+	if budget.charge(1) {
+		t.Fatal("entry 10,001 must be rejected")
 	}
 }
 
@@ -321,6 +482,118 @@ type ideSwapFileSystem struct {
 	platform.OSFileSystem
 	targetDirectory string
 	replacement     string
+}
+
+type ideReadDirFaultFileSystem struct {
+	platform.OSFileSystem
+	blocked string
+}
+
+type boundedVSFileSystem struct {
+	platform.OSFileSystem
+	target  string
+	entries []os.DirEntry
+}
+
+func (f boundedVSFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &boundedVSRoot{RootedDirectory: root, current: name, target: f.target, entries: f.entries}, nil
+}
+
+type boundedVSRoot struct {
+	platform.RootedDirectory
+	current string
+	target  string
+	entries []os.DirEntry
+}
+
+func (r *boundedVSRoot) Lstat(name string) (os.FileInfo, error) {
+	if r.current == r.target && strings.HasPrefix(name, "zzzz-synthetic-") {
+		return generatedInfo{}, nil
+	}
+	return r.RootedDirectory.Lstat(name)
+}
+
+func (r *boundedVSRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &boundedVSRoot{RootedDirectory: child, current: filepath.Join(r.current, name), target: r.target, entries: r.entries}, nil
+}
+
+func (r *boundedVSRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if r.current == r.target && name == "." {
+		return &sliceDirectory{RootedFile: file, entries: r.entries}, nil
+	}
+	return file, nil
+}
+
+type sliceDirectory struct {
+	platform.RootedFile
+	entries []os.DirEntry
+	offset  int
+}
+
+func (d *sliceDirectory) ReadDir(count int) ([]os.DirEntry, error) {
+	if d.offset == len(d.entries) {
+		return nil, io.EOF
+	}
+	end := len(d.entries)
+	if count > 0 && d.offset+count < end {
+		end = d.offset + count
+	}
+	batch := d.entries[d.offset:end]
+	d.offset = end
+	return batch, nil
+}
+
+func (f ideReadDirFaultFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &ideReadDirFaultRoot{RootedDirectory: root, current: name, blocked: f.blocked}, nil
+}
+
+type ideReadDirFaultRoot struct {
+	platform.RootedDirectory
+	current string
+	blocked string
+}
+
+func (r *ideReadDirFaultRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &ideReadDirFaultRoot{RootedDirectory: child, current: filepath.Join(r.current, name), blocked: r.blocked}, nil
+}
+
+func (r *ideReadDirFaultRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if r.current == r.blocked && name == "." {
+		return &ideReadDirFaultFile{RootedFile: file}, nil
+	}
+	return file, nil
+}
+
+type ideReadDirFaultFile struct {
+	platform.RootedFile
+}
+
+func (*ideReadDirFaultFile) ReadDir(int) ([]os.DirEntry, error) {
+	return nil, fs.ErrPermission
 }
 
 func (f ideSwapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
