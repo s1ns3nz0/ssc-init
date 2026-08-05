@@ -20,11 +20,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // Run executes the CLI command represented by args.
 func (a App) Run(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
-		_ = json.NewEncoder(stdout).Encode(map[string]string{
+		if err := json.NewEncoder(stdout).Encode(map[string]string{
 			"product": "SSC Init",
 			"command": "ssc-init",
 			"version": a.Version,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "failed to write version output: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 
