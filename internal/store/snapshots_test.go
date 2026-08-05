@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -288,7 +290,7 @@ func TestOpenCreatesPrivateParentsAndDatabase(t *testing.T) {
 }
 
 func TestOpenRefusesInsecureExistingParent(t *testing.T) {
-	parent := t.TempDir()
+	parent := canonicalTempDir(t)
 	if err := os.Chmod(parent, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -366,6 +368,166 @@ func TestOpenEscapesFilenameQueryCharacters(t *testing.T) {
 	}
 }
 
+func TestOpenDetectsInjectedPathReplacement(t *testing.T) {
+	parent := privateTempDir(t)
+	path := filepath.Join(parent, "state.db")
+	testHookAfterDatabaseGuard = func(path string) error {
+		if err := os.Rename(path, path+".guarded"); err != nil {
+			return err
+		}
+		return os.WriteFile(path, nil, 0o600)
+	}
+	t.Cleanup(func() { testHookAfterDatabaseGuard = nil })
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "pathname changed") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("replacement pathname was incorrectly removed: %v", err)
+	}
+}
+
+func TestSQLiteFilesRemainPrivate(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SaveScan(context.Background(), testScan("sidecars", time.Unix(2, 0).UTC()), model.Inventory{Assets: []model.Asset{{ID: "asset"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{s.Path(), s.Path() + "-wal", s.Path() + "-shm"} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode=%04o", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestSaveRejectsSensitiveSnapshotsWithoutRows(t *testing.T) {
+	markers := []string{
+		"ghp_123456789012345678901234567890123456",
+		"xoxb-1234567890-abcdefghij",
+		"sk-123456789012345678901234567890",
+		"AKIA1234567890ABCDEF",
+		"npm_123456789012345678901234567890",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+		"-----BEGIN PRIVATE KEY-----",
+		"https://user:password@example.test/path",
+		"https://example.test/path?access_token=raw-value",
+		"Authorization: Bearer abcdefghijklmnop",
+		"SERVICE_TOKEN=raw-value",
+	}
+	for index, marker := range markers {
+		t.Run(fmt.Sprintf("marker-%d", index), func(t *testing.T) {
+			s := openTestStore(t)
+			scan := testScan("sensitive", time.Unix(2, 0).UTC())
+			inventory := model.Inventory{Assets: []model.Asset{{ID: "asset", Name: marker}}}
+			if err := s.SaveScan(context.Background(), scan, inventory); !errors.Is(err, ErrSensitiveSnapshot) || err.Error() != ErrSensitiveSnapshot.Error() {
+				t.Fatalf("error = %v", err)
+			}
+			assertNoSnapshotRows(t, s)
+		})
+	}
+	t.Run("sensitive metadata key", func(t *testing.T) {
+		s := openTestStore(t)
+		inventory := model.Inventory{Assets: []model.Asset{{ID: "asset", Metadata: map[string]string{"raw_token": "value"}}}}
+		if err := s.SaveScan(context.Background(), testScan("metadata", time.Unix(2, 0).UTC()), inventory); !errors.Is(err, ErrSensitiveSnapshot) {
+			t.Fatalf("error = %v", err)
+		}
+		assertNoSnapshotRows(t, s)
+	})
+}
+
+func TestSaveRejectsInvalidShapeWithoutRows(t *testing.T) {
+	s := openTestStore(t)
+	invalid := model.Inventory{
+		Assets:        []model.Asset{{ID: "asset"}},
+		Relationships: []model.Relationship{{From: "asset", Kind: "uses", To: "missing"}},
+	}
+	if err := s.SaveScan(context.Background(), testScan("invalid", time.Unix(2, 0).UTC()), invalid); err == nil {
+		t.Fatal("invalid relationship unexpectedly saved")
+	}
+	assertNoSnapshotRows(t, s)
+}
+
+func TestLatestInventoryRejectsDeletedSnapshotRows(t *testing.T) {
+	deletions := []struct {
+		name       string
+		statements []string
+	}{
+		{name: "asset", statements: []string{`DELETE FROM asset_state WHERE asset_id = 'b'`, `DELETE FROM assets WHERE asset_id = 'b'`}},
+		{name: "relationship", statements: []string{`DELETE FROM relationship_state WHERE relationship_index = 1`, `DELETE FROM relationships WHERE kind = 'second'`}},
+		{name: "error", statements: []string{`DELETE FROM inventory_errors WHERE error_index = 1`}},
+	}
+	for _, deletion := range deletions {
+		t.Run(deletion.name, func(t *testing.T) {
+			s := openTestStore(t)
+			inventory := model.Inventory{
+				Assets: []model.Asset{{ID: "a"}, {ID: "b"}},
+				Relationships: []model.Relationship{
+					{From: "a", Kind: "first", To: "b"},
+					{From: "b", Kind: "second", To: "a"},
+				},
+				Errors: []model.CoverageError{{Code: "one", Message: "one"}, {Code: "two", Message: "two"}},
+			}
+			if err := s.SaveScan(context.Background(), testScan("counts", time.Unix(2, 0).UTC()), inventory); err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range deletion.statements {
+				if _, err := s.db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := s.LatestInventory(context.Background()); err == nil || !strings.Contains(err.Error(), "count mismatch") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate string
+	}{
+		{name: "negative", mutate: `UPDATE schema_migrations SET version = -1 WHERE version = 1`},
+		{name: "gap", mutate: `DELETE FROM schema_migrations WHERE version = 2`},
+		{name: "future", mutate: `UPDATE schema_migrations SET version = 99 WHERE version = 3`},
+		{name: "missing table", mutate: `DROP TABLE coverage`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(privateTempDir(t), "state.db")
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(tt.mutate); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(path); err == nil {
+				reopened.Close()
+				t.Fatal("malformed migration state unexpectedly opened")
+			}
+		})
+	}
+}
+
+func assertNoSnapshotRows(t *testing.T, s *Store) {
+	t.Helper()
+	for _, table := range []string{"scans", "assets", "relationships", "coverage", "inventory_errors", "inventory_state"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s contains %d rows", table, count)
+		}
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(privateTempDir(t), "state.db"))
@@ -382,8 +544,19 @@ func openTestStore(t *testing.T) *Store {
 
 func privateTempDir(t *testing.T) string {
 	t.Helper()
-	directory := t.TempDir()
+	directory := canonicalTempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+// canonicalTempDir resolves macOS's system /var alias in test fixtures. The
+// production path traversal intentionally never follows aliases.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
 	return directory

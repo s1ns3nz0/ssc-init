@@ -17,6 +17,9 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := validateSnapshot(scan, inventory); err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin snapshot transaction: %w", err)
@@ -71,14 +74,15 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 			return fmt.Errorf("insert inventory error %d: %w", index, err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil) VALUES (?, ?, ?, ?)`,
-		scan.ScanID, boolInt(inventory.Assets == nil), boolInt(inventory.Relationships == nil), boolInt(inventory.Errors == nil)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		scan.ScanID, boolInt(inventory.Assets == nil), boolInt(inventory.Relationships == nil), boolInt(inventory.Errors == nil),
+		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
-	return nil
+	return secureSQLiteFiles(s.path, s.guard)
 }
 
 // LatestInventory loads the newest inventory by finished time, breaking ties by scan ID.
@@ -95,9 +99,9 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 		return model.Inventory{}, false, fmt.Errorf("select latest scan: %w", err)
 	}
 
-	var assetsNil, relationshipsNil, errorsNil int
-	if err := s.db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil FROM inventory_state WHERE scan_id = ?`, scanID).
-		Scan(&assetsNil, &relationshipsNil, &errorsNil); err != nil {
+	var assetsNil, relationshipsNil, errorsNil, assetCount, relationshipCount, errorCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count FROM inventory_state WHERE scan_id = ?`, scanID).
+		Scan(&assetsNil, &relationshipsNil, &errorsNil, &assetCount, &relationshipCount, &errorCount); err != nil {
 		return model.Inventory{}, false, fmt.Errorf("load inventory state for scan %q: %w", scanID, err)
 	}
 	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil); err != nil {
@@ -109,6 +113,9 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	if err != nil {
 		return model.Inventory{}, false, err
 	}
+	if assetCount < 0 || len(assets) != assetCount {
+		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: asset row count mismatch", scanID)
+	}
 	if assetsNil == 0 {
 		inventory.Assets = assets
 	} else if len(assets) != 0 {
@@ -118,6 +125,9 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	if err != nil {
 		return model.Inventory{}, false, err
 	}
+	if relationshipCount < 0 || len(relationships) != relationshipCount {
+		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: relationship row count mismatch", scanID)
+	}
 	if relationshipsNil == 0 {
 		inventory.Relationships = relationships
 	} else if len(relationships) != 0 {
@@ -126,6 +136,9 @@ func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, err
 	inventoryErrors, err := s.loadInventoryErrors(ctx, scanID)
 	if err != nil {
 		return model.Inventory{}, false, err
+	}
+	if errorCount < 0 || len(inventoryErrors) != errorCount {
+		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: error row count mismatch", scanID)
 	}
 	if errorsNil == 0 {
 		inventory.Errors = inventoryErrors
