@@ -385,17 +385,15 @@ func sensitiveName(value string) bool {
 }
 
 func hasSensitiveComponent(value string) bool {
+	if value == "authorizationHelper" || value == "AuthorizationHelper" {
+		return false
+	}
 	components := semanticComponents(value)
 	for _, component := range components {
 		switch component {
 		case "token", "secret", "password", "passwd", "credential", "credentials",
-			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key":
-			return true
-		}
-	}
-	if len(components) == 1 {
-		switch components[0] {
-		case "authorization", "auth", "header", "headers", "env":
+			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key",
+			"authorization", "auth", "header", "headers", "env":
 			return true
 		}
 	}

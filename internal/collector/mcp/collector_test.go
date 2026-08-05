@@ -262,6 +262,72 @@ func TestMCPCollectorSplitsCamelCaseSensitiveNamesPrecisely(t *testing.T) {
 	}
 }
 
+func TestMCPCollectorSanitizesSensitiveComponentsInsideCompounds(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"proxy-authorization-split-marker", "proxy-authorization-equals-marker",
+		"auth-header-split-marker", "auth-header-equals-marker",
+		"http-header-split-marker", "http-header-equals-marker",
+		"query-proxy-authorization-marker", "query-auth-header-marker", "query-http-header-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"compounds": {
+				"command": "/usr/local/bin/auth-mcp",
+				"args": [
+					"--proxyAuthorization", "proxy-authorization-split-marker",
+					"--proxyAuthorization=proxy-authorization-equals-marker",
+					"--authHeader", "auth-header-split-marker",
+					"--authHeader=auth-header-equals-marker",
+					"--http-header", "X-Api-Key: http-header-split-marker",
+					"--http-header=X-Api-Key: http-header-equals-marker",
+					"--tokenizerModel", "safe-tokenizer-value",
+					"-hostlocalhost",
+					"--authorizationHelper=safe-authorization-helper",
+					"--AuthorizationHelper=safe-pascal-authorization-helper"
+				],
+				"url": "https://example.test/mcp?proxyAuthorization=query-proxy-authorization-marker&authHeader=query-auth-header-marker&http-header=query-http-header-marker&authorizationHelper=safe-query-authorization&AuthorizationHelper=safe-query-pascal-authorization"
+			}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:compounds")
+	encoded, marshalErr := json.Marshal(asset)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, marker := range markers {
+		if bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
+	}
+	if asset.Metadata["command"] != "/usr/local/bin/auth-mcp" {
+		t.Fatalf("safe command=%q", asset.Metadata["command"])
+	}
+	for _, safe := range []string{
+		"--tokenizerModel\x1fsafe-tokenizer-value\x1f-hostlocalhost",
+		"--authorizationHelper=safe-authorization-helper",
+		"--AuthorizationHelper=safe-pascal-authorization-helper",
+	} {
+		if !strings.Contains(asset.Metadata["args"], safe) {
+			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
+		}
+	}
+	for _, safe := range []string{
+		"authorizationHelper=safe-query-authorization",
+		"AuthorizationHelper=safe-query-pascal-authorization",
+	} {
+		if !strings.Contains(asset.Metadata["url"], safe) {
+			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
+		}
+	}
+}
+
 func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
