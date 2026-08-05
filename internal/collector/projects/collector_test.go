@@ -70,6 +70,31 @@ func TestProjectsCollectorSkipsEffectivelyEmptyRootSet(t *testing.T) {
 	}
 }
 
+func TestProjectsCollectorPreservesSpacesInSuppliedRoot(t *testing.T) {
+	home := t.TempDir()
+	for _, directory := range []string{"Projects", "Projects "} {
+		path := filepath.Join(home, directory, "package.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := testutil.Environment(t, home)
+
+	got, err := projects.New([]string{"$HOME/Projects "}).Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "project-file:manifest:$HOME/Projects /package.json")
+	for _, asset := range got.Assets {
+		if asset.Path == "$HOME/Projects/package.json" || asset.Path == "$HOME/Projects" {
+			t.Fatalf("traversed unsupplied root: %+v", asset)
+		}
+	}
+}
+
 func TestProjectsCollectorRecognizesSupportedFilesAndProjectMCP(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, "Projects", "polyglot")

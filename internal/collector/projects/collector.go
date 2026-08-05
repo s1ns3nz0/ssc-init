@@ -141,8 +141,7 @@ func uniqueRoots(roots []string, home string) []string {
 	seen := make(map[string]struct{}, len(roots))
 	resolved := make([]string, 0, len(roots))
 	for _, root := range roots {
-		root = strings.TrimSpace(root)
-		if root == "" {
+		if strings.TrimSpace(root) == "" {
 			continue
 		}
 		root = expandHome(root, home)
