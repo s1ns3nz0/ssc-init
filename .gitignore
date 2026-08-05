@@ -1,1 +1,11 @@
 .worktrees/
+/dist/
+
+# Local SSC Init state and SQLite sidecars.
+/state.db
+/state.db-shm
+/state.db-wal
+
+# Explicitly named local reports; fixtures and testdata JSON remain tracked.
+/ssc-init-report.json
+/ssc-init-report-*.json
