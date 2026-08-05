@@ -68,7 +68,7 @@ file dist/ssc-init-darwin-*
 shasum -a 256 -c dist/checksums.txt
 ```
 
-The script can be invoked from any working directory and produces static Darwin arm64 and amd64 binaries under `dist/`.
+The script can be invoked from any working directory and produces CGO-free, self-contained Darwin arm64 and amd64 executables under `dist/`, with no separately installed runtime required. Each executable reports `dev+git.<full-commit>` from the committed HEAD of the source worktree. Dirty tracked changes are not represented in that version, so release artifacts must be built from a clean tracked worktree.
 
 ## Licensing
 
