@@ -1,4 +1,4 @@
-# DevGuard Design
+# SSC Init Design
 
 **Status:** Approved  
 **Date:** 2026-08-05  
@@ -6,11 +6,13 @@
 
 ## 1. Product definition
 
-DevGuard is an open-source, snapshot-based developer supply-chain scanner for macOS laptops. It inventories and analyzes developer-executable assets across the current user's environment without behaving like an EDR: it does not install kernel components, intercept network packets, recursively scan arbitrary personal files, or continuously monitor processes and filesystem events.
+SSC Init is an open-source, snapshot-based developer supply-chain scanner for macOS laptops. Its expanded brand line is **“Software Supply Chain Security, Initialized.”** The repository, package, and CLI identifier is `ssc-init`; the primary tagline is **“Software supply chain security starts here.”**
+
+SSC Init inventories and analyzes developer-executable assets across the current user's environment without behaving like an EDR: it does not install kernel components, intercept network packets, recursively scan arbitrary personal files, or continuously monitor processes and filesystem events.
 
 The same local engine is exposed through separate Claude, Codex, and Cursor plugins. Those plugins provide host-specific skills, hooks, rules, and feedback while sharing one scanner, one inventory, one policy state, and one threat-intelligence state.
 
-DevGuard detects malicious and suspicious assets based on provenance, known intelligence, static behavior, change history, and organization policy. It does not claim that a scan proves an asset safe. Threat-actor names are presented only as sourced campaign correlations, never as independent attribution.
+SSC Init detects malicious and suspicious assets based on provenance, known intelligence, static behavior, change history, and organization policy. It does not claim that a scan proves an asset safe. Threat-actor names are presented only as sourced campaign correlations, never as independent attribution.
 
 ## 2. Goals
 
@@ -87,7 +89,7 @@ Each adapter:
 
 ### 5.2 Core executable
 
-The core is a signed, notarized macOS Universal Binary built from Go for arm64 and amd64 with `CGO_ENABLED=0`. The MVP has no mandatory external runtime dependencies. Optional developer tools enrich coverage but their absence skips only the corresponding collector.
+The core executable is named `ssc-init`. It is a signed, notarized macOS Universal Binary built from Go for arm64 and amd64 with `CGO_ENABLED=0`. The MVP has no mandatory external runtime dependencies. Optional developer tools enrich coverage but their absence skips only the corresponding collector.
 
 Core modules have stable JSON contracts:
 
@@ -102,7 +104,7 @@ Core modules have stable JSON contracts:
 
 ### 5.3 Shared installation
 
-All adapters use one installation under `~/Library/Application Support/DevGuard/`:
+All adapters use one installation under `~/Library/Application Support/SSC Init/`:
 
 - versioned core binaries and a current-version pointer;
 - a single state database;
@@ -146,7 +148,7 @@ Dynamic sandboxing is a future adapter, invoked only with explicit user approval
 - Exact versions and hashes receive normal verification.
 - Registry versions must match registry integrity metadata.
 - `latest`, unspecified versions, and mutable Git branches produce a High warning for personal use and are blocked by default under organization policy.
-- Direct remote-script execution such as `curl ... | sh` is blocked by default. DevGuard recommends download, verification, scan, then execution.
+- Direct remote-script execution such as `curl ... | sh` is blocked by default. SSC Init recommends download, verification, scan, then execution.
 
 ## 7. Threat intelligence
 
@@ -216,7 +218,7 @@ Exceptions are limited to a run, exact asset/version/hash, project, or organizat
 
 ### 9.4 Remediation
 
-For known malicious installed assets, DevGuard blocks further execution where possible, identifies running related processes, proposes IDE/MCP disablement, offers reversible quarantine, and creates credential-exposure follow-up steps. Quarantine removes execution permission, preserves original path/hash/permissions, remains current-user-only, and is reversible. DevGuard never automatically deletes quarantined artifacts.
+For known malicious installed assets, SSC Init blocks further execution where possible, identifies running related processes, proposes IDE/MCP disablement, offers reversible quarantine, and creates credential-exposure follow-up steps. Quarantine removes execution permission, preserves original path/hash/permissions, remains current-user-only, and is reversible. SSC Init never automatically deletes quarantined artifacts.
 
 ## 10. Privacy and storage
 
