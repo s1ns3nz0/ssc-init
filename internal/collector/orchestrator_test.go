@@ -3,6 +3,8 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,6 +58,27 @@ func TestOrchestratorContainsPanicsAndDeadlines(t *testing.T) {
 		t.Fatalf("got=%+v", got)
 	}
 	if got[2].Collector != "timeout" || got[2].Status != model.CoverageFailed {
+		t.Fatalf("got=%+v", got)
+	}
+}
+
+func TestOrchestratorSanitizesCollectorFailures(t *testing.T) {
+	const secretMarker = "ssc-init-secret-marker-4e5d7c"
+	o := Orchestrator{Collectors: []Collector{
+		fakeCollector{name: "error", err: fmt.Errorf("command failed: %s", secretMarker)},
+		collectorFunc{name: "panic", fn: func(context.Context, Environment) (model.CollectorResult, error) {
+			panic(secretMarker)
+		}},
+	}}
+
+	got := o.Collect(context.Background(), Environment{})
+	if strings.Contains(fmt.Sprintf("%+v", got), secretMarker) {
+		t.Fatalf("collector result leaked secret marker: %+v", got)
+	}
+	if got[0].Collector != "error" || got[0].Errors[0].Code != "collector_error" || got[0].Errors[0].Message != "collector failed" {
+		t.Fatalf("got=%+v", got)
+	}
+	if got[1].Collector != "panic" || got[1].Errors[0].Code != "collector_panic" || got[1].Errors[0].Message != "collector panicked" {
 		t.Fatalf("got=%+v", got)
 	}
 }

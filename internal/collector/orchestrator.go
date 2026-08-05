@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -76,7 +75,7 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 	name := ""
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			result = failedResult(name, "collector_panic", fmt.Sprintf("collector panicked: %v", recovered))
+			result = failedResult(name, "collector_panic", "collector panicked")
 		}
 	}()
 
@@ -96,7 +95,7 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 		return failedResult(name, "collector_timeout", "collector deadline exceeded")
 	}
 	if err != nil {
-		return failedResult(name, "collector_error", err.Error())
+		return failedResult(name, "collector_error", "collector failed")
 	}
 	return result
 }

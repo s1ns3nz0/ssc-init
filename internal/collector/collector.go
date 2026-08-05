@@ -18,6 +18,7 @@ type Environment struct {
 }
 
 // Collector discovers one portion of the local software supply chain.
+// Implementations must promptly return when ctx.Done() is closed.
 type Collector interface {
 	Name() string
 	Collect(context.Context, Environment) (model.CollectorResult, error)
