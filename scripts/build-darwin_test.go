@@ -52,7 +52,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		t.Helper()
 		command := exec.Command("sh", script)
 		command.Dir = t.TempDir()
-		command.Env = append(os.Environ(), "SOURCE_DATE_EPOCH=0")
+		command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("build failed: %v\n%s", err, output)
 		}
@@ -96,16 +96,100 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 	}
 }
 
+func TestBuildScriptRejectsDirtySourcesBeforeCreatingDist(t *testing.T) {
+	tests := []struct {
+		name  string
+		dirty func(*testing.T, string)
+	}{
+		{
+			name: "unstaged tracked change",
+			dirty: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "staged change",
+			dirty: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("staged\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, root, "add", "tracked.txt")
+			},
+		},
+		{
+			name: "untracked entry",
+			dirty: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, "untracked-secret-name.txt"), []byte("new\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, script, environment := newIsolatedReleaseRepository(t)
+			test.dirty(t, root)
+
+			command := exec.Command("sh", script)
+			command.Dir = t.TempDir()
+			command.Env = environment
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("build accepted dirty sources:\n%s", output)
+			}
+			if got := strings.TrimSpace(string(output)); got != "release build requires a clean worktree" {
+				t.Fatalf("unexpected or filename-leaking error %q", got)
+			}
+			if _, err := os.Stat(filepath.Join(root, "dist")); !os.IsNotExist(err) {
+				t.Fatalf("dist was created before clean-worktree rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildScriptAllowsIgnoredEntries(t *testing.T) {
+	root, script, environment := newIsolatedReleaseRepository(t)
+	for _, path := range []string{
+		filepath.Join(root, ".superpowers", "local-note"),
+		filepath.Join(root, "dist", "ignored-cache"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("ignored\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	command := exec.Command("sh", script)
+	command.Dir = t.TempDir()
+	command.Env = environment
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ignored entries blocked build: %v\n%s", err, output)
+	}
+	for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "checksums.txt"} {
+		if _, err := os.Stat(filepath.Join(root, "dist", name)); err != nil {
+			t.Fatalf("missing %s after ignored-entry build: %v", name, err)
+		}
+	}
+}
+
 func TestBuildScriptRejectsInvalidRevision(t *testing.T) {
 	repositoryRoot := repositoryRoot(t)
 	binDirectory := t.TempDir()
 	fakeGit := filepath.Join(binDirectory, "git")
-	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nprintf '%s\\n' not-a-commit\n"), 0o755); err != nil {
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\ncase \" $* \" in\n  *\" diff \"*) exit 0 ;;\n  *\" ls-files \"*) exit 0 ;;\n  *\" rev-parse \"*) printf '%s\\n' not-a-commit; exit 0 ;;\nesac\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command("sh", filepath.Join(repositoryRoot, "scripts", "build-darwin.sh"))
 	command.Dir = t.TempDir()
-	command.Env = append(os.Environ(), "PATH="+binDirectory+":/usr/bin:/bin")
+	command.Env = environmentWith("PATH", binDirectory+":/usr/bin:/bin")
 	output, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatalf("build accepted invalid revision:\n%s", output)
@@ -113,6 +197,60 @@ func TestBuildScriptRejectsInvalidRevision(t *testing.T) {
 	if !bytes.Contains(output, []byte("revision is not a 40-character lowercase hexadecimal commit")) {
 		t.Fatalf("unexpected failure for invalid revision: %v\n%s", err, output)
 	}
+}
+
+func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "build-darwin.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "scripts", "build-darwin.sh")
+	if err := os.WriteFile(script, source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/dist/\n/.superpowers/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("clean\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "init", "-q")
+	runGit(t, root, "config", "user.email", "ssc-init-tests@example.invalid")
+	runGit(t, root, "config", "user.name", "SSC Init Tests")
+	runGit(t, root, "add", ".gitignore", "scripts/build-darwin.sh", "tracked.txt")
+	runGit(t, root, "commit", "-q", "-m", "fixture")
+
+	binDirectory := t.TempDir()
+	fakeGo := filepath.Join(binDirectory, "go")
+	fakeGoSource := "#!/bin/sh\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
+	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
+}
+
+func runGit(t *testing.T, root string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
+	}
+}
+
+func environmentWith(name, value string) []string {
+	prefix := name + "="
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, prefix) {
+			environment = append(environment, entry)
+		}
+	}
+	return append(environment, prefix+value)
 }
 
 func worktreeRevision(t *testing.T, repositoryRoot string) string {

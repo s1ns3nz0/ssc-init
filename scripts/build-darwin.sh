@@ -14,8 +14,19 @@ SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}
 export SOURCE_DATE_EPOCH
 export LC_ALL=C
 
-mkdir -p "$DIST_DIR"
 cd "$REPOSITORY_ROOT"
+
+require_clean_worktree() {
+	echo "release build requires a clean worktree" >&2
+	exit 1
+}
+
+git -C "$REPOSITORY_ROOT" diff --quiet -- 2>/dev/null || require_clean_worktree
+git -C "$REPOSITORY_ROOT" diff --cached --quiet -- 2>/dev/null || require_clean_worktree
+UNTRACKED_ENTRIES=$(git -C "$REPOSITORY_ROOT" ls-files --others --exclude-standard 2>/dev/null) || require_clean_worktree
+if [ -n "$UNTRACKED_ENTRIES" ]; then
+	require_clean_worktree
+fi
 
 REVISION=$(git -C "$REPOSITORY_ROOT" rev-parse --verify "HEAD^{commit}") || {
 	echo "failed to resolve source worktree revision" >&2
@@ -34,6 +45,8 @@ fi
 
 VERSION="dev+git.$REVISION"
 LINKER_FLAGS="-s -w -buildid= -X main.version=$VERSION"
+
+mkdir -p "$DIST_DIR"
 
 GOARCH=arm64 go build -mod=readonly -trimpath -buildvcs=false -ldflags="$LINKER_FLAGS" -o "$DIST_DIR/ssc-init-darwin-arm64" ./cmd/ssc-init
 GOARCH=amd64 go build -mod=readonly -trimpath -buildvcs=false -ldflags="$LINKER_FLAGS" -o "$DIST_DIR/ssc-init-darwin-amd64" ./cmd/ssc-init
