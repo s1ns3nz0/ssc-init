@@ -29,6 +29,42 @@ type CollectorResult struct {
 	Errors        []CoverageError `json:"errors,omitempty"`
 }
 
+// Inventory is a normalized asset graph.
+type Inventory struct {
+	Assets        []Asset         `json:"assets"`
+	Relationships []Relationship  `json:"relationships"`
+	Errors        []CoverageError `json:"errors,omitempty"`
+}
+
+// ChangeKind identifies how an asset changed from the previous inventory.
+type ChangeKind string
+
+const (
+	ChangeAdded   ChangeKind = "added"
+	ChangeRemoved ChangeKind = "removed"
+	ChangeChanged ChangeKind = "changed"
+)
+
+// Change is one asset-level inventory change.
+type Change struct {
+	Kind    ChangeKind `json:"kind"`
+	AssetID string     `json:"assetId"`
+}
+
+// Delta contains deterministic asset-level inventory changes.
+type Delta struct {
+	Changes []Change `json:"changes"`
+}
+
+// HashStatus describes whether file hashing completed.
+type HashStatus string
+
+const (
+	HashComplete    HashStatus = "complete"
+	HashOversize    HashStatus = "oversize"
+	HashUnavailable HashStatus = "unavailable"
+)
+
 // ScanResult contains the complete scan result.
 type ScanResult struct {
 	SchemaVersion string            `json:"schemaVersion"`
