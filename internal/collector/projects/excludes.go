@@ -17,6 +17,13 @@ var excludedDirectoryNames = map[string]struct{}{
 	".bun":         {},
 	".uv":          {},
 	".tox":         {},
+	".cargo":       {},
+	".rustup":      {},
+	".gradle":      {},
+	".m2":          {},
+	".ivy2":        {},
+	".nuget":       {},
+	".pub-cache":   {},
 }
 
 func excludedDirectory(path string) bool {

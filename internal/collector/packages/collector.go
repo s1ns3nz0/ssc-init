@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 )
 
 const maxPackageManifestBytes = 1 << 20
+
+var errFilesystemAccess = errors.New("package filesystem access incomplete")
 
 type packageCollector struct{}
 
@@ -46,6 +49,9 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 			return result, err
 		}
 		commandResult, err := env.Runner.Run(ctx, probe.command, probe.args...)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
+		}
 		if err != nil || commandResult.ExitCode > 0 {
 			switch {
 			case executableMissing(err):
@@ -72,12 +78,28 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 
 		successful++
 		assets, parseErr := probe.parse(ctx, env, commandResult.Stdout)
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		for _, asset := range assets {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			assetsByID[asset.ID] = asset
+		}
 		if parseErr != nil {
 			failed++
-			result.Errors = append(result.Errors, model.CoverageError{
-				Code:    "probe_output_invalid",
-				Message: probe.ecosystem + " package output could not be parsed",
-			})
+			if errors.Is(parseErr, errFilesystemAccess) {
+				result.Errors = append(result.Errors, model.CoverageError{
+					Code:    "filesystem_unavailable",
+					Message: probe.ecosystem + " package filesystem access was incomplete",
+				})
+			} else {
+				result.Errors = append(result.Errors, model.CoverageError{
+					Code:    "probe_output_invalid",
+					Message: probe.ecosystem + " package output could not be parsed",
+				})
+			}
 			continue
 		}
 		if commandResult.Truncated {
@@ -86,9 +108,6 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 				Code:    "probe_output_truncated",
 				Message: probe.ecosystem + " package output was truncated",
 			})
-		}
-		for _, asset := range assets {
-			assetsByID[asset.ID] = asset
 		}
 	}
 
@@ -136,15 +155,22 @@ func executableMissing(err error) bool {
 }
 
 func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root := firstLine(stdout)
 	if root == "" {
 		return nil, nil
 	}
 	entries, err := env.FS.ReadDir(root)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, errFilesystemAccess
 	}
 	var manifests []string
+	accessIncomplete := false
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -156,9 +182,15 @@ func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]
 		if strings.HasPrefix(entry.Name(), "@") {
 			scoped, readErr := env.FS.ReadDir(entryPath)
 			if readErr != nil {
+				if !errors.Is(readErr, fs.ErrNotExist) {
+					accessIncomplete = true
+				}
 				continue
 			}
 			for _, packageEntry := range scoped {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				if packageEntry.IsDir() {
 					manifests = append(manifests, filepath.Join(entryPath, packageEntry.Name(), "package.json"))
 				}
@@ -170,12 +202,24 @@ func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]
 	sort.Strings(manifests)
 	assets := make([]model.Asset, 0, len(manifests))
 	for _, manifest := range manifests {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		info, statErr := env.FS.Stat(manifest)
-		if statErr != nil || info.Size() > maxPackageManifestBytes {
+		if statErr != nil {
+			if !errors.Is(statErr, fs.ErrNotExist) {
+				accessIncomplete = true
+			}
+			continue
+		}
+		if info.Size() > maxPackageManifestBytes {
 			continue
 		}
 		contents, readErr := env.FS.ReadFile(manifest)
 		if readErr != nil {
+			if !errors.Is(readErr, fs.ErrNotExist) {
+				accessIncomplete = true
+			}
 			continue
 		}
 		var parsed struct {
@@ -189,10 +233,16 @@ func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]
 		asset.Path = redactPath(env.Home, filepath.Dir(manifest))
 		assets = append(assets, asset)
 	}
+	if accessIncomplete {
+		return assets, errFilesystemAccess
+	}
 	return assets, nil
 }
 
-func parsePip(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parsePip(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(stdout) == "" {
 		return nil, nil
 	}
@@ -205,6 +255,9 @@ func parsePip(_ context.Context, _ collector.Environment, stdout string) ([]mode
 	}
 	assets := make([]model.Asset, 0, len(packages))
 	for _, pkg := range packages {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if pkg.Name != "" && pkg.Version != "" {
 			assets = append(assets, purlAsset("pypi", normalizePyPIName(pkg.Name), pkg.Version, "pip"))
 		}
@@ -212,7 +265,10 @@ func parsePip(_ context.Context, _ collector.Environment, stdout string) ([]mode
 	return assets, nil
 }
 
-func parsePipx(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parsePipx(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(stdout) == "" {
 		return nil, nil
 	}
@@ -233,11 +289,20 @@ func parsePipx(_ context.Context, _ collector.Environment, stdout string) ([]mod
 	}
 	var assets []model.Asset
 	for _, venv := range listing.Venvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		packages := []pipxPackage{venv.Metadata.MainPackage}
 		for _, injected := range venv.Metadata.InjectedPackages {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			packages = append(packages, injected)
 		}
 		for _, pkg := range packages {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if pkg.Package != "" && pkg.PackageVersion != "" {
 				assets = append(assets, purlAsset("pypi", normalizePyPIName(pkg.Package), pkg.PackageVersion, "pipx"))
 			}
@@ -246,9 +311,15 @@ func parsePipx(_ context.Context, _ collector.Environment, stdout string) ([]mod
 	return assets, nil
 }
 
-func parseUV(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parseUV(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var assets []model.Asset
 	for _, line := range strings.Split(stdout, "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "-") {
 			continue
 		}
@@ -261,9 +332,15 @@ func parseUV(_ context.Context, _ collector.Environment, stdout string) ([]model
 	return assets, nil
 }
 
-func parseCargo(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parseCargo(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var assets []model.Asset
 	for _, line := range strings.Split(stdout, "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if strings.HasPrefix(line, " ") || !strings.HasSuffix(strings.TrimSpace(line), ":") {
 			continue
 		}
@@ -278,6 +355,7 @@ func parseCargo(_ context.Context, _ collector.Environment, stdout string) ([]mo
 
 func parseGoPath(ctx context.Context, env collector.Environment, stdout string) ([]model.Asset, error) {
 	var assets []model.Asset
+	accessIncomplete := false
 	for _, goPath := range filepath.SplitList(strings.TrimSpace(stdout)) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -288,9 +366,15 @@ func parseGoPath(ctx context.Context, env collector.Environment, stdout string) 
 		binPath := filepath.Join(goPath, "bin")
 		entries, err := env.FS.ReadDir(binPath)
 		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				accessIncomplete = true
+			}
 			continue
 		}
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if entry.IsDir() {
 				continue
 			}
@@ -304,26 +388,44 @@ func parseGoPath(ctx context.Context, env collector.Environment, stdout string) 
 			})
 		}
 	}
+	if accessIncomplete {
+		return assets, errFilesystemAccess
+	}
 	return assets, nil
 }
 
-func parseBrew(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parseBrew(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var assets []model.Asset
 	for _, line := range strings.Split(stdout, "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
 		for _, version := range fields[1:] {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			assets = append(assets, purlAsset("brew", fields[0], version, "homebrew"))
 		}
 	}
 	return assets, nil
 }
 
-func parseDocker(_ context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+func parseDocker(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var assets []model.Asset
 	for _, line := range strings.Split(stdout, "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -380,7 +482,20 @@ func escapePURLSegment(value string) string {
 
 func normalizePyPIName(name string) string {
 	name = strings.ToLower(name)
-	return strings.NewReplacer("_", "-", ".", "-").Replace(name)
+	var normalized strings.Builder
+	separator := false
+	for _, character := range name {
+		if character == '-' || character == '_' || character == '.' {
+			if !separator {
+				normalized.WriteByte('-')
+			}
+			separator = true
+			continue
+		}
+		separator = false
+		normalized.WriteRune(character)
+	}
+	return normalized.String()
 }
 
 func firstLine(value string) string {

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 
 func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
 	env := testutil.Environment(t, "../../../testdata/home")
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), env)
+	got, err := projects.New([]string{"$HOME/Projects", "$HOME/Projects/."}).Collect(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +35,13 @@ func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
 	if project.Type != model.AssetProject || project.Path != projectPath {
 		t.Fatalf("project=%+v", project)
 	}
+	wantRelationships := []model.Relationship{
+		{From: projectID, To: lockfile.ID, Kind: "contains"},
+		{From: projectID, To: manifest.ID, Kind: "contains"},
+	}
+	if !reflect.DeepEqual(got.Relationships, wantRelationships) {
+		t.Fatalf("relationships=%+v want=%+v", got.Relationships, wantRelationships)
+	}
 	for _, asset := range got.Assets {
 		if strings.Contains(asset.Path, "node_modules") {
 			t.Fatalf("unexpected=%s", asset.Path)
@@ -41,6 +49,24 @@ func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
 	}
 	if got.Status != model.CoverageComplete {
 		t.Fatalf("status=%s errors=%+v", got.Status, got.Errors)
+	}
+}
+
+func TestProjectsCollectorSkipsEffectivelyEmptyRootSet(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "package.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := testutil.Environment(t, home)
+
+	for _, roots := range [][]string{nil, {}, {""}, {" ", "\t", "\n"}} {
+		got, err := projects.New(roots).Collect(context.Background(), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != model.CoverageSkipped || len(got.Assets) != 0 {
+			t.Fatalf("roots=%q result=%+v", roots, got)
+		}
 	}
 }
 
@@ -86,7 +112,8 @@ func TestProjectsCollectorStaysWithinRootsAndExcludesHeavyDirectories(t *testing
 	outside := filepath.Join(home, "outside", "package.json")
 	excluded := []string{
 		"node_modules", ".venv", "venv", "vendor", "dist", "build", "Library", ".cache",
-		".npm", ".pnpm-store", ".yarn", ".bun", filepath.Join(".git", "objects"),
+		".npm", ".pnpm-store", ".yarn", ".bun", ".cargo", ".rustup", ".gradle", ".m2",
+		".ivy2", ".nuget", ".pub-cache", filepath.Join(".git", "objects"),
 	}
 	for _, path := range append([]string{inside, outside}, pathsUnder(home, "allowed", excluded)...) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

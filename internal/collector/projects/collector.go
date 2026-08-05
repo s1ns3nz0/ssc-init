@@ -36,12 +36,17 @@ func (*projectCollector) Name() string { return "projects" }
 
 func (c *projectCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
 	result := model.CollectorResult{Collector: c.Name(), Status: model.CoverageComplete}
+	resolvedRoots := uniqueRoots(c.roots, env.Home)
+	if len(resolvedRoots) == 0 {
+		result.Status = model.CoverageSkipped
+		return result, nil
+	}
 	projectsByID := make(map[string]model.Asset)
 	filesByID := make(map[string]model.Asset)
 	relationships := make(map[string]model.Relationship)
 	reachableRoots := 0
 
-	for _, suppliedRoot := range uniqueRoots(c.roots, env.Home) {
+	for _, suppliedRoot := range resolvedRoots {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -136,6 +141,10 @@ func uniqueRoots(roots []string, home string) []string {
 	seen := make(map[string]struct{}, len(roots))
 	resolved := make([]string, 0, len(roots))
 	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
 		root = expandHome(root, home)
 		if !filepath.IsAbs(root) {
 			root = filepath.Join(home, root)
