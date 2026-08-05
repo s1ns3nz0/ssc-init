@@ -239,7 +239,7 @@ func sanitizeArgs(home string, args []string) []string {
 		}
 		if key, value, found := strings.Cut(arg, "="); found {
 			switch {
-			case sensitiveName(key):
+			case sensitiveName(key), credentialFlag(key):
 				result[index] = key + "=" + redactedValue
 			case strings.Contains(value, "://"):
 				result[index] = key + "=" + sanitizeURL(home, value)
@@ -273,6 +273,30 @@ func sanitizeCommand(home, command string) string {
 	}
 	if absoluteURL(command) {
 		return sanitizeURL(home, command)
+	}
+	if key, _, found := strings.Cut(command, "="); found && (sensitiveName(key) || credentialFlag(key)) {
+		return key + "=" + redactedValue
+	}
+	if prefix, ok := sensitiveTextPrefix(command); ok {
+		return prefix + redactedValue
+	}
+	if prefix, ok := combinedCredentialFlag(command); ok {
+		return prefix + redactedValue
+	}
+	fields := strings.Fields(command)
+	if len(fields) > 1 {
+		for _, field := range fields {
+			key := field
+			if before, _, found := strings.Cut(field, "="); found {
+				key = before
+			}
+			if credentialFlag(key) || sensitiveName(key) {
+				return redactedValue
+			}
+			if _, ok := combinedCredentialFlag(field); ok {
+				return redactedValue
+			}
+		}
 	}
 	return command
 }
@@ -334,9 +358,9 @@ func sensitiveLongFlag(value string) bool {
 	if !strings.HasPrefix(value, "--") {
 		return false
 	}
-	name := strings.ToLower(strings.TrimPrefix(value, "--"))
+	name := strings.TrimPrefix(value, "--")
 	for _, exact := range []string{"header", "headers", "env", "bearer", "signature"} {
-		if name == exact {
+		if strings.EqualFold(name, exact) {
 			return true
 		}
 	}
@@ -361,17 +385,52 @@ func sensitiveName(value string) bool {
 }
 
 func hasSensitiveComponent(value string) bool {
-	components := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
+	components := semanticComponents(value)
 	for _, component := range components {
 		switch component {
-		case "token", "secret", "password", "passwd", "credential", "credentials", "authorization", "auth",
-			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "header", "headers", "env", "key":
+		case "token", "secret", "password", "passwd", "credential", "credentials",
+			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key":
+			return true
+		}
+	}
+	if len(components) == 1 {
+		switch components[0] {
+		case "authorization", "auth", "header", "headers", "env":
 			return true
 		}
 	}
 	return false
+}
+
+func semanticComponents(value string) []string {
+	runes := []rune(value)
+	components := make([]string, 0, 4)
+	for start := 0; start < len(runes); {
+		for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsDigit(runes[start]) {
+			start++
+		}
+		if start == len(runes) {
+			break
+		}
+		end := start
+		for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end])) {
+			end++
+		}
+		word := runes[start:end]
+		wordStart := 0
+		for index := 1; index < len(word); index++ {
+			lowerToUpper := (unicode.IsLower(word[index-1]) || unicode.IsDigit(word[index-1])) && unicode.IsUpper(word[index])
+			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) &&
+				index+1 < len(word) && unicode.IsLower(word[index+1])
+			if lowerToUpper || acronymToWord {
+				components = append(components, strings.ToLower(string(word[wordStart:index])))
+				wordStart = index
+			}
+		}
+		components = append(components, strings.ToLower(string(word[wordStart:])))
+		start = end
+	}
+	return components
 }
 
 func redactHomeText(home, value string) string {

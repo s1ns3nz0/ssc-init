@@ -159,6 +159,109 @@ func TestMCPCollectorSanitizesSemanticFlagsWithoutOverRedactingSafeNames(t *test
 	}
 }
 
+func TestMCPCollectorSanitizesStructuredCredentialCommands(t *testing.T) {
+	home := t.TempDir()
+	markers := map[string]string{
+		"assignment": "command-assignment-marker",
+		"flag":       "command-flag-marker",
+		"authHeader": "command-auth-header-marker",
+		"headerFlag": "command-header-flag-marker",
+		"splitText":  "command-split-text-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"assignment": {"command": "TOKEN=command-assignment-marker"},
+			"flag": {"command": "--token=command-flag-marker"},
+			"authHeader": {"command": "Authorization: Bearer command-auth-header-marker"},
+			"headerFlag": {"command": "--header=X-Api-Key: command-header-flag-marker"},
+			"splitText": {"command": "runner --token command-split-text-marker"},
+			"safe": {"command": "/usr/local/bin/auth-mcp"}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, marker := range markers {
+		asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:"+name)
+		encoded, marshalErr := json.Marshal(asset)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if bytes.Contains(encoded, []byte(marker)) || !bytes.Contains(encoded, []byte("[redacted]")) {
+			t.Fatalf("name=%s asset=%s", name, encoded)
+		}
+	}
+	safe := testutil.AssertAsset(t, got.Assets, "mcp:claude:safe")
+	if safe.Metadata["command"] != "/usr/local/bin/auth-mcp" {
+		t.Fatalf("safe command=%q", safe.Metadata["command"])
+	}
+}
+
+func TestMCPCollectorSplitsCamelCaseSensitiveNamesPrecisely(t *testing.T) {
+	home := t.TempDir()
+	markers := []string{
+		"access-token-marker", "refresh-token-marker", "github-token-marker",
+		"api-key-marker", "client-secret-marker", "authorization-marker",
+		"acronym-api-key-marker", "pascal-client-secret-marker",
+		"query-access-marker", "query-refresh-marker", "query-github-marker",
+		"query-api-marker", "query-client-marker", "query-authorization-marker",
+		"query-acronym-api-marker", "query-pascal-client-marker",
+	}
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
+		"mcpServers": {
+			"camel": {
+				"args": [
+					"--accessToken", "access-token-marker",
+					"--refreshToken=refresh-token-marker",
+					"--githubToken", "github-token-marker",
+					"--apiKey=api-key-marker",
+					"--clientSecret", "client-secret-marker",
+					"--Authorization=authorization-marker",
+					"--APIKey=acronym-api-key-marker",
+					"--ClientSecret=pascal-client-secret-marker",
+					"--tokenizerModel", "safe-tokenizer-value",
+					"--authorizationHelper=safe-authorization-helper",
+					"--AuthorizationHelper=safe-pascal-authorization-helper"
+				],
+				"url": "https://example.test/mcp?accessToken=query-access-marker&refreshToken=query-refresh-marker&githubToken=query-github-marker&apiKey=query-api-marker&clientSecret=query-client-marker&Authorization=query-authorization-marker&APIKey=query-acronym-api-marker&ClientSecret=query-pascal-client-marker&tokenizerModel=safe-query-tokenizer&authorizationHelper=safe-query-authorization&AuthorizationHelper=safe-query-pascal-authorization"
+			}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:camel")
+	encoded, marshalErr := json.Marshal(asset)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, marker := range markers {
+		if bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("marker %q persisted: %s", marker, encoded)
+		}
+	}
+	for _, safe := range []string{
+		"--tokenizerModel\x1fsafe-tokenizer-value",
+		"--authorizationHelper=safe-authorization-helper",
+		"--AuthorizationHelper=safe-pascal-authorization-helper",
+	} {
+		if !strings.Contains(asset.Metadata["args"], safe) {
+			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
+		}
+	}
+	for _, safe := range []string{"tokenizerModel=safe-query-tokenizer", "authorizationHelper=safe-query-authorization", "AuthorizationHelper=safe-query-pascal-authorization"} {
+		if !strings.Contains(asset.Metadata["url"], safe) {
+			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
+		}
+	}
+}
+
 func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
