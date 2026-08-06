@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "paused": {
+      "command": "uvx",
+      "disabled": true
+    }
+  }
+}

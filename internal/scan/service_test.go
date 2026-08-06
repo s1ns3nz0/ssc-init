@@ -1,15 +1,19 @@
 package scan
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
@@ -270,7 +274,7 @@ func TestBaselineRejectsMultipleEnvironments(t *testing.T) {
 	}
 }
 
-func TestBaselineFollowsProjectMCPAssetsAndReplacesInitialMCPResult(t *testing.T) {
+func TestBaselineFollowsProjectLocalTargetsAndReplacesInitialMCPResult(t *testing.T) {
 	home := t.TempDir()
 	projectConfig := filepath.Join(home, "Projects", "sample", ".vscode", "mcp.json")
 	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
@@ -279,15 +283,12 @@ func TestBaselineFollowsProjectMCPAssetsAndReplacesInitialMCPResult(t *testing.T
 	if err := os.WriteFile(projectConfig, []byte(`{"servers":{"fixture":{"command":"tool"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	projectAsset := model.Asset{
-		ID:     "project-file:mcp:$HOME/Projects/sample/.vscode/mcp.json",
-		Type:   model.AssetProject,
-		Name:   "mcp.json",
-		Path:   "$HOME/Projects/sample/.vscode/mcp.json",
-		Source: "mcp",
+	localTarget := model.LocalTarget{
+		TargetID: "mcp.vscode.project", InstanceRef: "$HOME/Projects/sample/.vscode/mcp.json",
+		Path: projectConfig, Format: "json", Host: "vscode", Consumers: []string{"vscode"},
 	}
 	orchestrator := collector.Orchestrator{Timeout: time.Second, MaxConcurrent: 2, Collectors: []collector.Collector{
-		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{projectAsset}}},
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{localTarget}}},
 		fixedCollector{name: "mcp", result: model.CollectorResult{Status: model.CoverageFailed, Errors: []model.CoverageError{{Code: "stale"}}}},
 	}}
 	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
@@ -303,8 +304,13 @@ func TestBaselineFollowsProjectMCPAssetsAndReplacesInitialMCPResult(t *testing.T
 	for _, coverage := range result.Coverage {
 		if coverage.Collector == "mcp" {
 			mcpCoverage++
-			if coverage.Status != model.CoverageComplete {
+			if coverage.Status != model.CoveragePartial {
 				t.Fatalf("mcp coverage=%+v", coverage)
+			}
+			for _, issue := range coverage.Errors {
+				if issue.Code == "stale" {
+					t.Fatalf("stale MCP result survived: %+v", coverage)
+				}
 			}
 		}
 	}
@@ -363,7 +369,7 @@ func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
 	}
 }
 
-func TestBaselineStripsProjectLocalTargetsWithoutTaskSevenParsing(t *testing.T) {
+func TestBaselineParsesProjectLocalTargetsAndClearsRawPaths(t *testing.T) {
 	home := t.TempDir()
 	projectConfig := filepath.Join(home, "Projects", "sample", ".mcp.json")
 	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
@@ -379,13 +385,13 @@ func TestBaselineStripsProjectLocalTargetsWithoutTaskSevenParsing(t *testing.T) 
 	if err := os.WriteFile(userConfig, []byte(`{"mcpServers":{"user-only":{"command":"tool"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	rawTargets := []model.LocalTarget{{
+		TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json",
+		Path: projectConfig, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	}}
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
 		fixedCollector{name: "projects", result: model.CollectorResult{
-			Status: model.CoverageComplete,
-			LocalTargets: []model.LocalTarget{{
-				TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json",
-				Path: projectConfig, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
-			}},
+			Status: model.CoverageComplete, LocalTargets: rawTargets,
 		}},
 	}}
 	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
@@ -398,23 +404,181 @@ func TestBaselineStripsProjectLocalTargetsWithoutTaskSevenParsing(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, asset := range inventory.Assets {
-		if asset.ID == "mcp:shared:project-only" {
-			t.Fatalf("Task 7 project target was parsed early: %+v", asset)
-		}
+	if !reflect.DeepEqual(rawTargets[0], model.LocalTarget{}) {
+		t.Fatalf("source local target was not cleared immediately: %+v", rawTargets[0])
 	}
+	foundProject := false
 	foundUser := false
 	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:shared:project-only" {
+			foundProject = true
+		}
 		if asset.ID == "mcp:cursor:user-only" {
 			foundUser = true
 		}
 	}
-	if !foundUser {
-		t.Fatalf("Task 5 user MCP behavior was lost: %+v", inventory)
+	if !foundProject || !foundUser {
+		t.Fatalf("user/project MCP behavior missing: %+v", inventory)
 	}
 	for _, coverage := range append(result.Coverage, snapshots.saved[0].Coverage...) {
 		if coverage.LocalTargets != nil {
 			t.Fatalf("raw local target survived scan: %+v", coverage.LocalTargets)
 		}
 	}
+	encoded, marshalErr := json.Marshal(struct {
+		Result    model.ScanResult
+		Inventory model.Inventory
+	}{result, inventory})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(projectConfig)) || bytes.Contains(encoded, []byte(home)) {
+		t.Fatalf("raw target path survived: %s", encoded)
+	}
+}
+
+func TestBaselineOpensExternalProjectMCPThroughFreshVerifiedRoot(t *testing.T) {
+	home := t.TempDir()
+	external := t.TempDir()
+	projectConfig := filepath.Join(external, "client", ".mcp.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcpServers":{"external":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	instance := identity.SafeLocationRef(home, projectConfig, "external-root-1")
+	localTarget := model.LocalTarget{
+		TargetID: "mcp.shared.project", InstanceRef: instance, Path: projectConfig,
+		Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	}
+	rooted := &recordingRootFileSystem{}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{localTarget}}},
+	}}
+	env := collector.Environment{Home: home, FS: rooted, Runner: platform.ExecRunner{}, Now: fixedTime}
+	snapshots := &memorySnapshots{}
+	service := NewService(orchestrator, snapshots, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	}, env)
+
+	result, inventory, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rooted.opened(filepath.Dir(projectConfig)) {
+		t.Fatalf("external parent was not freshly rooted: opened=%q", rooted.paths())
+	}
+	if rooted.openCount(filepath.Dir(projectConfig)) != 1 {
+		t.Fatalf("external parent open count=%d paths=%q", rooted.openCount(filepath.Dir(projectConfig)), rooted.paths())
+	}
+	found := false
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:shared:external" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("inventory=%+v", inventory)
+	}
+	for _, coverage := range append(result.Coverage, snapshots.saved[0].Coverage...) {
+		if coverage.LocalTargets != nil {
+			t.Fatalf("raw local target survived: %+v", coverage.LocalTargets)
+		}
+	}
+	encoded, marshalErr := json.Marshal(struct {
+		Result    model.ScanResult
+		Inventory model.Inventory
+	}{result, inventory})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(external)) || bytes.Contains(encoded, []byte(projectConfig)) {
+		t.Fatalf("external path persisted: %s", encoded)
+	}
+}
+
+func TestBaselineCopiesOnlyValidatedProjectLocalTargets(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	forgedPath := filepath.Join(outside, ".mcp.json")
+	if err := os.WriteFile(forgedPath, []byte(`{"mcpServers":{"forged-secret-marker":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forged := model.LocalTarget{
+		TargetID: "mcp.shared.project", InstanceRef: "external-root-1/path-sha256:" + strings.Repeat("0", 64),
+		Path: forgedPath, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{forged}}},
+		fixedCollector{name: "other", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{forged}}},
+	}}
+	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
+	service := NewService(orchestrator, &memorySnapshots{}, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	}, env)
+
+	result, inventory, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range inventory.Assets {
+		if strings.Contains(asset.ID, "forged-secret-marker") {
+			t.Fatalf("forged target was inventoried: %+v", inventory)
+		}
+	}
+	for _, coverage := range result.Coverage {
+		if coverage.LocalTargets != nil {
+			t.Fatalf("raw target survived: %+v", coverage)
+		}
+		if coverage.Collector == "mcp" {
+			for _, target := range coverage.Targets {
+				if target.TargetID == "mcp.shared.project" && target.Status != model.TargetNotPresent {
+					t.Fatalf("forged target reached MCP: %+v", target)
+				}
+			}
+		}
+	}
+	encoded, marshalErr := json.Marshal(struct {
+		Result    model.ScanResult
+		Inventory model.Inventory
+	}{result, inventory})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(outside)) || bytes.Contains(encoded, []byte(forgedPath)) || bytes.Contains(encoded, []byte("forged-secret-marker")) {
+		t.Fatalf("forged data persisted: %s", encoded)
+	}
+}
+
+type recordingRootFileSystem struct {
+	platform.OSFileSystem
+	mu    sync.Mutex
+	opens []string
+}
+
+func (f *recordingRootFileSystem) OpenRoot(path string) (platform.RootedDirectory, error) {
+	f.mu.Lock()
+	f.opens = append(f.opens, filepath.Clean(path))
+	f.mu.Unlock()
+	return f.OSFileSystem.OpenRoot(path)
+}
+
+func (f *recordingRootFileSystem) paths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.opens...)
+}
+
+func (f *recordingRootFileSystem) opened(path string) bool { return f.openCount(path) > 0 }
+
+func (f *recordingRootFileSystem) openCount(path string) int {
+	want := filepath.Clean(path)
+	count := 0
+	for _, opened := range f.paths() {
+		if opened == want {
+			count++
+		}
+	}
+	return count
 }

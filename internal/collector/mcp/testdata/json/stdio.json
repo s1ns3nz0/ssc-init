@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "local": {
+      "command": "node",
+      "args": ["server.js", "--mode", "safe"],
+      "type": "stdio",
+      "cwd": "$HOME/Projects/demo",
+      "enabled": true,
+      "env": {
+        "Z_KEY": "z-value",
+        "A_KEY": "a-value"
+      },
+      "enabledTools": ["write", "read", "read"],
+      "disabledTools": ["delete"]
+    }
+  }
+}

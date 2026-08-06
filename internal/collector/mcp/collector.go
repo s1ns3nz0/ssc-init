@@ -1,4 +1,4 @@
-// Package mcp inventories MCP servers from fixed host configuration paths.
+// Package mcp inventories MCP servers from the immutable local target catalog.
 package mcp
 
 import (
@@ -7,284 +7,460 @@ import (
 	"io"
 	"io/fs"
 	"net/url"
-	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/privacy"
 )
 
-const maxMCPConfigBytes = 4 << 20
+const maxMCPConfigBytes = maxJSONConfigBytes
 
 const redactedValue = "[redacted]"
 
 type mcpCollector struct {
-	projectAssets []model.Asset
+	projectTargets []model.LocalTarget
 }
 
-type configTarget struct {
-	host string
-	path string
-}
-
-// New returns a collector restricted to known host paths and dedicated project
-// MCP path assets emitted by the project collector.
-func New(projectAssets ...model.Asset) collector.Collector {
-	return &mcpCollector{projectAssets: append([]model.Asset(nil), projectAssets...)}
+// New returns a catalog-targeted collector. Raw project paths are copied only
+// for the lifetime of this collector and are never included in model output.
+func New(projectTargets ...model.LocalTarget) collector.TargetedCollector {
+	copied := make([]model.LocalTarget, len(projectTargets))
+	for index, target := range projectTargets {
+		copied[index] = target
+		copied[index].Consumers = append([]string(nil), target.Consumers...)
+	}
+	return &mcpCollector{projectTargets: copied}
 }
 
 func (*mcpCollector) Name() string { return "mcp" }
 
+func (*mcpCollector) Targets() []model.TargetSpec { return catalogSpecs() }
+
 func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
-	result := model.CollectorResult{Collector: c.Name(), Status: model.CoverageComplete}
-	rootedFilesystem, ok := env.FS.(platform.RootedFileSystem)
-	if !ok {
-		result.Status = model.CoveragePartial
-		result.Errors = append(result.Errors, configError("rooted_access_unavailable", "rooted MCP access is unavailable", env.Home, env.Home))
-		return result, nil
+	result := model.CollectorResult{Collector: c.Name()}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
-	homeRoot, err := rootedFilesystem.OpenRoot(env.Home)
-	if err != nil {
-		result.Status = model.CoveragePartial
-		result.Errors = append(result.Errors, configError("rooted_access_unavailable", "rooted MCP access is unavailable", env.Home, env.Home))
-		return result, nil
-	}
-	defer homeRoot.Close()
 
-	assetsByID := make(map[string]model.Asset)
-	targets := []configTarget{
-		{host: "claude", path: filepath.Join(env.Home, ".claude.json")},
-		{host: "claude", path: filepath.Join(env.Home, ".claude", "settings.json")},
-		{host: "cursor", path: filepath.Join(env.Home, ".cursor", "mcp.json")},
-		{host: "windsurf", path: filepath.Join(env.Home, ".windsurf", "mcp.json")},
-	}
-	targets = append(targets, c.projectTargets(ctx, env.Home)...)
-
-	seenPaths := make(map[string]struct{}, len(targets))
-	for _, target := range targets {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		target.path = filepath.Clean(target.path)
-		if _, duplicate := seenPaths[target.path]; duplicate {
-			continue
-		}
-		seenPaths[target.path] = struct{}{}
-
-		contents, code, message, exists := readConfig(ctx, homeRoot, env.Home, target.path)
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		if code != "" {
-			result.Errors = append(result.Errors, configError(code, message, env.Home, target.path))
-			continue
-		}
-		if !exists {
-			continue
-		}
-		servers, err := parseConfig(contents)
+	rootedFilesystem, hasRootedFilesystem := env.FS.(platform.RootedFileSystem)
+	var homeRoot platform.RootedDirectory
+	if hasRootedFilesystem {
+		var err error
+		homeRoot, err = rootedFilesystem.OpenRoot(env.Home)
 		if err != nil {
-			result.Errors = append(result.Errors, configError("config_invalid", "MCP configuration is invalid", env.Home, target.path))
-			continue
+			homeRoot = nil
 		}
-		names := make([]string, 0, len(servers))
-		for name := range servers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
+	}
+	if homeRoot != nil {
+		defer homeRoot.Close()
+	}
+
+	projectTargets, invalidProjectTargets := c.validatedProjectTargets(env.Home)
+	declarations := catalogDeclarations()
+	for phase := 0; phase < 2; phase++ {
+		for _, declaration := range declarations {
+			isExpandableProject := declaration.spec.Scope == model.ScopeProject && declaration.relativePath != ""
+			if isExpandableProject != (phase == 1) {
+				continue
+			}
 			if err := ctx.Err(); err != nil {
 				return result, err
 			}
-			if name == "" {
-				continue
+			switch declaration.spec.Scope {
+			case model.ScopeProject:
+				if declaration.relativePath == "" {
+					result.Targets = append(result.Targets, unsupportedTarget(declaration.spec.ID))
+					continue
+				}
+				instances := projectTargets[declaration.spec.ID]
+				if len(instances) == 0 {
+					target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: model.TargetNotPresent}
+					if invalidProjectTargets[declaration.spec.ID] {
+						target.Status = model.TargetPartial
+						target.Errors = []model.CoverageError{coverageError("invalid_local_target", "project target was rejected", "")}
+					}
+					result.Targets = append(result.Targets, target)
+					continue
+				}
+				for _, instance := range instances {
+					if err := c.collectProjectTarget(ctx, &result, env, rootedFilesystem, hasRootedFilesystem, declaration, instance); err != nil {
+						return result, err
+					}
+				}
+			case model.ScopeUser:
+				if declaration.relativePath == "" || !declaration.supported {
+					result.Targets = append(result.Targets, unsupportedTarget(declaration.spec.ID))
+					continue
+				}
+				if !hasRootedFilesystem || homeRoot == nil {
+					result.Targets = append(result.Targets, unavailableTarget(declaration.spec.ID, "rooted_access_unavailable", "rooted MCP access is unavailable"))
+					continue
+				}
+				if err := c.collectUserTarget(ctx, &result, env.Home, homeRoot, declaration); err != nil {
+					return result, err
+				}
+			default:
+				result.Targets = append(result.Targets, unsupportedTarget(declaration.spec.ID))
 			}
-			asset := sanitizeServer(env.Home, target.host, name, servers[name])
-			assetsByID[asset.ID] = asset
 		}
 	}
 
-	result.Assets = make([]model.Asset, 0, len(assetsByID))
-	for _, asset := range assetsByID {
-		result.Assets = append(result.Assets, asset)
-	}
-	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
-	if len(result.Errors) > 0 {
-		result.Status = model.CoveragePartial
-	}
+	sortResult(&result)
+	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
 }
 
-func (c *mcpCollector) projectTargets(ctx context.Context, home string) []configTarget {
-	targets := make([]configTarget, 0, len(c.projectAssets))
-	for _, asset := range c.projectAssets {
-		if ctx.Err() != nil {
-			break
-		}
-		path, ok := canonicalProjectPath(home, asset)
-		if !ok {
+func (c *mcpCollector) collectUserTarget(ctx context.Context, result *model.CollectorResult, home string, homeRoot platform.RootedDirectory, declaration targetDeclaration) error {
+	locationRef := "$HOME/" + filepath.ToSlash(declaration.relativePath)
+	read := readUserConfig(ctx, homeRoot, declaration)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	collectReadEvidence(result, home, locationRef, declaration, read)
+	return nil
+}
+
+func (c *mcpCollector) collectProjectTarget(ctx context.Context, result *model.CollectorResult, env collector.Environment, rootedFilesystem platform.RootedFileSystem, hasRootedFilesystem bool, declaration targetDeclaration, instance model.LocalTarget) error {
+	if !declaration.supported {
+		target := unsupportedTarget(declaration.spec.ID)
+		target.InstanceRef = instance.InstanceRef
+		result.Targets = append(result.Targets, target)
+		return nil
+	}
+	if !hasRootedFilesystem {
+		target := unavailableTarget(declaration.spec.ID, "rooted_access_unavailable", "rooted MCP access is unavailable")
+		target.InstanceRef = instance.InstanceRef
+		result.Targets = append(result.Targets, target)
+		return nil
+	}
+	read := readProjectConfig(ctx, rootedFilesystem, instance.Path)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	collectReadEvidence(result, env.Home, instance.InstanceRef, declaration, read)
+	return nil
+}
+
+func collectReadEvidence(result *model.CollectorResult, home, locationRef string, declaration targetDeclaration, read configRead) {
+	target := model.TargetCoverage{
+		TargetID: declaration.spec.ID, InstanceRef: projectInstanceRef(declaration, locationRef), Status: read.status,
+	}
+	if read.issue != nil {
+		issue := *read.issue
+		issue.Path = locationRef
+		target.Errors = append(target.Errors, issue)
+	}
+	if read.status != model.TargetComplete {
+		result.Targets = append(result.Targets, target)
+		return
+	}
+
+	parsed, err := parseJSONContainer(read.contents, declaration.container)
+	if err != nil {
+		target.Status = model.TargetPartial
+		target.Errors = append(target.Errors, coverageError("config_invalid", "MCP configuration is invalid", locationRef))
+		result.Targets = append(result.Targets, target)
+		return
+	}
+	for _, issue := range parsed.Issues {
+		target.Status = model.TargetPartial
+		target.Errors = append(target.Errors, serverIssue(issue.Code, locationRef))
+	}
+	for _, server := range parsed.Servers {
+		asset, observation, evidenceErr := buildServerEvidence(home, locationRef, declaration, server)
+		if evidenceErr != nil {
+			target.Status = model.TargetPartial
+			issue := rejectedEvidenceError(evidenceErr)
+			issue.Path = locationRef
+			target.Errors = append(target.Errors, issue)
 			continue
 		}
-		targets = append(targets, configTarget{host: "vscode", path: path})
+		result.Assets = append(result.Assets, asset)
+		result.Observations = append(result.Observations, observation)
+		target.Assets++
+		target.Observations++
 	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].path < targets[j].path })
-	return targets
+	result.Targets = append(result.Targets, target)
 }
 
-func canonicalProjectPath(home string, asset model.Asset) (string, bool) {
-	if asset.Type != model.AssetProject || asset.Source != "mcp" || asset.Name != "mcp.json" {
-		return "", false
+func projectInstanceRef(declaration targetDeclaration, locationRef string) string {
+	if declaration.spec.Scope == model.ScopeProject {
+		return locationRef
 	}
-	redacted := asset.Path
-	if redacted != filepath.ToSlash(redacted) || !strings.HasPrefix(redacted, "$HOME/") || pathpkg.Clean(redacted) != redacted {
-		return "", false
-	}
-	if asset.ID != "project-file:mcp:"+redacted || !strings.HasSuffix(redacted, "/.vscode/mcp.json") {
-		return "", false
-	}
-	relative := strings.TrimPrefix(redacted, "$HOME/")
-	resolved := filepath.Clean(filepath.Join(filepath.Clean(home), filepath.FromSlash(relative)))
-	rel, err := filepath.Rel(filepath.Clean(home), resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	canonicalRedacted := filepath.ToSlash(platform.RedactHome(filepath.Clean(home), resolved))
-	if canonicalRedacted != redacted {
-		return "", false
-	}
-	return resolved, true
+	return ""
 }
 
-func readConfig(ctx context.Context, homeRoot platform.RootedDirectory, home, path string) ([]byte, string, string, bool) {
-	if err := ctx.Err(); err != nil {
-		return nil, "", "", false
+func (c *mcpCollector) validatedProjectTargets(home string) (map[string][]model.LocalTarget, map[string]bool) {
+	valid := make(map[string][]model.LocalTarget)
+	invalid := make(map[string]bool)
+	seen := make(map[string]struct{})
+	for _, target := range c.projectTargets {
+		declaration, known := declarationByID(target.TargetID)
+		if !known || declaration.spec.Scope != model.ScopeProject {
+			continue
+		}
+		if !validProjectTarget(home, target, declaration) {
+			invalid[target.TargetID] = true
+			continue
+		}
+		key := target.TargetID + "\x00" + target.InstanceRef
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		target.Consumers = append([]string(nil), target.Consumers...)
+		valid[target.TargetID] = append(valid[target.TargetID], target)
 	}
-	relative, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, "config_unavailable", "MCP configuration is unavailable", false
+	for id := range valid {
+		sort.Slice(valid[id], func(i, j int) bool {
+			return valid[id][i].InstanceRef < valid[id][j].InstanceRef
+		})
 	}
-	parts := strings.Split(relative, string(filepath.Separator))
-	parent := homeRoot
+	return valid, invalid
+}
+
+func validProjectTarget(home string, target model.LocalTarget, declaration targetDeclaration) bool {
+	if target.TargetID != declaration.spec.ID || target.Format != declaration.spec.Format || target.Host != declaration.spec.Host || !slices.Equal(target.Consumers, declaration.consumers) {
+		return false
+	}
+	if home == "" || !filepath.IsAbs(home) || target.Path == "" || !filepath.IsAbs(target.Path) || filepath.Clean(target.Path) != target.Path || target.InstanceRef == "" {
+		return false
+	}
+	slashPath := filepath.ToSlash(target.Path)
+	if !strings.HasSuffix(slashPath, "/"+declaration.relativePath) {
+		return false
+	}
+	if strings.HasPrefix(target.InstanceRef, "$HOME/") {
+		return identity.SafeLocationRef(home, target.Path, "external-root") == target.InstanceRef
+	}
+	label, digest, found := strings.Cut(target.InstanceRef, "/path-sha256:")
+	if !found || len(digest) != 64 || !validExternalRootLabel(label) {
+		return false
+	}
+	for _, character := range digest {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return identity.SafeLocationRef(home, target.Path, label) == target.InstanceRef
+}
+
+// ValidProjectTarget reports whether a memory-only project handoff exactly
+// matches the immutable catalog and its persistence-safe instance identity.
+// It never returns or formats the raw path.
+func ValidProjectTarget(home string, target model.LocalTarget) bool {
+	declaration, known := declarationByID(target.TargetID)
+	return known && declaration.spec.Scope == model.ScopeProject && declaration.relativePath != "" && validProjectTarget(home, target, declaration)
+}
+
+func validExternalRootLabel(value string) bool {
+	if !strings.HasPrefix(value, "external-root-") {
+		return false
+	}
+	number := strings.TrimPrefix(value, "external-root-")
+	if number == "" || number[0] == '0' {
+		return false
+	}
+	for _, character := range number {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+type configRead struct {
+	contents []byte
+	status   model.TargetStatus
+	issue    *model.CoverageError
+}
+
+func readUserConfig(ctx context.Context, root platform.RootedDirectory, declaration targetDeclaration) configRead {
+	components := strings.Split(filepath.FromSlash(declaration.relativePath), string(filepath.Separator))
+	parent := root
 	ownedParent := false
-	if len(parts) > 1 {
-		parent, err = platform.OpenVerifiedRoot(ctx, homeRoot, parts[:len(parts)-1]...)
+	if len(components) > 1 {
+		var err error
+		parent, err = platform.OpenVerifiedRoot(ctx, root, components[:len(components)-1]...)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return nil, "", "", false
+				return configRead{status: model.TargetNotPresent}
 			}
-			return nil, "config_unavailable", "MCP configuration is unavailable", false
+			return readAccessFailure(err)
 		}
 		ownedParent = true
 	}
 	if ownedParent {
 		defer parent.Close()
 	}
-	file, beforeOpen, opened, err := platform.OpenVerifiedFile(parent, parts[len(parts)-1])
+	return readConfigFile(ctx, parent, components[len(components)-1])
+}
+
+func readProjectConfig(ctx context.Context, rootedFilesystem platform.RootedFileSystem, path string) configRead {
+	parent, err := rootedFilesystem.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return configRead{status: model.TargetPartial, issue: errorPointer(coverageError("config_unavailable", "MCP configuration is unavailable", ""))}
+	}
+	defer parent.Close()
+	read := readConfigFile(ctx, parent, filepath.Base(path))
+	if read.status == model.TargetNotPresent || read.status == model.TargetUnavailable {
+		read.status = model.TargetPartial
+		read.issue = errorPointer(coverageError("config_unavailable", "MCP configuration is unavailable", ""))
+	}
+	return read
+}
+
+func readConfigFile(ctx context.Context, parent platform.RootedDirectory, name string) configRead {
+	if err := ctx.Err(); err != nil {
+		return configRead{}
+	}
+	file, beforeOpen, opened, err := platform.OpenVerifiedFile(parent, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, "", "", false
+			return configRead{status: model.TargetNotPresent}
 		}
-		return nil, "config_unavailable", "MCP configuration is unavailable", false
+		return readAccessFailure(err)
 	}
 	defer file.Close()
 	if beforeOpen.Size() < 0 || beforeOpen.Size() > maxMCPConfigBytes || opened.Size() < 0 || opened.Size() > maxMCPConfigBytes {
-		return nil, "config_oversized", "MCP configuration exceeds the size limit", true
+		return configRead{status: model.TargetPartial, issue: errorPointer(coverageError("config_oversized", "MCP configuration exceeds the size limit", ""))}
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, maxMCPConfigBytes+1))
 	if err != nil {
-		return nil, "config_unavailable", "MCP configuration is unavailable", true
+		return configRead{status: model.TargetUnavailable, issue: errorPointer(coverageError("config_unavailable", "MCP configuration is unavailable", ""))}
 	}
 	if len(contents) > maxMCPConfigBytes {
-		return nil, "config_oversized", "MCP configuration exceeds the size limit", true
+		return configRead{status: model.TargetPartial, issue: errorPointer(coverageError("config_oversized", "MCP configuration exceeds the size limit", ""))}
 	}
-	return contents, "", "", true
+	return configRead{contents: contents, status: model.TargetComplete}
 }
 
-func sanitizeServer(home, host, name string, config serverConfig) model.Asset {
-	keys := make([]string, 0, len(config.Env))
-	for key := range config.Env {
-		keys = append(keys, key)
+func readAccessFailure(err error) configRead {
+	status := model.TargetUnavailable
+	if errors.Is(err, platform.ErrUnsafeRootedPath) {
+		status = model.TargetPartial
 	}
-	sort.Strings(keys)
-	args := sanitizeArgs(home, config.Args)
+	return configRead{status: status, issue: errorPointer(coverageError("config_unavailable", "MCP configuration is unavailable", ""))}
+}
+
+func unsupportedTarget(id string) model.TargetCoverage {
+	return model.TargetCoverage{
+		TargetID: id, Status: model.TargetUnsupported,
+		Errors: []model.CoverageError{coverageError("unsupported_target", "target is not supported", "")},
+	}
+}
+
+func unavailableTarget(id, code, message string) model.TargetCoverage {
+	return model.TargetCoverage{
+		TargetID: id, Status: model.TargetUnavailable,
+		Errors: []model.CoverageError{coverageError(code, message, "")},
+	}
+}
+
+func coverageError(code, message, path string) model.CoverageError {
+	return model.CoverageError{Code: code, Message: message, Path: path}
+}
+
+func errorPointer(value model.CoverageError) *model.CoverageError { return &value }
+
+func sortResult(result *model.CollectorResult) {
+	sort.SliceStable(result.Targets, func(i, j int) bool {
+		if result.Targets[i].TargetID == result.Targets[j].TargetID {
+			return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef
+		}
+		return result.Targets[i].TargetID < result.Targets[j].TargetID
+	})
+	sort.SliceStable(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
+	sort.SliceStable(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
+}
+
+func buildServerEvidence(home, locationRef string, declaration targetDeclaration, server ServerConfig) (model.Asset, model.Observation, error) {
+	if invalidServerName(server.Name) || privacy.ContainsSensitiveValue(server.Name) {
+		return model.Asset{}, model.Observation{}, identity.ErrRejectedIdentity
+	}
+	asset := model.Asset{
+		ID:   "mcp:" + declaration.spec.Host + ":" + server.Name,
+		Type: model.AssetMCP, Name: server.Name, Source: declaration.spec.Host,
+	}
+	metadata := observationMetadata(home, declaration.spec.ID, server)
+	if !safeMetadata(metadata) {
+		return model.Asset{}, model.Observation{}, errors.New("unsafe MCP metadata")
+	}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "mcp", Host: declaration.spec.Host,
+		Consumers: append([]string(nil), declaration.consumers...), Scope: declaration.spec.Scope,
+		LocationRef: locationRef, Source: declaration.spec.ID, Metadata: metadata,
+	})
+	if err != nil {
+		return model.Asset{}, model.Observation{}, err
+	}
+	return asset, observation, nil
+}
+
+func invalidServerName(name string) bool {
+	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, `/\\:`) {
+		return true
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return true
+		}
+	}
+	return false
+}
+
+func observationMetadata(home, sourceTarget string, server ServerConfig) map[string]string {
 	metadata := map[string]string{
-		"command": sanitizeCommand(home, config.Command),
-		"args":    strings.Join(args, "\x1f"),
-		"url":     sanitizeURL(home, config.URL),
+		"transport":     server.Transport,
+		"source_target": sourceTarget,
 	}
-	if len(keys) > 0 {
-		metadata["env_keys"] = strings.Join(keys, ",")
+	putMetadata(metadata, "command", sanitizeCommand(home, server.Command))
+	putMetadata(metadata, "args", strings.Join(sanitizeArgs(home, server.Args), "\x1f"))
+	putMetadata(metadata, "url_shape", sanitizeURLShape(server.URL))
+	putMetadata(metadata, "cwd_ref", sanitizeCWD(home, server.CWD))
+	if server.Enabled != nil {
+		metadata["enabled"] = strconv.FormatBool(*server.Enabled)
 	}
-	return model.Asset{
-		ID:       "mcp:" + host + ":" + name,
-		Type:     model.AssetMCP,
-		Name:     name,
-		Metadata: metadata,
+	putMetadata(metadata, "env_keys", strings.Join(server.EnvKeys, ","))
+	putMetadata(metadata, "header_keys", strings.Join(server.HeaderKeys, ","))
+	putMetadata(metadata, "enabled_tools", strings.Join(server.EnabledTools, ","))
+	putMetadata(metadata, "disabled_tools", strings.Join(server.DisabledTools, ","))
+	putMetadata(metadata, "unknown_fields", strings.Join(server.UnknownFields, ","))
+	return metadata
+}
+
+func putMetadata(metadata map[string]string, key, value string) {
+	if value != "" {
+		metadata[key] = value
 	}
 }
 
-func sanitizeArgs(home string, args []string) []string {
-	result := make([]string, len(args))
-	redactNext := false
-	for index, arg := range args {
-		if redactNext {
-			result[index] = redactedValue
-			redactNext = false
-			continue
+func safeMetadata(metadata map[string]string) bool {
+	for key, value := range metadata {
+		if key == "" || value == "" || privacy.ContainsSensitiveValue(key) || privacy.ContainsSensitiveValue(value) || containsRawAbsolutePath(value) {
+			return false
 		}
-		if absoluteURL(arg) {
-			result[index] = sanitizeURL(home, arg)
-			continue
-		}
-		if key, value, found := strings.Cut(arg, "="); found {
-			switch {
-			case sensitiveName(key), credentialFlag(key):
-				result[index] = key + "=" + redactedValue
-			case strings.Contains(value, "://"):
-				result[index] = key + "=" + sanitizeURL(home, value)
-			default:
-				result[index] = redactHomeText(home, arg)
-			}
-			continue
-		}
-		if prefix, ok := combinedCredentialFlag(arg); ok {
-			result[index] = prefix + redactedValue
-			continue
-		}
-		if credentialFlag(arg) {
-			result[index] = arg
-			redactNext = true
-			continue
-		}
-		if safePrefix, ok := sensitiveTextPrefix(arg); ok {
-			result[index] = safePrefix + redactedValue
-			continue
-		}
-		result[index] = redactHomeText(home, arg)
 	}
-	return result
+	return true
 }
 
 func sanitizeCommand(home, command string) string {
-	command = redactHomeText(home, command)
 	if command == "" {
 		return ""
 	}
 	if absoluteURL(command) {
-		return sanitizeURL(home, command)
+		return sanitizeURLShape(command)
 	}
-	if key, _, found := strings.Cut(command, "="); found && (sensitiveName(key) || credentialFlag(key)) {
-		return key + "=" + redactedValue
-	}
-	if prefix, ok := sensitiveTextPrefix(command); ok {
-		return prefix + redactedValue
-	}
-	if prefix, ok := combinedCredentialFlag(command); ok {
-		return prefix + redactedValue
+	if filepath.IsAbs(command) {
+		return identity.SafeLocationRef(home, command, "external-command")
 	}
 	fields := strings.Fields(command)
 	if len(fields) > 1 {
@@ -296,12 +472,115 @@ func sanitizeCommand(home, command string) string {
 			if credentialFlag(key) || sensitiveName(key) {
 				return redactedValue
 			}
-			if _, ok := combinedCredentialFlag(field); ok {
+			if _, sensitive := combinedCredentialFlag(field); sensitive {
+				return redactedValue
+			}
+			if _, sensitive := sensitiveTextPrefix(field); sensitive {
 				return redactedValue
 			}
 		}
 	}
-	return command
+	if privacy.ContainsSensitiveValue(command) {
+		return redactedValue
+	}
+	return redactHomeText(home, command)
+}
+
+func containsRawAbsolutePath(value string) bool {
+	for _, field := range strings.FieldsFunc(value, func(character rune) bool {
+		return character == '\x1f' || character == ',' || character == '=' || unicode.IsSpace(character)
+	}) {
+		if filepath.IsAbs(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeArgs(home string, args []string) []string {
+	result := make([]string, len(args))
+	redactNext := false
+	for index, arg := range args {
+		if redactNext {
+			result[index] = redactedValue
+			redactNext = false
+			continue
+		}
+		if credentialFlag(arg) {
+			result[index] = arg
+			redactNext = true
+			continue
+		}
+		if prefix, ok := combinedCredentialFlag(arg); ok {
+			result[index] = prefix + redactedValue
+			continue
+		}
+		if prefix, ok := sensitiveTextPrefix(arg); ok {
+			result[index] = prefix + redactedValue
+			continue
+		}
+		if key, value, found := strings.Cut(arg, "="); found {
+			switch {
+			case sensitiveName(key):
+				result[index] = key + "=" + redactedValue
+			case absoluteURL(value):
+				result[index] = key + "=" + sanitizeURLShape(value)
+			case filepath.IsAbs(value):
+				result[index] = key + "=" + identity.SafeLocationRef(home, value, "external-arg")
+			case privacy.ContainsSensitiveValue(value):
+				result[index] = key + "=" + redactedValue
+			default:
+				result[index] = redactHomeText(home, arg)
+			}
+			continue
+		}
+		switch {
+		case absoluteURL(arg):
+			result[index] = sanitizeURLShape(arg)
+		case filepath.IsAbs(arg):
+			result[index] = identity.SafeLocationRef(home, arg, "external-arg")
+		case privacy.ContainsSensitiveValue(arg):
+			result[index] = redactedValue
+		default:
+			result[index] = redactHomeText(home, arg)
+		}
+	}
+	return result
+}
+
+func sanitizeURLShape(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return redactedValue
+	}
+	parsed.User = nil
+	shape := parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
+	keys := make([]string, 0, len(parsed.Query()))
+	for key := range parsed.Query() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		shape += "?query_keys=" + strings.Join(keys, ",")
+	}
+	return shape
+}
+
+func sanitizeCWD(home, cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	if filepath.IsAbs(cwd) {
+		return identity.SafeLocationRef(home, cwd, "external-cwd")
+	}
+	redacted := redactHomeText(home, cwd)
+	if strings.HasPrefix(redacted, "$HOME") {
+		return filepath.ToSlash(redacted)
+	}
+	return "config-relative/" + filepath.ToSlash(filepath.Clean(cwd))
 }
 
 func absoluteURL(value string) bool {
@@ -312,33 +591,8 @@ func absoluteURL(value string) bool {
 	return err == nil && parsed.Scheme != ""
 }
 
-func sanitizeURL(home, raw string) string {
-	if raw == "" {
-		return ""
-	}
-	parsed, err := url.Parse(redactHomeText(home, raw))
-	if err != nil {
-		return redactedValue
-	}
-	parsed.User = nil
-	query := parsed.Query()
-	for key := range query {
-		if sensitiveName(key) {
-			query[key] = []string{redactedValue}
-		}
-	}
-	parsed.RawQuery = query.Encode()
-	if parsed.Fragment != "" {
-		parsed.Fragment = redactedValue
-	}
-	return parsed.String()
-}
-
 func credentialFlag(value string) bool {
-	if value == "-H" || value == "-e" {
-		return true
-	}
-	return sensitiveLongFlag(value)
+	return value == "-H" || value == "-e" || sensitiveLongFlag(value)
 }
 
 func combinedCredentialFlag(value string) (string, bool) {
@@ -394,8 +648,7 @@ func hasSensitiveComponent(value string) bool {
 	if strings.EqualFold(value, "authorizationhelper") {
 		return true
 	}
-	components := semanticComponents(value)
-	for _, component := range components {
+	for _, component := range semanticComponents(value) {
 		switch component {
 		case "token", "secret", "password", "passwd", "credential", "credentials",
 			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key",
@@ -424,8 +677,7 @@ func semanticComponents(value string) []string {
 		wordStart := 0
 		for index := 1; index < len(word); index++ {
 			lowerToUpper := (unicode.IsLower(word[index-1]) || unicode.IsDigit(word[index-1])) && unicode.IsUpper(word[index])
-			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) &&
-				index+1 < len(word) && unicode.IsLower(word[index+1])
+			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) && index+1 < len(word) && unicode.IsLower(word[index+1])
 			if lowerToUpper || acronymToWord {
 				components = append(components, strings.ToLower(string(word[wordStart:index])))
 				wordStart = index
@@ -448,10 +700,20 @@ func redactHomeText(home, value string) string {
 	return strings.ReplaceAll(value, cleanHome+string(filepath.Separator), "$HOME/")
 }
 
-func configError(code, message, home, path string) model.CoverageError {
-	return model.CoverageError{
-		Code:    code,
-		Message: message,
-		Path:    filepath.ToSlash(platform.RedactHome(filepath.Clean(home), filepath.Clean(path))),
+func rejectedEvidenceError(err error) model.CoverageError {
+	code := "rejected_metadata"
+	message := "MCP server metadata was rejected"
+	if errors.Is(err, identity.ErrRejectedIdentity) {
+		code = "rejected_identity"
+		message = "MCP server identity was rejected"
 	}
+	return coverageError(code, message, "")
+}
+
+func serverIssue(code, locationRef string) model.CoverageError {
+	message := "MCP server entry is invalid"
+	if code == "unknown_server_field" {
+		message = "MCP server contains an unknown field"
+	}
+	return coverageError(code, message, locationRef)
 }

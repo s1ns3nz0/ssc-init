@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "remote": {
+      "url": "https://example.invalid/mcp?mode=safe",
+      "transport": "streamable-http",
+      "headers": {
+        "X-Client": "client-secret-value",
+        "Authorization": "Bearer secret-value"
+      }
+    }
+  }
+}

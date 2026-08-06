@@ -174,8 +174,16 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != string(want) {
-		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
+	wantOutput := strings.Replace(string(want),
+		`{"collector":"mcp","status":"complete"}`,
+		`{"collector":"mcp","status":"partial","targets":[{"targetId":"mcp.claude-code.legacy-user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.claude-code.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.claude-desktop.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.codex.project","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.codex.user","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.cursor.project","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.cursor.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.dev-container","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.dynamic-api","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.environment-relocated","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.github-copilot.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.profile-specific","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.remote-user","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.service-managed","status":"unsupported","assets":0,"observations":0,"errors":[{"code":"unsupported_target","message":"target is not supported"}]},{"targetId":"mcp.shared.project","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.vscode-insiders.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.vscode.project","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.vscode.user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.windsurf.legacy-user","status":"not_present","assets":0,"observations":0},{"targetId":"mcp.windsurf.user","status":"not_present","assets":0,"observations":0}]}`,
+		1,
+	)
+	if wantOutput == string(want) {
+		t.Fatal("baseline golden no longer contains the pre-Task 7 MCP placeholder")
+	}
+	if out.String() != wantOutput {
+		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), wantOutput)
 	}
 	if strings.Contains(out.String(), "/raw/private/target") {
 		t.Fatalf("local target leaked: %s", out.String())

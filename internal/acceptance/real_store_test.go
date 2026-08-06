@@ -66,9 +66,13 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	}
 	latest := latestSnapshot.Inventory
 	projectConfigID := ""
+	foundProjectMCP := false
 	for _, asset := range latest.Assets {
 		if asset.ID == "mcp:vscode:workspace" {
-			t.Fatalf("Task 7 project MCP target was parsed early: %+v", asset)
+			if foundProjectMCP || asset.Type != model.AssetMCP || asset.Name != "workspace" || asset.Source != "vscode" || asset.Path != "" || asset.Metadata != nil {
+				t.Fatalf("non-canonical project MCP asset: %+v", asset)
+			}
+			foundProjectMCP = true
 		}
 		if asset.Type == model.AssetProject && asset.Source == "project-config" && asset.Name == ".vscode/mcp.json" {
 			if projectConfigID != "" || asset.Path != "" {
@@ -80,8 +84,18 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	if projectConfigID == "" {
 		t.Fatal("round-tripped inventory is missing canonical project config evidence")
 	}
+	if !foundProjectMCP {
+		t.Fatal("round-tripped inventory is missing Task 7 project MCP evidence")
+	}
 	projectID := ""
+	foundProjectMCPObservation := false
 	for _, observation := range latest.Observations {
+		if observation.AssetID == "mcp:vscode:workspace" {
+			if foundProjectMCPObservation || observation.Collector != "mcp" || observation.Host != "vscode" || !reflect.DeepEqual(observation.Consumers, []string{"vscode"}) || observation.Scope != model.ScopeProject || observation.Source != "mcp.vscode.project" || observation.LocationRef != "$HOME/Projects/sample/.vscode/mcp.json" || observation.Metadata["transport"] != "http" || observation.Metadata["url_shape"] != "https://workspace.example.test/mcp" || observation.Metadata["source_target"] != "mcp.vscode.project" {
+				t.Fatalf("non-canonical project MCP observation: %+v", observation)
+			}
+			foundProjectMCPObservation = true
+		}
 		if observation.AssetID != projectConfigID {
 			continue
 		}
@@ -92,6 +106,9 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	}
 	if projectID == "" {
 		t.Fatal("round-tripped inventory is missing the project config observation")
+	}
+	if !foundProjectMCPObservation {
+		t.Fatal("round-tripped inventory is missing Task 7 project MCP observation")
 	}
 	foundProject := false
 	for _, asset := range latest.Assets {
@@ -105,6 +122,20 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	for _, coverage := range result.Coverage {
 		if coverage.LocalTargets != nil {
 			t.Fatalf("raw project local targets survived scan: %+v", coverage.LocalTargets)
+		}
+		if coverage.Collector == "mcp" {
+			foundTarget := false
+			for _, target := range coverage.Targets {
+				if target.TargetID == "mcp.vscode.project" && target.InstanceRef == "$HOME/Projects/sample/.vscode/mcp.json" {
+					if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+						t.Fatalf("project MCP target coverage=%+v", target)
+					}
+					foundTarget = true
+				}
+			}
+			if !foundTarget {
+				t.Fatalf("project MCP target coverage missing: %+v", coverage.Targets)
+			}
 		}
 	}
 

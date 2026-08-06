@@ -5,14 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
+	"github.com/ssc-init/ssc-init/internal/identity"
+	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/testutil"
@@ -20,553 +22,319 @@ import (
 
 const maxConfigBytes = 4 << 20
 
-func TestMCPCollectorRedactsEnvironmentValuesAndCredentials(t *testing.T) {
-	env := testutil.Environment(t, "../../../testdata/home")
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
+func TestMCPCollectorAdvertisesImmutableCatalog(t *testing.T) {
+	mcpCollector := mcp.New()
+	got := mcpCollector.Targets()
+	if len(got) != 20 {
+		t.Fatalf("targets=%d: %+v", len(got), got)
 	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:cursor:filesystem")
-	if asset.Metadata["env_keys"] != "GITHUB_TOKEN" {
-		t.Fatalf("metadata=%v", asset.Metadata)
-	}
-	if asset.Metadata["command"] != "$HOME/.local/bin/filesystem-mcp" {
-		t.Fatalf("command=%q", asset.Metadata["command"])
-	}
-	args := asset.Metadata["args"]
-	for _, want := range []string{"--token\x1f[redacted]", "--root=$HOME/Projects", "https://example.test/rpc?api_key=%5Bredacted%5D&mode=safe"} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("args=%q missing=%q", args, want)
+	for index := 1; index < len(got); index++ {
+		if got[index-1].ID >= got[index].ID {
+			t.Fatalf("targets are not strictly sorted: %+v", got)
 		}
 	}
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
+	got[0].ID = "mutated"
+	if mcpCollector.Targets()[0].ID == "mutated" {
+		t.Fatal("target catalog mutated through caller slice")
 	}
-	for _, secret := range []string{"fixture-secret", "alice:"} {
-		if bytes.Contains(encoded, []byte(secret)) {
-			t.Fatalf("secret persisted: %s", encoded)
-		}
-	}
-	if got.Status != model.CoverageComplete {
-		t.Fatalf("result=%+v", got)
-	}
+	var _ collector.TargetedCollector = mcpCollector
+	var _ func(...model.LocalTarget) collector.TargetedCollector = mcp.New
 }
 
-func TestMCPCollectorOmitsEmptyEnvironmentKeyList(t *testing.T) {
+func TestMCPCollectorInventoriesEveryOfficialJSONUserPath(t *testing.T) {
 	home := t.TempDir()
-	writeMCPFile(t, filepath.Join(home, ".claude", "settings.json"), `{
-		"mcpServers": {
-			"documentation": {"url": "https://docs.example.test/mcp"}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:documentation")
-	if value, exists := asset.Metadata["env_keys"]; exists {
-		t.Fatalf("empty env_keys metadata emitted: %q", value)
-	}
-}
-
-func TestMCPCollectorSanitizesCommandAndCombinedCredentialArguments(t *testing.T) {
-	home := t.TempDir()
-	markers := []string{
-		"command-user-marker", "command-password-marker", "command-query-marker", "command-fragment-marker",
-		"combined-header-marker", "combined-token-marker", "equals-api-marker", "bearer-value-marker",
-		"split-header-marker", "split-token-marker", "arg-user-marker", "arg-password-marker",
-		"arg-query-marker", "arg-fragment-marker", "environment-value-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"sensitive": {
-				"command": "https://command-user-marker:command-password-marker@example.test/run?token=command-query-marker&mode=safe#command-fragment-marker",
-				"args": [
-					"-HAuthorization: Bearer combined-header-marker",
-					"--tokencombined-token-marker",
-					"--api-key=equals-api-marker",
-					"Bearer bearer-value-marker",
-					"-H", "Authorization: Bearer split-header-marker",
-					"--token", "split-token-marker",
-					"--endpoint=https://arg-user-marker:arg-password-marker@example.test/mcp?access_token=arg-query-marker#arg-fragment-marker"
-				],
-				"env": {"TOKEN": "environment-value-marker"}
-			}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:sensitive")
-	if !strings.Contains(asset.Metadata["command"], "https://example.test/run") || !strings.Contains(asset.Metadata["command"], "redacted") {
-		t.Fatalf("command=%q", asset.Metadata["command"])
-	}
-	args := asset.Metadata["args"]
-	for _, want := range []string{"-H[redacted]", "--token[redacted]", "--api-key=[redacted]", "Bearer [redacted]", "--token\x1f[redacted]", "--endpoint=https://example.test/mcp"} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("args=%q missing=%q", args, want)
-		}
-	}
-	encoded, marshalErr := json.Marshal(asset)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	for _, marker := range markers {
-		if bytes.Contains(encoded, []byte(marker)) {
-			t.Fatalf("marker %q persisted: %s", marker, encoded)
-		}
-	}
-}
-
-func TestMCPCollectorSanitizesSemanticFlagsWithoutOverRedactingSafeNames(t *testing.T) {
-	home := t.TempDir()
-	markers := []string{
-		"header-value-marker", "headers-equals-marker", "env-value-marker", "bearer-value-marker",
-		"signature-value-marker", "github-token-value-marker", "github-token-equals-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"semantic": {
-				"command": "/usr/local/bin/auth-mcp",
-				"args": [
-					"--header", "Authorization: Bearer header-value-marker",
-					"--headers=Authorization: Bearer headers-equals-marker",
-					"--env", "GITHUB_TOKEN=env-value-marker",
-					"--bearer", "bearer-value-marker",
-					"--signature=signature-value-marker",
-					"--github-token", "github-token-value-marker",
-					"--github-token=github-token-equals-marker",
-					"--tokenizer-model", "safe-model", "-hostlocalhost"
-				]
-			}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:semantic")
-	if asset.Metadata["command"] != "/usr/local/bin/auth-mcp" {
-		t.Fatalf("command=%q", asset.Metadata["command"])
-	}
-	args := asset.Metadata["args"]
-	for _, want := range []string{
-		"--header\x1f[redacted]", "--headers=[redacted]", "--env\x1f[redacted]",
-		"--bearer\x1f[redacted]", "--signature=[redacted]", "--github-token\x1f[redacted]",
-		"--github-token=[redacted]", "--tokenizer-model\x1fsafe-model\x1f-hostlocalhost",
-	} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("args=%q missing=%q", args, want)
-		}
-	}
-	encoded, marshalErr := json.Marshal(asset)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	for _, marker := range markers {
-		if bytes.Contains(encoded, []byte(marker)) {
-			t.Fatalf("marker %q persisted: %s", marker, encoded)
-		}
-	}
-}
-
-func TestMCPCollectorSanitizesStructuredCredentialCommands(t *testing.T) {
-	home := t.TempDir()
-	markers := map[string]string{
-		"assignment": "command-assignment-marker",
-		"flag":       "command-flag-marker",
-		"authHeader": "command-auth-header-marker",
-		"headerFlag": "command-header-flag-marker",
-		"splitText":  "command-split-text-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"assignment": {"command": "TOKEN=command-assignment-marker"},
-			"flag": {"command": "--token=command-flag-marker"},
-			"authHeader": {"command": "Authorization: Bearer command-auth-header-marker"},
-			"headerFlag": {"command": "--header=X-Api-Key: command-header-flag-marker"},
-			"splitText": {"command": "runner --token command-split-text-marker"},
-			"safe": {"command": "/usr/local/bin/auth-mcp"}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, marker := range markers {
-		asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:"+name)
-		encoded, marshalErr := json.Marshal(asset)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
-		if bytes.Contains(encoded, []byte(marker)) || !bytes.Contains(encoded, []byte("[redacted]")) {
-			t.Fatalf("name=%s asset=%s", name, encoded)
-		}
-	}
-	safe := testutil.AssertAsset(t, got.Assets, "mcp:claude:safe")
-	if safe.Metadata["command"] != "/usr/local/bin/auth-mcp" {
-		t.Fatalf("safe command=%q", safe.Metadata["command"])
-	}
-}
-
-func TestMCPCollectorSplitsCamelCaseSensitiveNamesPrecisely(t *testing.T) {
-	home := t.TempDir()
-	markers := []string{
-		"access-token-marker", "refresh-token-marker", "github-token-marker",
-		"api-key-marker", "client-secret-marker", "authorization-marker",
-		"acronym-api-key-marker", "pascal-client-secret-marker",
-		"query-access-marker", "query-refresh-marker", "query-github-marker",
-		"query-api-marker", "query-client-marker", "query-authorization-marker",
-		"query-acronym-api-marker", "query-pascal-client-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"camel": {
-				"args": [
-					"--accessToken", "access-token-marker",
-					"--refreshToken=refresh-token-marker",
-					"--githubToken", "github-token-marker",
-					"--apiKey=api-key-marker",
-					"--clientSecret", "client-secret-marker",
-					"--Authorization=authorization-marker",
-					"--APIKey=acronym-api-key-marker",
-					"--ClientSecret=pascal-client-secret-marker",
-					"--tokenizerModel", "safe-tokenizer-value",
-					"--authorizationHelper=safe-authorization-helper",
-					"--AuthorizationHelper=safe-pascal-authorization-helper"
-				],
-				"url": "https://example.test/mcp?accessToken=query-access-marker&refreshToken=query-refresh-marker&githubToken=query-github-marker&apiKey=query-api-marker&clientSecret=query-client-marker&Authorization=query-authorization-marker&APIKey=query-acronym-api-marker&ClientSecret=query-pascal-client-marker&tokenizerModel=safe-query-tokenizer&authorizationHelper=safe-query-authorization&AuthorizationHelper=safe-query-pascal-authorization"
-			}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:camel")
-	encoded, marshalErr := json.Marshal(asset)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	for _, marker := range markers {
-		if bytes.Contains(encoded, []byte(marker)) {
-			t.Fatalf("marker %q persisted: %s", marker, encoded)
-		}
-	}
-	for _, safe := range []string{
-		"--tokenizerModel\x1fsafe-tokenizer-value",
-		"--authorizationHelper=safe-authorization-helper",
-		"--AuthorizationHelper=safe-pascal-authorization-helper",
-	} {
-		if !strings.Contains(asset.Metadata["args"], safe) {
-			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
-		}
-	}
-	for _, safe := range []string{"tokenizerModel=safe-query-tokenizer", "authorizationHelper=safe-query-authorization", "AuthorizationHelper=safe-query-pascal-authorization"} {
-		if !strings.Contains(asset.Metadata["url"], safe) {
-			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
-		}
-	}
-}
-
-func TestMCPCollectorSanitizesSensitiveComponentsInsideCompounds(t *testing.T) {
-	home := t.TempDir()
-	markers := []string{
-		"proxy-authorization-split-marker", "proxy-authorization-equals-marker",
-		"auth-header-split-marker", "auth-header-equals-marker",
-		"http-header-split-marker", "http-header-equals-marker",
-		"query-proxy-authorization-marker", "query-auth-header-marker", "query-http-header-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"compounds": {
-				"command": "/usr/local/bin/auth-mcp",
-				"args": [
-					"--proxyAuthorization", "proxy-authorization-split-marker",
-					"--proxyAuthorization=proxy-authorization-equals-marker",
-					"--authHeader", "auth-header-split-marker",
-					"--authHeader=auth-header-equals-marker",
-					"--http-header", "X-Api-Key: http-header-split-marker",
-					"--http-header=X-Api-Key: http-header-equals-marker",
-					"--tokenizerModel", "safe-tokenizer-value",
-					"-hostlocalhost",
-					"--authorizationHelper=safe-authorization-helper",
-					"--AuthorizationHelper=safe-pascal-authorization-helper"
-				],
-				"url": "https://example.test/mcp?proxyAuthorization=query-proxy-authorization-marker&authHeader=query-auth-header-marker&http-header=query-http-header-marker&authorizationHelper=safe-query-authorization&AuthorizationHelper=safe-query-pascal-authorization"
-			}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:compounds")
-	encoded, marshalErr := json.Marshal(asset)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	for _, marker := range markers {
-		if bytes.Contains(encoded, []byte(marker)) {
-			t.Fatalf("marker %q persisted: %s", marker, encoded)
-		}
-	}
-	if asset.Metadata["command"] != "/usr/local/bin/auth-mcp" {
-		t.Fatalf("safe command=%q", asset.Metadata["command"])
-	}
-	for _, safe := range []string{
-		"--tokenizerModel\x1fsafe-tokenizer-value\x1f-hostlocalhost",
-		"--authorizationHelper=safe-authorization-helper",
-		"--AuthorizationHelper=safe-pascal-authorization-helper",
-	} {
-		if !strings.Contains(asset.Metadata["args"], safe) {
-			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
-		}
-	}
-	for _, safe := range []string{
-		"authorizationHelper=safe-query-authorization",
-		"AuthorizationHelper=safe-query-pascal-authorization",
-	} {
-		if !strings.Contains(asset.Metadata["url"], safe) {
-			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
-		}
-	}
-}
-
-func TestMCPCollectorAllowsOnlyExactAuthorizationHelperSpellings(t *testing.T) {
-	home := t.TempDir()
-	markers := []string{
-		"lower-split-marker", "lower-equals-marker", "lower-query-marker",
-		"mixed-split-marker", "mixed-equals-marker", "mixed-query-marker",
-		"upper-split-marker", "upper-equals-marker", "upper-query-marker",
-	}
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{
-		"mcpServers": {
-			"helper-casing": {
-				"args": [
-					"--authorizationhelper", "lower-split-marker",
-					"--authorizationhelper=lower-equals-marker",
-					"--Authorizationhelper", "mixed-split-marker",
-					"--Authorizationhelper=mixed-equals-marker",
-					"--AUTHORIZATIONHELPER", "upper-split-marker",
-					"--AUTHORIZATIONHELPER=upper-equals-marker",
-					"--authorizationHelper=safe-exact-camel",
-					"--AuthorizationHelper=safe-exact-pascal"
-				],
-				"url": "https://example.test/mcp?authorizationhelper=lower-query-marker&Authorizationhelper=mixed-query-marker&AUTHORIZATIONHELPER=upper-query-marker&authorizationHelper=safe-query-camel&AuthorizationHelper=safe-query-pascal"
-			}
-		}
-	}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:helper-casing")
-	encoded, marshalErr := json.Marshal(asset)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	for _, marker := range markers {
-		if bytes.Contains(encoded, []byte(marker)) {
-			t.Fatalf("marker %q persisted: %s", marker, encoded)
-		}
-	}
-	for _, safe := range []string{
-		"--authorizationHelper=safe-exact-camel",
-		"--AuthorizationHelper=safe-exact-pascal",
-	} {
-		if !strings.Contains(asset.Metadata["args"], safe) {
-			t.Fatalf("safe argument missing %q: %q", safe, asset.Metadata["args"])
-		}
-	}
-	for _, safe := range []string{
-		"authorizationHelper=safe-query-camel",
-		"AuthorizationHelper=safe-query-pascal",
-	} {
-		if !strings.Contains(asset.Metadata["url"], safe) {
-			t.Fatalf("safe query missing %q: %q", safe, asset.Metadata["url"])
-		}
-	}
-}
-
-func TestMCPCollectorConsumesOnlyDedicatedProjectMCPAssets(t *testing.T) {
-	home := t.TempDir()
-	configPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
-	writeMCPFile(t, configPath, `{"servers":{"workspace":{"url":"https://example.test/mcp"}}}`)
-	projectAsset := model.Asset{
-		ID:     "project-file:mcp:$HOME/Projects/app/.vscode/mcp.json",
-		Type:   model.AssetProject,
-		Name:   "mcp.json",
-		Path:   "$HOME/Projects/app/.vscode/mcp.json",
-		Source: "mcp",
-	}
-	wrongType := projectAsset
-	wrongType.ID = "other"
-	wrongType.Type = model.AssetMCP
-	wrongType.Path = "$HOME/Projects/ignored/.vscode/mcp.json"
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New(projectAsset, wrongType).Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "mcp:vscode:workspace")
-	if asset.Metadata["url"] != "https://example.test/mcp" || len(got.Assets) != 1 || got.Status != model.CoverageComplete || len(got.Errors) != 0 {
-		t.Fatalf("result=%+v", got)
-	}
-}
-
-func TestMCPCollectorRejectsNonCanonicalProjectPathAssets(t *testing.T) {
-	home := t.TempDir()
-	marker := "project-path-injection-marker"
-	canonicalPath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
-	writeMCPFile(t, canonicalPath, `{"servers":{"`+marker+`":{"url":"https://example.test"}}}`)
-	redacted := "$HOME/Projects/app/.vscode/mcp.json"
-	assets := []model.Asset{
-		{ID: "project-file:mcp:" + canonicalPath, Type: model.AssetProject, Name: "mcp.json", Path: canonicalPath, Source: "mcp"},
-		{ID: "project-file:mcp:$HOME/Projects/../Projects/app/.vscode/mcp.json", Type: model.AssetProject, Name: "mcp.json", Path: "$HOME/Projects/../Projects/app/.vscode/mcp.json", Source: "mcp"},
-		{ID: "project-file:mcp:$HOME/Projects/other/.vscode/mcp.json", Type: model.AssetProject, Name: "mcp.json", Path: redacted, Source: "mcp"},
-		{ID: "project-file:mcp:" + redacted, Type: model.AssetProject, Name: "other.json", Path: redacted, Source: "mcp"},
-	}
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New(assets...).Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	if len(got.Assets) != 0 || got.Status != model.CoverageComplete || bytes.Contains(encoded, []byte(marker)) || bytes.Contains(encoded, []byte(home)) {
-		t.Fatalf("result=%s", encoded)
-	}
-}
-
-func TestMCPCollectorRejectsSymlinkedConfigPaths(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		setup    func(*testing.T, string, string) collector.Collector
-		wantPath string
+	targets := []struct {
+		id        string
+		relative  string
+		host      string
+		container string
+		consumers []string
 	}{
-		{
-			name: "config file",
-			setup: func(t *testing.T, home, outside string) collector.Collector {
-				outsideConfig := filepath.Join(outside, "mcp.json")
-				writeMCPFile(t, outsideConfig, `{"mcpServers":{"config-file-symlink-marker":{}}}`)
-				if err := os.Symlink(outsideConfig, filepath.Join(home, ".claude.json")); err != nil {
-					t.Fatal(err)
-				}
-				return mcp.New()
-			},
-			wantPath: "$HOME/.claude.json",
-		},
-		{
-			name: "host root",
-			setup: func(t *testing.T, home, outside string) collector.Collector {
-				writeMCPFile(t, filepath.Join(outside, "mcp.json"), `{"mcpServers":{"root-symlink-marker":{}}}`)
-				if err := os.Symlink(outside, filepath.Join(home, ".cursor")); err != nil {
-					t.Fatal(err)
-				}
-				return mcp.New()
-			},
-			wantPath: "$HOME/.cursor/mcp.json",
-		},
-		{
-			name: "nested project component",
-			setup: func(t *testing.T, home, outside string) collector.Collector {
-				writeMCPFile(t, filepath.Join(outside, ".vscode", "mcp.json"), `{"servers":{"project-symlink-marker":{}}}`)
-				if err := os.MkdirAll(filepath.Join(home, "Projects"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(outside, filepath.Join(home, "Projects", "linked")); err != nil {
-					t.Fatal(err)
-				}
-				path := "$HOME/Projects/linked/.vscode/mcp.json"
-				return mcp.New(model.Asset{ID: "project-file:mcp:" + path, Type: model.AssetProject, Name: "mcp.json", Path: path, Source: "mcp"})
-			},
-			wantPath: "$HOME/Projects/linked/.vscode/mcp.json",
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			home := t.TempDir()
-			outside := t.TempDir()
-			collector := testCase.setup(t, home, outside)
-			env := testutil.Environment(t, home)
+		{id: "mcp.claude-code.user", relative: ".claude.json", host: "claude-code", container: "mcpServers", consumers: []string{"claude-code"}},
+		{id: "mcp.claude-code.legacy-user", relative: ".claude/settings.json", host: "claude-code", container: "mcpServers", consumers: []string{"claude-code"}},
+		{id: "mcp.claude-desktop.user", relative: "Library/Application Support/Claude/claude_desktop_config.json", host: "claude-desktop", container: "mcpServers", consumers: []string{"claude-desktop"}},
+		{id: "mcp.cursor.user", relative: ".cursor/mcp.json", host: "cursor", container: "mcpServers", consumers: []string{"cursor"}},
+		{id: "mcp.windsurf.user", relative: ".codeium/windsurf/mcp_config.json", host: "windsurf", container: "mcpServers", consumers: []string{"windsurf"}},
+		{id: "mcp.windsurf.legacy-user", relative: ".windsurf/mcp.json", host: "windsurf", container: "mcpServers", consumers: []string{"windsurf"}},
+		{id: "mcp.vscode.user", relative: "Library/Application Support/Code/User/mcp.json", host: "vscode", container: "servers", consumers: []string{"vscode"}},
+		{id: "mcp.vscode-insiders.user", relative: "Library/Application Support/Code - Insiders/User/mcp.json", host: "vscode-insiders", container: "servers", consumers: []string{"vscode-insiders"}},
+		{id: "mcp.github-copilot.user", relative: ".copilot/mcp-config.json", host: "github-copilot", container: "mcpServers", consumers: []string{"github-copilot"}},
+	}
+	for _, target := range targets {
+		writeMCPFile(t, filepath.Join(home, filepath.FromSlash(target.relative)), `{"`+target.container+`":{"fixture":{"command":"tool"}}}`)
+	}
+	writeMCPFile(t, filepath.Join(home, ".codex", "config.toml"), `[mcp_servers.must_not_parse]
+command = "toml-secret-marker"
+`)
 
-			got, err := collector.Collect(context.Background(), env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, marshalErr := json.Marshal(got)
-			if marshalErr != nil {
-				t.Fatal(marshalErr)
-			}
-			if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Path != testCase.wantPath || len(got.Assets) != 0 {
-				t.Fatalf("result=%s", encoded)
-			}
-			for _, sensitive := range []string{"symlink-marker", outside} {
-				if bytes.Contains(encoded, []byte(sensitive)) {
-					t.Fatalf("outside data persisted: %s", encoded)
-				}
-			}
-		})
+	got := collectMCP(t, home)
+	if got.Status != model.CoveragePartial {
+		t.Fatalf("status=%q targets=%+v", got.Status, got.Targets)
+	}
+	if len(got.Assets) != len(targets) || len(got.Observations) != len(targets) {
+		t.Fatalf("assets=%d observations=%d", len(got.Assets), len(got.Observations))
+	}
+	for _, expected := range targets {
+		target := assertTarget(t, got.Targets, expected.id, "")
+		if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+			t.Fatalf("target=%+v", target)
+		}
+		assetID := "mcp:" + expected.host + ":fixture"
+		asset := assertAsset(t, got.Assets, assetID)
+		if asset.Type != model.AssetMCP || asset.Name != "fixture" || asset.Source != expected.host || asset.Path != "" || asset.Metadata != nil {
+			t.Fatalf("asset=%+v", asset)
+		}
+		location := "$HOME/" + expected.relative
+		observation := assertObservation(t, got.Observations, assetID, location)
+		if observation.Host != expected.host || !reflect.DeepEqual(observation.Consumers, expected.consumers) || observation.Source != expected.id || observation.Scope != model.ScopeUser {
+			t.Fatalf("observation=%+v", observation)
+		}
+	}
+	for _, projectID := range []string{"mcp.codex.project", "mcp.cursor.project", "mcp.shared.project", "mcp.vscode.project"} {
+		target := assertTarget(t, got.Targets, projectID, "")
+		if target.Status != model.TargetNotPresent {
+			t.Fatalf("project base target=%+v", target)
+		}
+	}
+	if target := assertTarget(t, got.Targets, "mcp.codex.user", ""); target.Status != model.TargetUnsupported {
+		t.Fatalf("Codex user target=%+v", target)
+	}
+	for _, unsupportedID := range []string{"mcp.dev-container", "mcp.dynamic-api", "mcp.environment-relocated", "mcp.profile-specific", "mcp.remote-user", "mcp.service-managed"} {
+		if target := assertTarget(t, got.Targets, unsupportedID, ""); target.Status != model.TargetUnsupported {
+			t.Fatalf("unsupported target=%+v", target)
+		}
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("toml-secret-marker")) || bytes.Contains(encoded, []byte(home)) {
+		t.Fatalf("private data persisted: %s", encoded)
 	}
 }
 
-func TestMCPCollectorRejectsRootedIdentitySwap(t *testing.T) {
+func TestMCPCollectorPreservesCollisionCandidatesUntilGraphNormalization(t *testing.T) {
 	home := t.TempDir()
-	expectedPath := filepath.Join(home, "expected.json")
-	replacementPath := filepath.Join(home, "replacement.json")
-	writeMCPFile(t, expectedPath, `{}`)
-	marker := "rooted-swap-secret-marker"
-	writeMCPFile(t, replacementPath, `{"mcpServers":{"swapped":{"env":{"TOKEN":"`+marker+`"}}}}`)
-	expectedInfo, err := os.Stat(expectedPath)
-	if err != nil {
-		t.Fatal(err)
+	paths := []string{
+		filepath.Join(home, "Projects", "alpha", ".mcp.json"),
+		filepath.Join(home, "Projects", "beta", ".mcp.json"),
 	}
-	env := testutil.Environment(t, home)
-	env.FS = swapRootFileSystem{
-		OSFileSystem: platform.OSFileSystem{},
-		root: &swapRootDirectory{
-			expected:    expectedInfo,
-			replacement: replacementPath,
-		},
+	localTargets := make([]model.LocalTarget, 0, len(paths))
+	for _, path := range paths {
+		writeMCPFile(t, path, `{"mcpServers":{"same":{"command":"node"}}}`)
+		localTargets = append(localTargets, sharedProjectTarget(home, path))
 	}
 
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
+	got := collectMCP(t, home, localTargets...)
+	if assetCount(got.Assets, "mcp:shared:same") != 2 {
+		t.Fatalf("candidate assets=%+v", got.Assets)
 	}
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
+	if observationCount(got.Observations, "mcp:shared:same") != 2 {
+		t.Fatalf("candidate observations=%+v", got.Observations)
 	}
-	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
-		t.Fatalf("result=%s", encoded)
+	for _, path := range paths {
+		instance := identity.SafeLocationRef(home, path, "external-root")
+		target := assertTarget(t, got.Targets, "mcp.shared.project", instance)
+		if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+			t.Fatalf("target=%+v", target)
+		}
 	}
+
+	normalized := inventory.Build([]model.CollectorResult{got})
+	if assetCount(normalized.Assets, "mcp:shared:same") != 1 || observationCount(normalized.Observations, "mcp:shared:same") != 2 {
+		t.Fatalf("normalized=%+v", normalized)
+	}
+}
+
+func TestMCPCollectorKeepsSameNameOnDifferentHostsDistinct(t *testing.T) {
+	home := t.TempDir()
+	cursorPath := filepath.Join(home, "Projects", "app", ".cursor", "mcp.json")
+	vscodePath := filepath.Join(home, "Projects", "app", ".vscode", "mcp.json")
+	writeMCPFile(t, cursorPath, `{"mcpServers":{"same":{"command":"node"}}}`)
+	writeMCPFile(t, vscodePath, `{"servers":{"same":{"command":"node"}}}`)
+
+	got := collectMCP(t, home,
+		projectTarget(home, cursorPath, "mcp.cursor.project", "json", "cursor", []string{"cursor"}),
+		projectTarget(home, vscodePath, "mcp.vscode.project", "json", "vscode", []string{"vscode"}),
+	)
+	if assetCount(got.Assets, "mcp:cursor:same") != 1 || assetCount(got.Assets, "mcp:vscode:same") != 1 {
+		t.Fatalf("assets=%+v", got.Assets)
+	}
+}
+
+func TestMCPCollectorQuarantinesSecretShapedIdentityAndKeepsSibling(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "Projects", "app", ".mcp.json")
+	secretName := "ghp_12345678901234567890"
+	invalidName := "/private/client/identity"
+	writeMCPFile(t, path, `{"mcpServers":{"`+secretName+`":{"command":"bad"},"`+invalidName+`":{"command":"bad"},"safe":{"command":"good"}}}`)
+	localTarget := sharedProjectTarget(home, path)
+
+	got := collectMCP(t, home, localTarget)
+	target := assertTarget(t, got.Targets, localTarget.TargetID, localTarget.InstanceRef)
+	if target.Status != model.TargetPartial || target.Assets != 1 || target.Observations != 1 || !hasErrorCode(target.Errors, "rejected_identity") {
+		t.Fatalf("target=%+v", target)
+	}
+	if len(got.Assets) != 1 || got.Assets[0].ID != "mcp:shared:safe" || len(got.Observations) != 1 {
+		t.Fatalf("result=%+v", got)
+	}
+	assertJSONExcludes(t, got, secretName, invalidName, path, home)
+}
+
+func TestMCPCollectorUsesSafeExternalLocationAndDeduplicatesInstances(t *testing.T) {
+	home := t.TempDir()
+	external := t.TempDir()
+	path := filepath.Join(external, "client", ".mcp.json")
+	writeMCPFile(t, path, `{"mcpServers":{"external":{"command":"node"}}}`)
+	instance := identity.SafeLocationRef(home, path, "external-root-1")
+	localTarget := model.LocalTarget{
+		TargetID: "mcp.shared.project", InstanceRef: instance, Path: path, Format: "json", Host: "shared",
+		Consumers: []string{"claude-code", "vscode"},
+	}
+
+	got := collectMCP(t, home, localTarget, localTarget)
+	target := assertTarget(t, got.Targets, localTarget.TargetID, instance)
+	if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+		t.Fatalf("target=%+v", target)
+	}
+	if countTarget(got.Targets, localTarget.TargetID) != 1 {
+		t.Fatalf("duplicate target results=%+v", got.Targets)
+	}
+	observation := assertObservation(t, got.Observations, "mcp:shared:external", instance)
+	if !strings.HasPrefix(observation.LocationRef, "external-root-1/path-sha256:") || strings.Contains(observation.LocationRef, external) {
+		t.Fatalf("location=%q", observation.LocationRef)
+	}
+	assertJSONExcludes(t, got, external, path)
+}
+
+func TestMCPCollectorMarksOnlyMalformedTargetPartialAndKeepsValidSibling(t *testing.T) {
+	home := t.TempDir()
+	badPath := filepath.Join(home, "Projects", "bad", ".mcp.json")
+	goodPath := filepath.Join(home, "Projects", "good", ".mcp.json")
+	writeMCPFile(t, badPath, `{"mcpServers":{"both":{"command":"node","url":"https://example.invalid"},"safe":{"command":"node","futureOption":"unknown-secret-value"}}}`)
+	writeMCPFile(t, goodPath, `{"mcpServers":{"other":{"command":"node"}}}`)
+	badTarget := sharedProjectTarget(home, badPath)
+	goodTarget := sharedProjectTarget(home, goodPath)
+
+	got := collectMCP(t, home, badTarget, goodTarget)
+	bad := assertTarget(t, got.Targets, badTarget.TargetID, badTarget.InstanceRef)
+	if bad.Status != model.TargetPartial || bad.Assets != 1 || bad.Observations != 1 || !hasErrorCode(bad.Errors, "invalid_server") || !hasErrorCode(bad.Errors, "unknown_server_field") {
+		t.Fatalf("bad target=%+v", bad)
+	}
+	good := assertTarget(t, got.Targets, goodTarget.TargetID, goodTarget.InstanceRef)
+	if good.Status != model.TargetComplete || good.Assets != 1 || good.Observations != 1 {
+		t.Fatalf("good target=%+v", good)
+	}
+	observation := assertObservation(t, got.Observations, "mcp:shared:safe", badTarget.InstanceRef)
+	if observation.Metadata["unknown_fields"] != "futureOption" {
+		t.Fatalf("metadata=%+v", observation.Metadata)
+	}
+	assertJSONExcludes(t, got, "unknown-secret-value", badPath, goodPath)
+}
+
+func TestMCPCollectorObservationContainsSanitizedSemanticsOnly(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".cursor", "mcp.json")
+	writeMCPFile(t, path, `{
+  "mcpServers": {
+    "stdio": {
+      "command": "/private/tools/runner",
+      "args": ["--token", "argument-secret", "--root=/private/client/data", "--mode=safe"],
+      "cwd": "/private/client/work",
+      "env": {"API_TOKEN": "environment-secret"},
+      "enabledTools": ["write", "read"],
+      "disabledTools": ["delete"],
+      "enabled": false
+    },
+    "remote": {
+      "url": "https://alice:password@example.invalid/mcp?access_token=query-secret&mode=safe#fragment-secret",
+      "headers": {"Authorization": "Bearer header-secret"}
+    },
+    "command-secret": {
+      "command": "runner --token embedded-command-secret"
+    },
+    "unsafe-unknown": {
+      "command": "node",
+      "/private/client/unknown-field": "unknown-field-secret"
+    }
+  }
+}`)
+
+	got := collectMCP(t, home)
+	stdio := assertObservation(t, got.Observations, "mcp:cursor:stdio", "$HOME/.cursor/mcp.json")
+	for _, key := range []string{"transport", "command", "args", "cwd_ref", "enabled", "env_keys", "enabled_tools", "disabled_tools", "source_target"} {
+		if stdio.Metadata[key] == "" {
+			t.Fatalf("stdio metadata missing %q: %+v", key, stdio.Metadata)
+		}
+	}
+	if strings.Contains(stdio.Metadata["command"], "/private/") || strings.Contains(stdio.Metadata["cwd_ref"], "/private/") || strings.Contains(stdio.Metadata["args"], "/private/") {
+		t.Fatalf("raw path in metadata=%+v", stdio.Metadata)
+	}
+	remote := assertObservation(t, got.Observations, "mcp:cursor:remote", "$HOME/.cursor/mcp.json")
+	if remote.Metadata["url_shape"] != "https://example.invalid/mcp?query_keys=access_token,mode" || remote.Metadata["header_keys"] != "Authorization" {
+		t.Fatalf("remote metadata=%+v", remote.Metadata)
+	}
+	commandSecret := assertObservation(t, got.Observations, "mcp:cursor:command-secret", "$HOME/.cursor/mcp.json")
+	if commandSecret.Metadata["command"] != "[redacted]" {
+		t.Fatalf("command metadata=%+v", commandSecret.Metadata)
+	}
+	assertJSONExcludes(t, got,
+		"argument-secret", "environment-secret", "query-secret", "password", "header-secret", "fragment-secret",
+		"embedded-command-secret", "unknown-field-secret",
+		"/private/tools/runner", "/private/client/data", "/private/client/work", "/private/client/unknown-field",
+	)
+}
+
+func TestMCPCollectorRejectsSymlinkDuplicateOversizeAndHonorsCancellation(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		home := t.TempDir()
+		outside := t.TempDir()
+		outsideConfig := filepath.Join(outside, "mcp.json")
+		writeMCPFile(t, outsideConfig, `{"mcpServers":{"outside":{"command":"node"}}}`)
+		if err := os.Symlink(outsideConfig, filepath.Join(home, ".claude.json")); err != nil {
+			t.Fatal(err)
+		}
+		got := collectMCP(t, home)
+		target := assertTarget(t, got.Targets, "mcp.claude-code.user", "")
+		if target.Status != model.TargetPartial || !hasErrorCode(target.Errors, "config_unavailable") {
+			t.Fatalf("target=%+v", target)
+		}
+		assertJSONExcludes(t, got, outside)
+	})
+
+	t.Run("duplicate keys", func(t *testing.T) {
+		home := t.TempDir()
+		writeMCPFile(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"bad":{"env":{"TOKEN":"one","TOKEN":"two"}}}}`)
+		got := collectMCP(t, home)
+		target := assertTarget(t, got.Targets, "mcp.claude-code.user", "")
+		if target.Status != model.TargetPartial || !hasErrorCode(target.Errors, "config_invalid") {
+			t.Fatalf("target=%+v", target)
+		}
+	})
+
+	t.Run("oversize", func(t *testing.T) {
+		home := t.TempDir()
+		writeMCPBytes(t, filepath.Join(home, ".cursor", "mcp.json"), bytes.Repeat([]byte("x"), maxConfigBytes+1))
+		got := collectMCP(t, home)
+		target := assertTarget(t, got.Targets, "mcp.cursor.user", "")
+		if target.Status != model.TargetPartial || !hasErrorCode(target.Errors, "config_oversized") {
+			t.Fatalf("target=%+v", target)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := mcp.New().Collect(ctx, testutil.Environment(t, t.TempDir()))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestMCPCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
 	home := t.TempDir()
-	marker := "path-fallback-secret-marker"
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"`+marker+`":{}}}`)
+	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"unsafe":{"command":"node"}}}`)
 	env := testutil.Environment(t, home)
 	env.FS = pathOnlyFileSystem{FileSystem: platform.OSFileSystem{}}
 
@@ -574,104 +342,121 @@ func TestMCPCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
-		t.Fatalf("result=%s", encoded)
-	}
-}
-
-func TestMCPCollectorRejectsDuplicateKeysAtAnyDepth(t *testing.T) {
-	home := t.TempDir()
-	marker := "duplicate-secret-marker"
-	writeMCPFile(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"bad":{"env":{"TOKEN":"`+marker+`","TOKEN":"second"}}}}`)
-	env := testutil.Environment(t, home)
-
-	got, err := mcp.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertPartialConfigError(t, got, "config_invalid", "$HOME/.claude.json", marker, home)
-}
-
-func TestMCPCollectorRejectsMalformedAndOversizedConfigurations(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		path     string
-		contents []byte
-		wantCode string
-		marker   string
-	}{
-		{name: "malformed", path: filepath.Join(".cursor", "mcp.json"), contents: []byte(`{"mcpServers":{"bad": malformed-secret-marker`), wantCode: "config_invalid", marker: "malformed-secret-marker"},
-		{name: "oversized", path: filepath.Join(".windsurf", "mcp.json"), contents: bytes.Repeat([]byte("x"), maxConfigBytes+1), wantCode: "config_oversized", marker: ""},
+	for _, id := range []string{
+		"mcp.claude-code.legacy-user", "mcp.claude-code.user", "mcp.claude-desktop.user", "mcp.cursor.user",
+		"mcp.github-copilot.user", "mcp.vscode-insiders.user", "mcp.vscode.user", "mcp.windsurf.legacy-user", "mcp.windsurf.user",
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			home := t.TempDir()
-			path := filepath.Join(home, testCase.path)
-			writeMCPBytes(t, path, testCase.contents)
-			env := testutil.Environment(t, home)
-
-			got, err := mcp.New().Collect(context.Background(), env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertPartialConfigError(t, got, testCase.wantCode, "$HOME/"+filepath.ToSlash(testCase.path), testCase.marker, home)
-		})
+		target := assertTarget(t, got.Targets, id, "")
+		if target.Status != model.TargetUnavailable || !hasErrorCode(target.Errors, "rooted_access_unavailable") {
+			t.Fatalf("target=%+v", target)
+		}
 	}
-}
-
-func TestMCPCollectorChecksSizeAfterReadAndSanitizesAccessFailures(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		readData []byte
-		readErr  error
-		wantCode string
-	}{
-		{name: "grew after pre-read check", readData: bytes.Repeat([]byte("x"), maxConfigBytes+1), wantCode: "config_oversized"},
-		{name: "access failure", readErr: fs.ErrPermission, wantCode: "config_unavailable"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			home := t.TempDir()
-			path := filepath.Join(home, ".claude.json")
-			writeMCPFile(t, path, `{}`)
-			env := testutil.Environment(t, home)
-			env.FS = mcpFaultFS{FileSystem: platform.OSFileSystem{}, path: path, readData: testCase.readData, readErr: testCase.readErr}
-
-			got, err := mcp.New().Collect(context.Background(), env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertPartialConfigError(t, got, testCase.wantCode, "$HOME/.claude.json", "", home)
-		})
-	}
-}
-
-func TestMCPCollectorHonorsCanceledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := mcp.New().Collect(ctx, testutil.Environment(t, t.TempDir()))
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error=%v", err)
-	}
-}
-
-func assertPartialConfigError(t *testing.T, got model.CollectorResult, code, path, marker, home string) {
-	t.Helper()
-	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || len(got.Assets) != 0 {
+	if len(got.Assets) != 0 || len(got.Observations) != 0 {
 		t.Fatalf("result=%+v", got)
 	}
-	if got.Errors[0].Code != code || got.Errors[0].Path != path {
-		t.Fatalf("error=%+v", got.Errors[0])
-	}
-	encoded, err := json.Marshal(got)
+}
+
+func collectMCP(t *testing.T, home string, localTargets ...model.LocalTarget) model.CollectorResult {
+	t.Helper()
+	got, err := mcp.New(localTargets...).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sensitive := range []string{marker, home, "permission denied", "invalid character"} {
-		if sensitive != "" && strings.Contains(string(encoded), sensitive) {
-			t.Fatalf("sensitive detail persisted: %s", encoded)
+	return got
+}
+
+func sharedProjectTarget(home, path string) model.LocalTarget {
+	return projectTarget(home, path, "mcp.shared.project", "json", "shared", []string{"claude-code", "vscode"})
+}
+
+func projectTarget(home, path, targetID, format, host string, consumers []string) model.LocalTarget {
+	return model.LocalTarget{
+		TargetID: targetID, InstanceRef: identity.SafeLocationRef(home, path, "external-root"), Path: path,
+		Format: format, Host: host, Consumers: append([]string(nil), consumers...),
+	}
+}
+
+func assertTarget(t *testing.T, targets []model.TargetCoverage, id, instance string) model.TargetCoverage {
+	t.Helper()
+	for _, target := range targets {
+		if target.TargetID == id && target.InstanceRef == instance {
+			return target
+		}
+	}
+	t.Fatalf("missing target %q instance %q: %+v", id, instance, targets)
+	return model.TargetCoverage{}
+}
+
+func assertAsset(t *testing.T, assets []model.Asset, id string) model.Asset {
+	t.Helper()
+	for _, asset := range assets {
+		if asset.ID == id {
+			return asset
+		}
+	}
+	t.Fatalf("missing asset %q: %+v", id, assets)
+	return model.Asset{}
+}
+
+func assertObservation(t *testing.T, observations []model.Observation, assetID, location string) model.Observation {
+	t.Helper()
+	for _, observation := range observations {
+		if observation.AssetID == assetID && observation.LocationRef == location {
+			return observation
+		}
+	}
+	t.Fatalf("missing observation asset=%q location=%q: %+v", assetID, location, observations)
+	return model.Observation{}
+}
+
+func assetCount(assets []model.Asset, id string) int {
+	count := 0
+	for _, asset := range assets {
+		if asset.ID == id {
+			count++
+		}
+	}
+	return count
+}
+
+func observationCount(observations []model.Observation, assetID string) int {
+	count := 0
+	for _, observation := range observations {
+		if observation.AssetID == assetID {
+			count++
+		}
+	}
+	return count
+}
+
+func countTarget(targets []model.TargetCoverage, id string) int {
+	count := 0
+	for _, target := range targets {
+		if target.TargetID == id {
+			count++
+		}
+	}
+	return count
+}
+
+func hasErrorCode(errors []model.CoverageError, code string) bool {
+	for _, issue := range errors {
+		if issue.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func assertJSONExcludes(t *testing.T, value any, forbidden ...string) {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range forbidden {
+		if marker != "" && bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("forbidden value %q persisted: %s", marker, encoded)
 		}
 	}
 }
@@ -683,7 +468,7 @@ func writeMCPFile(t *testing.T, path, contents string) {
 
 func writeMCPBytes(t *testing.T, path string, contents []byte) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
@@ -691,117 +476,6 @@ func writeMCPBytes(t *testing.T, path string, contents []byte) {
 	}
 }
 
-type mcpFaultFS struct {
-	platform.FileSystem
-	path     string
-	readData []byte
-	readErr  error
-}
-
-func (f mcpFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
-	rooted, ok := f.FileSystem.(platform.RootedFileSystem)
-	if !ok {
-		return nil, fs.ErrInvalid
-	}
-	root, err := rooted.OpenRoot(name)
-	if err != nil {
-		return nil, err
-	}
-	return &mcpFaultRoot{
-		RootedDirectory: root,
-		current:         name,
-		target:          f.path,
-		readData:        f.readData,
-		readErr:         f.readErr,
-	}, nil
-}
-
-type mcpFaultRoot struct {
-	platform.RootedDirectory
-	current  string
-	target   string
-	readData []byte
-	readErr  error
-}
-
-func (r *mcpFaultRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
-	child, err := r.RootedDirectory.OpenRoot(name)
-	if err != nil {
-		return nil, err
-	}
-	return &mcpFaultRoot{
-		RootedDirectory: child,
-		current:         filepath.Join(r.current, name),
-		target:          r.target,
-		readData:        r.readData,
-		readErr:         r.readErr,
-	}, nil
-}
-
-func (r *mcpFaultRoot) Open(name string) (platform.RootedFile, error) {
-	if filepath.Join(r.current, name) != r.target {
-		return r.RootedDirectory.Open(name)
-	}
-	if r.readErr != nil {
-		return nil, r.readErr
-	}
-	file, err := r.RootedDirectory.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	return &mcpFaultFile{RootedFile: file, reader: bytes.NewReader(r.readData)}, nil
-}
-
-type mcpFaultFile struct {
-	platform.RootedFile
-	reader *bytes.Reader
-}
-
-func (f *mcpFaultFile) Read(buffer []byte) (int, error) {
-	return f.reader.Read(buffer)
-}
-
 type pathOnlyFileSystem struct {
 	platform.FileSystem
-}
-
-type swapRootFileSystem struct {
-	platform.OSFileSystem
-	root platform.RootedDirectory
-}
-
-func (f swapRootFileSystem) OpenRoot(string) (platform.RootedDirectory, error) {
-	return f.root, nil
-}
-
-type swapRootDirectory struct {
-	expected    os.FileInfo
-	replacement string
-}
-
-func (r *swapRootDirectory) Lstat(name string) (os.FileInfo, error) {
-	if name == ".claude.json" {
-		return r.expected, nil
-	}
-	return nil, fs.ErrNotExist
-}
-
-func (r *swapRootDirectory) OpenRoot(string) (platform.RootedDirectory, error) {
-	return nil, fs.ErrNotExist
-}
-
-func (r *swapRootDirectory) Open(name string) (platform.RootedFile, error) {
-	if name != ".claude.json" {
-		return nil, fs.ErrNotExist
-	}
-	return os.Open(r.replacement)
-}
-
-func (*swapRootDirectory) Close() error { return nil }
-
-func (f mcpFaultFS) ReadFile(path string) ([]byte, error) {
-	if path == f.path {
-		return f.readData, f.readErr
-	}
-	return f.FileSystem.ReadFile(path)
 }

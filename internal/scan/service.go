@@ -129,22 +129,27 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 }
 
 func (s *Service) collectProjectMCP(ctx context.Context, results []model.CollectorResult) []model.CollectorResult {
-	projectAssets := make([]model.Asset, 0)
-	for _, result := range results {
-		if result.Collector != "projects" {
-			continue
-		}
-		for _, asset := range result.Assets {
-			if asset.Type == model.AssetProject && asset.Source == "mcp" && asset.Name == "mcp.json" && strings.HasPrefix(asset.ID, "project-file:mcp:") {
-				projectAssets = append(projectAssets, asset)
+	projectTargets := make([]model.LocalTarget, 0)
+	for index := range results {
+		localTargets := results[index].LocalTargets
+		results[index].LocalTargets = nil
+		for targetIndex, target := range localTargets {
+			if results[index].Collector == "projects" && mcp.ValidProjectTarget(s.environment.Home, target) {
+				target.Consumers = append([]string(nil), target.Consumers...)
+				projectTargets = append(projectTargets, target)
 			}
+			localTargets[targetIndex] = model.LocalTarget{}
 		}
 	}
 	followUp := collector.Orchestrator{
-		Collectors:    []collector.Collector{mcp.New(projectAssets...)},
+		Collectors:    []collector.Collector{mcp.New(projectTargets...)},
 		Timeout:       s.orchestrator.Timeout,
 		MaxConcurrent: 1,
 	}.Collect(ctx, s.environment)
+	for index := range projectTargets {
+		projectTargets[index] = model.LocalTarget{}
+	}
+	projectTargets = nil
 	if len(followUp) != 1 {
 		return results
 	}

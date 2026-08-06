@@ -10,40 +10,11 @@ import (
 
 var errInvalidConfig = errors.New("invalid MCP configuration")
 
-type serverConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	URL     string            `json:"url"`
-	Env     map[string]string `json:"env"`
-}
-
-type configDocument struct {
-	MCPServers map[string]serverConfig `json:"mcpServers"`
-	Servers    map[string]serverConfig `json:"servers"`
-}
-
-func parseConfig(contents []byte) (map[string]serverConfig, error) {
-	if err := validateJSONObjectKeys(contents); err != nil {
-		return nil, errInvalidConfig
-	}
-	var document configDocument
-	if err := json.Unmarshal(contents, &document); err != nil {
-		return nil, errInvalidConfig
-	}
-	servers := make(map[string]serverConfig, len(document.MCPServers)+len(document.Servers))
-	for name, config := range document.MCPServers {
-		servers[name] = config
-	}
-	for name, config := range document.Servers {
-		servers[name] = config
-	}
-	return servers, nil
-}
-
 func validateJSONObjectKeys(contents []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.UseNumber()
-	if err := readJSONValue(decoder); err != nil {
+	tokens := 0
+	if err := readJSONValue(decoder, 0, &tokens); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -55,11 +26,15 @@ func validateJSONObjectKeys(contents []byte) error {
 	return nil
 }
 
-func readJSONValue(decoder *json.Decoder) error {
+func readJSONValue(decoder *json.Decoder, depth int, tokens *int) error {
+	if depth > 64 || *tokens > maxJSONConfigBytes {
+		return errInvalidConfig
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
+	*tokens++
 	delimiter, ok := token.(json.Delim)
 	if !ok {
 		return nil
@@ -81,7 +56,7 @@ func readJSONValue(decoder *json.Decoder) error {
 				return fmt.Errorf("%w: duplicate object key", errInvalidConfig)
 			}
 			seen[key] = struct{}{}
-			if err := readJSONValue(decoder); err != nil {
+			if err := readJSONValue(decoder, depth+1, tokens); err != nil {
 				return err
 			}
 		}
@@ -91,7 +66,7 @@ func readJSONValue(decoder *json.Decoder) error {
 		}
 	case '[':
 		for decoder.More() {
-			if err := readJSONValue(decoder); err != nil {
+			if err := readJSONValue(decoder, depth+1, tokens); err != nil {
 				return err
 			}
 		}

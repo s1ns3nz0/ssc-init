@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "both": {"command": "node", "url": "https://example.invalid/mcp"},
+    "neither": {"args": ["server.js"]},
+    "wrong-type": {"command": 42},
+    "not-object": "node",
+    "safe": {"command": "node"}
+  }
+}
