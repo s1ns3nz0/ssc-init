@@ -135,7 +135,7 @@ type Observation struct {
 
 `Scope` is one of `user`, `project`, `ide-profile`, `tool-environment`, or `system`. New values require a schema change and tests.
 
-`LocationRef` contains a home-redacted path when that path is safe to persist. Paths outside the configured home are represented by a deterministic path digest plus a user-supplied root label, not a raw absolute path. The digest prevents accidental disclosure but is not claimed to provide cryptographic secrecy for guessable paths.
+`LocationRef` contains a home-redacted path when that path is safe to persist. Paths outside the configured home are represented by a deterministic path digest plus a generated `external-root-N` label, not a raw absolute path. Labels follow the canonical sorted root order. The digest prevents accidental disclosure but is not claimed to provide cryptographic secrecy for guessable paths.
 
 `Consumers` is a sorted, unique list used when one configuration is shared by more than one host, such as a project `.mcp.json` consumed by Claude and VS Code Agent Host.
 
@@ -150,6 +150,8 @@ Relationships remain asset-to-asset so existing graph validation and consumers d
 Project-to-configuration `contains` relationships continue to reference canonical assets. The exact project occurrence remains unambiguous because its observation carries `ProjectID`. A package observation produced by a command probe records the probe target ID and executable observation ID in safe metadata.
 
 No collector may collapse its result with `map[assetID]Asset` before observations reach inventory normalization.
+
+Project discovery may need to hand an absolute configuration path to the same scan's MCP follow-up without persisting that path. `CollectorResult` therefore has an ephemeral `LocalTargets []LocalTarget` field tagged `json:"-"`. A local target contains the catalog target ID, safe instance reference, raw in-memory path, format, host, and consumers. The scan service passes it only to the matching follow-up collector and discards it before persistence; validation rejects any attempt to serialize or copy the raw path into assets, observations, coverage, errors, or scope.
 
 ### 6.4 Identity collision behavior
 
@@ -304,7 +306,7 @@ IDE roots retain the current macOS fixed catalogs. Custom extension directories 
 
 ### 8.4 TOML dependency
 
-Codex TOML is parsed with a pinned, pure-Go TOML v1.0 parser (`github.com/pelletier/go-toml/v2`). This adds a build-time module but no runtime installation, service, interpreter, or CGO dependency. A hand-written partial TOML parser is rejected because silently misreading security configuration is worse than one audited static dependency.
+Codex TOML is parsed with a pinned, pure-Go standards-compliant TOML parser (`github.com/pelletier/go-toml/v2`). The implementation plan pins the reviewed module version rather than following `latest`. This adds a build-time module but no runtime installation, service, interpreter, or CGO dependency. A hand-written partial TOML parser is rejected because silently misreading security configuration is worse than one audited static dependency.
 
 Recognized normalized MCP fields are command, arguments, URL, transport/type, working directory, enabled state, tool allow/deny names, environment key names, and header key names. Values for environment variables, authorization headers, bearer tokens, and other credential fields are never persisted. Unrelated top-level settings outside the MCP container are ignored because they are outside this target. Any unrecognized field inside an MCP server definition is retained only by sanitized field name and makes the target `partial` with `unknown_field`; it is never silently ignored.
 
