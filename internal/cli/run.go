@@ -41,7 +41,18 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 // Run executes the CLI command represented by args.
 func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
+	options, err := ParseOptions(args)
+	if err != nil {
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
+	}
+	return a.RunOptions(ctx, options, stdout, stderr)
+}
+
+// RunOptions executes one command that has already passed ParseOptions.
+func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.Writer) int {
+	switch options.Command {
+	case "version":
 		if err := writeJSON(stdout, map[string]string{
 			"product": "SSC Init",
 			"command": "ssc-init",
@@ -51,8 +62,7 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			return 1
 		}
 		return 0
-	}
-	if len(args) == 3 && args[0] == "scan" && args[1] == "--baseline" && args[2] == "--json" {
+	case "scan":
 		if a.BaselineScanner == nil {
 			fmt.Fprintln(stderr, "baseline scan is unavailable")
 			return 1
@@ -67,8 +77,7 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			return 1
 		}
 		return 0
-	}
-	if len(args) == 2 && args[0] == "status" && args[1] == "--json" {
+	case "status":
 		if a.StatusReader == nil {
 			fmt.Fprintln(stderr, "status is unavailable")
 			return 1
@@ -95,8 +104,7 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			return 1
 		}
 		return 0
-	}
-	if len(args) == 2 && args[0] == "doctor" && args[1] == "--json" {
+	case "doctor":
 		if a.Doctor == nil {
 			fmt.Fprintln(stderr, "doctor is unavailable")
 			return 1
@@ -111,14 +119,10 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			return 1
 		}
 		return 0
+	default:
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
 	}
-
-	command := ""
-	if len(args) > 0 {
-		command = args[0]
-	}
-	fmt.Fprintf(stderr, "unknown command: %s\n", command)
-	return 2
 }
 
 type statusPayload struct {

@@ -2,282 +2,209 @@ package projects_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
-	"io/fs"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
 
-func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
-	env := testutil.Environment(t, "../../../testdata/home")
-	got, err := projects.New([]string{"$HOME/Projects", "$HOME/Projects/."}).Collect(context.Background(), env)
+func TestProjectCollectorAdvertisesOnlyRootTarget(t *testing.T) {
+	home := t.TempDir()
+	roots, err := projects.ResolveRoots(home, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	projectCollector := projects.New(roots)
+	want := []model.TargetSpec{{
+		ID: "projects.root", Collector: "projects", Scope: model.ScopeProject,
+		Platform: "darwin", Method: model.TargetDirectory,
+	}}
+	if got := projectCollector.Targets(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("targets=%+v want=%+v", got, want)
+	}
+	mutated := projectCollector.Targets()
+	mutated[0].ID = "mutated"
+	if got := projectCollector.Targets(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("targets changed through caller slice: %+v", got)
+	}
+	var _ collector.TargetedCollector = projectCollector
+}
 
-	manifest := testutil.AssertAsset(t, got.Assets, "project-file:manifest:$HOME/Projects/sample/package.json")
-	lockfile := testutil.AssertAsset(t, got.Assets, "project-file:lockfile:$HOME/Projects/sample/package-lock.json")
-	projectMCP := testutil.AssertAsset(t, got.Assets, "project-file:mcp:$HOME/Projects/sample/.vscode/mcp.json")
-	if manifest.Path != "$HOME/Projects/sample/package.json" || lockfile.Path != "$HOME/Projects/sample/package-lock.json" || projectMCP.Path != "$HOME/Projects/sample/.vscode/mcp.json" {
-		t.Fatalf("manifest=%+v lockfile=%+v projectMCP=%+v", manifest, lockfile, projectMCP)
+func TestProjectCollectorResolvesLegacyStringRootsAgainstEnvironmentHome(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, "Projects", "sample", ".mcp.json")
+	writeProjectFile(t, config, `{}`)
+	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
 	}
-	projectPath := "$HOME/Projects/sample"
-	projectID := fmt.Sprintf("project:sha256:%x", sha256.Sum256([]byte(projectPath)))
-	project := testutil.AssertAsset(t, got.Assets, projectID)
-	if project.Type != model.AssetProject || project.Path != projectPath {
-		t.Fatalf("project=%+v", project)
+	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != config || got.Targets[0].InstanceRef != "$HOME/Projects" {
+		t.Fatalf("result=%+v", got)
 	}
-	wantRelationships := []model.Relationship{
-		{From: projectID, To: lockfile.ID, Kind: "contains"},
-		{From: projectID, To: manifest.ID, Kind: "contains"},
-		{From: projectID, To: projectMCP.ID, Kind: "contains"},
+}
+
+func TestProjectCollectorRecognizesOnlyFixedProjectConfigs(t *testing.T) {
+	home := t.TempDir()
+	configuredRoot := filepath.Join(home, "Projects")
+	project := filepath.Join(configuredRoot, "sample")
+	files := map[string]string{
+		".mcp.json":                            `{"mcpServers":{}}`,
+		filepath.Join(".cursor", "mcp.json"):   `{"mcpServers":{}}`,
+		filepath.Join(".codex", "config.toml"): `[mcp_servers]`,
+		filepath.Join(".vscode", "mcp.json"):   `{"servers":{}}`,
+		"unknown.json":                         `{}`,
+		"unknown.toml":                         `value = true`,
+		"package.json":                         `{}`,
 	}
-	if !reflect.DeepEqual(got.Relationships, wantRelationships) {
-		t.Fatalf("relationships=%+v want=%+v", got.Relationships, wantRelationships)
+	for relative, contents := range files {
+		writeProjectFile(t, filepath.Join(project, relative), contents)
 	}
-	for _, asset := range got.Assets {
-		if strings.Contains(asset.Path, "node_modules") {
-			t.Fatalf("unexpected=%s", asset.Path)
-		}
+	roots, err := projects.ResolveRoots(home, []string{configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if got.Status != model.CoverageComplete {
-		t.Fatalf("status=%s errors=%+v", got.Status, got.Errors)
+		t.Fatalf("status=%q errors=%+v targets=%+v", got.Status, got.Errors, got.Targets)
 	}
-}
+	if len(got.Targets) != 1 {
+		t.Fatalf("targets=%+v", got.Targets)
+	}
+	target := got.Targets[0]
+	if target.TargetID != "projects.root" || target.InstanceRef != "$HOME/Projects" || target.Status != model.TargetComplete || target.Assets != 5 || target.Observations != 4 {
+		t.Fatalf("target=%+v", target)
+	}
+	if len(got.Assets) != 5 || len(got.Observations) != 4 || len(got.LocalTargets) != 4 || len(got.Relationships) != 4 {
+		t.Fatalf("assets=%d observations=%d localTargets=%d relationships=%d", len(got.Assets), len(got.Observations), len(got.LocalTargets), len(got.Relationships))
+	}
 
-func TestProjectsCollectorSkipsEffectivelyEmptyRootSet(t *testing.T) {
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, "package.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
+	wantTargets := []model.LocalTarget{
+		{TargetID: "mcp.codex.project", InstanceRef: "$HOME/Projects/sample/.codex/config.toml", Path: filepath.Join(project, ".codex", "config.toml"), Format: "toml", Host: "codex", Consumers: []string{"codex"}},
+		{TargetID: "mcp.cursor.project", InstanceRef: "$HOME/Projects/sample/.cursor/mcp.json", Path: filepath.Join(project, ".cursor", "mcp.json"), Format: "json", Host: "cursor", Consumers: []string{"cursor"}},
+		{TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json", Path: filepath.Join(project, ".mcp.json"), Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"}},
+		{TargetID: "mcp.vscode.project", InstanceRef: "$HOME/Projects/sample/.vscode/mcp.json", Path: filepath.Join(project, ".vscode", "mcp.json"), Format: "json", Host: "vscode", Consumers: []string{"vscode"}},
 	}
-	env := testutil.Environment(t, home)
-
-	for _, roots := range [][]string{nil, {}, {""}, {" ", "\t", "\n"}} {
-		got, err := projects.New(roots).Collect(context.Background(), env)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.Status != model.CoverageSkipped || len(got.Assets) != 0 {
-			t.Fatalf("roots=%q result=%+v", roots, got)
-		}
+	if !reflect.DeepEqual(got.LocalTargets, wantTargets) {
+		t.Fatalf("localTargets=%+v want=%+v", got.LocalTargets, wantTargets)
 	}
-}
-
-func TestProjectsCollectorPreservesSpacesInSuppliedRoot(t *testing.T) {
-	home := t.TempDir()
-	for _, directory := range []string{"Projects", "Projects "} {
-		path := filepath.Join(home, directory, "package.json")
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	env := testutil.Environment(t, home)
-
-	got, err := projects.New([]string{"$HOME/Projects "}).Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	testutil.AssertAsset(t, got.Assets, "project-file:manifest:$HOME/Projects /package.json")
+	assetIDs := make(map[string]struct{}, len(got.Assets))
 	for _, asset := range got.Assets {
-		if asset.Path == "$HOME/Projects/package.json" || asset.Path == "$HOME/Projects" {
-			t.Fatalf("traversed unsupplied root: %+v", asset)
+		assetIDs[asset.ID] = struct{}{}
+		if asset.Path != "" || strings.Contains(asset.ID, home) || strings.Contains(asset.Name, home) {
+			t.Fatalf("asset contains a location field: %+v", asset)
 		}
+	}
+	for _, observation := range got.Observations {
+		if !strings.HasPrefix(observation.LocationRef, "$HOME/Projects/sample/") || observation.ProjectID == "" {
+			t.Fatalf("observation=%+v", observation)
+		}
+		if _, exists := assetIDs[observation.AssetID]; !exists {
+			t.Fatalf("observation references absent asset: %+v", observation)
+		}
+		if _, exists := assetIDs[observation.ProjectID]; !exists {
+			t.Fatalf("observation references absent project: %+v", observation)
+		}
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), home) || strings.Contains(string(encoded), "unknown.json") || strings.Contains(string(encoded), "package.json") {
+		t.Fatalf("serialized project result leaked or misclassified a path: %s", encoded)
 	}
 }
 
-func TestProjectsCollectorRecognizesSupportedFilesAndProjectMCP(t *testing.T) {
+func TestProjectCollectorDistinguishesMissingAndUnavailableRoots(t *testing.T) {
 	home := t.TempDir()
-	project := filepath.Join(home, "Projects", "polyglot")
-	files := []string{
-		"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
-		"pyproject.toml", "requirements.txt", "requirements-dev.txt", "uv.lock",
-		"Cargo.toml", "Cargo.lock", "go.mod", "go.sum", filepath.Join(".vscode", "mcp.json"),
-	}
-	for _, name := range files {
-		path := filepath.Join(project, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	env := testutil.Environment(t, home)
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), env)
+	missing := filepath.Join(home, "missing")
+	notDirectory := filepath.Join(home, "not-a-directory")
+	writeProjectFile(t, notDirectory, "fixture")
+	roots, err := projects.ResolveRoots(home, []string{missing, notDirectory})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range files {
-		kind := "manifest"
-		switch name {
-		case "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "uv.lock", "Cargo.lock", "go.sum":
-			kind = "lockfile"
-		case filepath.Join(".vscode", "mcp.json"):
-			kind = "mcp"
-		}
-		redacted := filepath.ToSlash(filepath.Join("$HOME/Projects/polyglot", name))
-		testutil.AssertAsset(t, got.Assets, "project-file:"+kind+":"+redacted)
+	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := make(map[string]model.TargetStatus)
+	for _, target := range got.Targets {
+		statuses[target.InstanceRef] = target.Status
+	}
+	if statuses["$HOME/missing"] != model.TargetNotPresent || statuses["$HOME/not-a-directory"] != model.TargetUnavailable {
+		t.Fatalf("targets=%+v", got.Targets)
+	}
+	if got.Status != model.CoveragePartial {
+		t.Fatalf("status=%q", got.Status)
 	}
 }
 
-func TestProjectsCollectorStaysWithinRootsAndExcludesHeavyDirectories(t *testing.T) {
+func TestProjectCollectorReportsSafelyEmptyRootComplete(t *testing.T) {
 	home := t.TempDir()
-	inside := filepath.Join(home, "allowed", "app", "package.json")
-	outside := filepath.Join(home, "outside", "package.json")
-	excluded := []string{
-		"node_modules", ".venv", "venv", "vendor", "dist", "build", "Library", ".cache",
-		".npm", ".pnpm-store", ".yarn", ".bun", ".cargo", ".rustup", ".gradle", ".m2",
-		".ivy2", ".nuget", ".pub-cache", filepath.Join(".git", "objects"),
+	empty := filepath.Join(home, "empty")
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, path := range append([]string{inside, outside}, pathsUnder(home, "allowed", excluded)...) {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	env := testutil.Environment(t, home)
-	got, err := projects.New([]string{"$HOME/allowed"}).Collect(context.Background(), env)
+	roots, err := projects.ResolveRoots(home, []string{empty})
 	if err != nil {
 		t.Fatal(err)
 	}
-	testutil.AssertAsset(t, got.Assets, "project-file:manifest:$HOME/allowed/app/package.json")
-	for _, asset := range got.Assets {
-		if strings.Contains(asset.Path, "$HOME/outside") {
-			t.Fatalf("scanned outside root: %+v", asset)
-		}
-		for _, dir := range excluded {
-			if strings.Contains(asset.Path, filepath.ToSlash(dir)) {
-				t.Fatalf("scanned excluded directory %q: %+v", dir, asset)
-			}
-		}
+	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.CoverageComplete || len(got.Targets) != 1 || got.Targets[0].Status != model.TargetComplete {
+		t.Fatalf("result=%+v", got)
+	}
+	if len(got.Assets) != 0 || len(got.Observations) != 0 || len(got.LocalTargets) != 0 {
+		t.Fatalf("result=%+v", got)
 	}
 }
 
-func TestProjectsCollectorEnforcesDepthTwelve(t *testing.T) {
+func TestProjectCollectorHidesExternalAbsoluteLocations(t *testing.T) {
 	home := t.TempDir()
-	root := filepath.Join(home, "Projects")
-	atDepthTwelve := filepath.Join(append([]string{root}, append(repeat("d", 11), "package.json")...)...)
-	beyondDepthTwelve := filepath.Join(append([]string{root}, append(repeat("x", 12), "package.json")...)...)
-	for _, path := range []string{atDepthTwelve, beyondDepthTwelve} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	env := testutil.Environment(t, home)
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), env)
+	external := t.TempDir()
+	rawConfig := filepath.Join(external, "client-name", ".mcp.json")
+	writeProjectFile(t, rawConfig, `{}`)
+	roots, err := projects.ResolveRoots(home, []string{external})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Assets) != 2 {
-		t.Fatalf("assets=%+v", got.Assets)
-	}
-	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Code != "depth_limit" {
-		t.Fatalf("status=%s errors=%+v", got.Status, got.Errors)
-	}
-}
-
-func TestProjectsCollectorEnforcesEntryLimitPerRoot(t *testing.T) {
-	home := "/synthetic/home"
-	env := testutil.Environment(t, t.TempDir())
-	env.Home = home
-	env.FS = countingFS{entries: 100_001}
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), env)
+	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Code != "entry_limit" {
-		t.Fatalf("status=%s errors=%+v", got.Status, got.Errors)
+	if len(got.Observations) != 1 || !strings.HasPrefix(got.Observations[0].LocationRef, "external-root-1/path-sha256:") {
+		t.Fatalf("observations=%+v", got.Observations)
 	}
-}
-
-func TestProjectsCollectorDoesNotPersistGitRemoteSecrets(t *testing.T) {
-	home := t.TempDir()
-	config := filepath.Join(home, "Projects", "secret", ".git", "config")
-	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
-		t.Fatal(err)
+	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != rawConfig || got.LocalTargets[0].InstanceRef != got.Observations[0].LocationRef {
+		t.Fatalf("localTargets=%+v observations=%+v", got.LocalTargets, got.Observations)
 	}
-	secret := "ghp_do_not_persist"
-	if err := os.WriteFile(config, []byte("[remote \"origin\"]\nurl = https://user:"+secret+"@example.test/acme/repo.git\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	env := testutil.Environment(t, home)
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), env)
+	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(fmt.Sprintf("%+v", got), secret) {
-		t.Fatalf("secret persisted: %+v", got)
-	}
-	if len(got.Assets) != 1 || got.Assets[0].Type != model.AssetProject {
-		t.Fatalf("assets=%+v", got.Assets)
+	if strings.Contains(string(encoded), external) || strings.Contains(string(encoded), "client-name") {
+		t.Fatalf("serialized result leaked external location: %s", encoded)
 	}
 }
 
-func pathsUnder(home, root string, directories []string) []string {
-	paths := make([]string, 0, len(directories))
-	for _, directory := range directories {
-		paths = append(paths, filepath.Join(home, root, directory, "package.json"))
+func writeProjectFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	return paths
-}
-
-func repeat(value string, count int) []string {
-	values := make([]string, count)
-	for i := range values {
-		values[i] = value
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return values
 }
-
-type countingFS struct {
-	entries int
-}
-
-func (f countingFS) ReadFile(string) ([]byte, error)       { return nil, fs.ErrNotExist }
-func (f countingFS) ReadDir(string) ([]os.DirEntry, error) { return nil, fs.ErrNotExist }
-func (f countingFS) Stat(string) (os.FileInfo, error)      { return nil, fs.ErrNotExist }
-func (f countingFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	if err := fn(root, syntheticDirEntry{name: filepath.Base(root), dir: true}, nil); err != nil {
-		return err
-	}
-	for i := 0; i < f.entries; i++ {
-		path := filepath.Join(root, fmt.Sprintf("file-%06d.txt", i))
-		if err := fn(path, syntheticDirEntry{name: filepath.Base(path)}, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type syntheticDirEntry struct {
-	name string
-	dir  bool
-}
-
-func (e syntheticDirEntry) Name() string               { return e.name }
-func (e syntheticDirEntry) IsDir() bool                { return e.dir }
-func (e syntheticDirEntry) Type() fs.FileMode          { return 0 }
-func (e syntheticDirEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrInvalid }
-
-var _ platform.FileSystem = countingFS{}

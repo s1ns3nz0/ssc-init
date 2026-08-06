@@ -58,8 +58,36 @@ func TestRunUnknownCommand(t *testing.T) {
 	if code := Run(context.Background(), []string{"wat"}, &out, &errOut); code != 2 {
 		t.Fatalf("code=%d", code)
 	}
-	if !strings.Contains(errOut.String(), "unknown command: wat") {
+	if errOut.String() != "invalid command arguments\n" {
 		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+type baselineScannerFunc func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error)
+
+func (f baselineScannerFunc) Baseline(ctx context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+	return f(ctx)
+}
+
+func TestRunOptionsUsesAlreadyParsedCommand(t *testing.T) {
+	called := false
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+		called = true
+		return model.ScanResult{}, model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}, model.Delta{Changes: []model.Change{}}, nil
+	})}
+	var out, errOut bytes.Buffer
+	options := Options{
+		Command:        "scan",
+		JSON:           true,
+		Baseline:       true,
+		ExternalProbes: true,
+		ProjectRoots:   []string{"/Volumes/private-value-must-not-be-parsed"},
+	}
+	if code := app.RunOptions(context.Background(), options, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	if !called {
+		t.Fatal("baseline scanner was not called")
 	}
 }
 

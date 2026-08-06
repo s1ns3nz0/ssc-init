@@ -362,3 +362,59 @@ func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
 		t.Fatalf("inventory=%+v", inventory)
 	}
 }
+
+func TestBaselineStripsProjectLocalTargetsWithoutTaskSevenParsing(t *testing.T) {
+	home := t.TempDir()
+	projectConfig := filepath.Join(home, "Projects", "sample", ".mcp.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcpServers":{"project-only":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userConfig := filepath.Join(home, ".cursor", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userConfig, []byte(`{"mcpServers":{"user-only":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "projects", result: model.CollectorResult{
+			Status: model.CoverageComplete,
+			LocalTargets: []model.LocalTarget{{
+				TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json",
+				Path: projectConfig, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+			}},
+		}},
+	}}
+	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
+	snapshots := &memorySnapshots{}
+	service := NewService(orchestrator, snapshots, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	}, env)
+
+	result, inventory, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:shared:project-only" {
+			t.Fatalf("Task 7 project target was parsed early: %+v", asset)
+		}
+	}
+	foundUser := false
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:cursor:user-only" {
+			foundUser = true
+		}
+	}
+	if !foundUser {
+		t.Fatalf("Task 5 user MCP behavior was lost: %+v", inventory)
+	}
+	for _, coverage := range append(result.Coverage, snapshots.saved[0].Coverage...) {
+		if coverage.LocalTargets != nil {
+			t.Fatalf("raw local target survived scan: %+v", coverage.LocalTargets)
+		}
+	}
+}

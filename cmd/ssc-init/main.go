@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector/packages"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/doctor"
+	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/scan"
 	"github.com/ssc-init/ssc-init/internal/store"
@@ -22,16 +25,40 @@ import (
 
 var version = "dev"
 
+type applicationStore interface {
+	scan.SnapshotStore
+	Close() error
+}
+
+var (
+	parseOptionsForRun = cli.ParseOptions
+	hostPathsForRun    = hostPaths
+	resolveRootsForRun = projects.ResolveRoots
+	openStoreForRun    = func(path string) (applicationStore, error) { return store.Open(path) }
+)
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:]))
 }
 
 func run(ctx context.Context, args []string) int {
+	return runWithIO(ctx, args, os.Stdout, os.Stderr)
+}
+
+func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	options, err := parseOptionsForRun(args)
+	if err != nil {
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
+	}
 	app := cli.App{Version: version}
-	if exactArgs(args, "doctor", "--json") {
-		_, paths, ok := hostPaths()
+	switch options.Command {
+	case "version":
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "doctor":
+		_, paths, ok := hostPathsForRun()
 		if !ok {
-			fmt.Fprintln(os.Stderr, "failed to initialize SSC Init")
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
 		}
 		ecosystems, commands := doctorCatalog()
@@ -43,44 +70,78 @@ func run(ctx context.Context, args []string) int {
 			Ecosystems:       ecosystems,
 			OptionalCommands: commands,
 		})
-		return app.Run(ctx, args, os.Stdout, os.Stderr)
-	}
-	if exactArgs(args, "scan", "--baseline", "--json") || exactArgs(args, "status", "--json") {
-		home, paths, ok := hostPaths()
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "status":
+		_, paths, ok := hostPathsForRun()
 		if !ok {
-			fmt.Fprintln(os.Stderr, "failed to initialize SSC Init")
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
 		}
-		snapshots, err := store.Open(filepath.Join(paths.DataDir, "state.db"))
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "failed to initialize SSC Init")
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		defer snapshots.Close()
+		app.StatusReader = snapshots
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "scan":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		environment, configuredCollectors, err := scanConfiguration(home, options)
+		if err != nil {
+			fmt.Fprintln(stderr, "invalid command arguments")
+			return 2
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
 		}
 		defer snapshots.Close()
 
-		environment := collector.Environment{
-			Home: home,
-			FS:   platform.OSFileSystem{},
-			Runner: platform.ExecRunner{
-				Timeout:        5 * time.Second,
-				MaxOutputBytes: 4 << 20,
-			},
-			Now: func() time.Time { return time.Now().UTC() },
-		}
 		orchestrator := collector.Orchestrator{
 			Timeout:       30 * time.Second,
 			MaxConcurrent: 4,
-			Collectors: []collector.Collector{
-				agents.New(),
-				ide.New(),
-				projects.New([]string{"$HOME/Projects"}),
-				packages.New(),
-			},
+			Collectors:    configuredCollectors,
 		}
-		app.StatusReader = snapshots
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		return app.RunOptions(ctx, options, stdout, stderr)
+	default:
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
 	}
-	return app.Run(ctx, args, os.Stdout, os.Stderr)
+}
+
+func scanConfiguration(home string, options cli.Options) (collector.Environment, []collector.Collector, error) {
+	roots, err := resolveRootsForRun(home, options.ProjectRoots)
+	if err != nil {
+		return collector.Environment{}, nil, err
+	}
+	environment := collector.Environment{
+		Home:     home,
+		Platform: runtime.GOOS,
+		Scope: model.ScanScope{
+			Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
+			ProjectRoots: projects.RootRefs(roots), ExternalProbes: options.ExternalProbes,
+		},
+		FS: platform.OSFileSystem{},
+		Runner: platform.ExecRunner{
+			Timeout:        5 * time.Second,
+			MaxOutputBytes: 4 << 20,
+		},
+		Now: func() time.Time { return time.Now().UTC() },
+	}
+	configuredCollectors := []collector.Collector{
+		agents.New(),
+		ide.New(),
+		projects.New(roots),
+		packages.New(),
+	}
+	return environment, configuredCollectors, nil
 }
 
 func hostPaths() (string, platform.Paths, bool) {
@@ -89,18 +150,6 @@ func hostPaths() (string, platform.Paths, bool) {
 		return "", platform.Paths{}, false
 	}
 	return home, platform.PathsForHome(home), true
-}
-
-func exactArgs(args []string, want ...string) bool {
-	if len(args) != len(want) {
-		return false
-	}
-	for index := range want {
-		if args[index] != want[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func doctorCatalog() ([]string, []string) {
