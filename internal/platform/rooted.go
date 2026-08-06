@@ -114,5 +114,6 @@ func OpenVerifiedDirectory(root RootedDirectory) (RootedFile, error) {
 
 func validRootComponent(component string) bool {
 	return component != "" && component != "." && component != ".." &&
-		filepath.Base(component) == component && !strings.ContainsRune(component, filepath.Separator)
+		filepath.Base(component) == component && !strings.ContainsRune(component, filepath.Separator) &&
+		!strings.ContainsRune(component, '\x00')
 }
