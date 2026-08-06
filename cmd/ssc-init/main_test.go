@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -16,6 +18,109 @@ import (
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
+
+func TestNonDarwinOperationalCommandsCreateNoState(t *testing.T) {
+	oldGOOS, oldHost, oldOpen, oldResolve := runtimeGOOS, hostPathsForRun, openStoreForRun, resolveRootsForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		hostPathsForRun = oldHost
+		openStoreForRun = oldOpen
+		resolveRootsForRun = oldResolve
+	})
+	runtimeGOOS = "linux"
+	hostCalls, openCalls, resolveCalls := 0, 0, 0
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		hostCalls++
+		return "", platform.Paths{}, false
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		openCalls++
+		return nil, errors.New("store must not be opened")
+	}
+	resolveRootsForRun = func(string, []string) ([]projects.Root, error) {
+		resolveCalls++
+		return nil, errors.New("project roots must not be resolved")
+	}
+	hostileHome := filepath.Join(t.TempDir(), "must-remain-absent")
+	t.Setenv("HOME", hostileHome)
+
+	for _, args := range [][]string{
+		{"doctor", "--json"},
+		{"scan", "--baseline", "--json"},
+		{"status", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runWithIO(context.Background(), args, &stdout, &stderr)
+		if code != 2 || stdout.String() != "" || stderr.String() != "unsupported operating system\n" {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+	if hostCalls != 0 || openCalls != 0 || resolveCalls != 0 {
+		t.Fatalf("host calls=%d store calls=%d root-resolution calls=%d", hostCalls, openCalls, resolveCalls)
+	}
+	if _, err := os.Stat(hostileHome); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hostile HOME was touched: err=%v", err)
+	}
+}
+
+func TestVersionOnNonDarwinDoesNotInitializeHost(t *testing.T) {
+	oldGOOS, oldHost := runtimeGOOS, hostPathsForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		hostPathsForRun = oldHost
+	})
+	runtimeGOOS = "linux"
+	hostCalls := 0
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		hostCalls++
+		return "", platform.Paths{}, false
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"version", "--json"}, &stdout, &stderr)
+	if code != 0 || stderr.String() != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("version output is not JSON: %v", err)
+	}
+	if payload["product"] != "SSC Init" || payload["command"] != "ssc-init" || payload["version"] != version {
+		t.Fatalf("payload=%v", payload)
+	}
+	if hostCalls != 0 {
+		t.Fatalf("host calls=%d", hostCalls)
+	}
+}
+
+func TestNonDarwinInvalidCommandsRemainUsageErrorsWithoutHostInitialization(t *testing.T) {
+	oldGOOS, oldHost := runtimeGOOS, hostPathsForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		hostPathsForRun = oldHost
+	})
+	runtimeGOOS = "linux"
+	hostCalls := 0
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		hostCalls++
+		return "", platform.Paths{}, false
+	}
+
+	for _, args := range [][]string{
+		nil,
+		{"unknown", "--json"},
+		{"scan", "--baseline"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runWithIO(context.Background(), args, &stdout, &stderr)
+		if code != 2 || stdout.String() != "" || stderr.String() != "invalid command arguments\n" {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+	if hostCalls != 0 {
+		t.Fatalf("host calls=%d", hostCalls)
+	}
+}
 
 func TestDoctorCatalogMatchesConfiguredCollectorsAndPackageProbes(t *testing.T) {
 	ecosystems, commands := doctorCatalog()

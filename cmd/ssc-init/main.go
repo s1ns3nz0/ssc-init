@@ -31,6 +31,7 @@ type applicationStore interface {
 }
 
 var (
+	runtimeGOOS        = runtime.GOOS
 	parseOptionsForRun = cli.ParseOptions
 	hostPathsForRun    = hostPaths
 	resolveRootsForRun = projects.ResolveRoots
@@ -49,6 +50,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	options, err := parseOptionsForRun(args)
 	if err != nil {
 		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
+	}
+	if operationalCommand(options.Command) && !platform.OperationallySupported(runtimeGOOS) {
+		fmt.Fprintln(stderr, "unsupported operating system")
 		return 2
 	}
 	app := cli.App{Version: version}
@@ -113,6 +118,15 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	default:
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
+	}
+}
+
+func operationalCommand(command string) bool {
+	switch command {
+	case "doctor", "scan", "status":
+		return true
+	default:
+		return false
 	}
 }
 
