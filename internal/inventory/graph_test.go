@@ -107,6 +107,22 @@ func TestBuildNormalizesDeterministicallyWithoutMutatingInput(t *testing.T) {
 	}
 }
 
+func TestNormalizeEvidenceSortsPopulatedValuesByID(t *testing.T) {
+	input := []model.ContentEvidence{
+		{ID: "evidence-z"},
+		{ID: "evidence-a"},
+		{ID: "evidence-m"},
+	}
+	want := []model.ContentEvidence{
+		{ID: "evidence-a"},
+		{ID: "evidence-m"},
+		{ID: "evidence-z"},
+	}
+	if got := NormalizeEvidence(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("evidence=%+v want=%+v", got, want)
+	}
+}
+
 func TestBuildSortsMetadataConflictsByAssetAndKey(t *testing.T) {
 	homeMarker := "/Users/alice/private-home"
 	tokenMarker := "ghp_RAW_TOKEN_MARKER"

@@ -99,13 +99,13 @@ type EvidenceTargetResult struct {
 
 // LocalEvidenceTarget contains runtime-only filesystem evidence inputs.
 type LocalEvidenceTarget struct {
-	TargetID      string
-	AssetID       string
-	ObservationID string
-	Kind          EvidenceKind
-	Subject       string
-	PresetStatus  EvidenceStatus
-	RootPath      string
-	RelativePath  string
-	Provenance    any
+	TargetID      string         `json:"-"`
+	AssetID       string         `json:"-"`
+	ObservationID string         `json:"-"`
+	Kind          EvidenceKind   `json:"-"`
+	Subject       string         `json:"-"`
+	PresetStatus  EvidenceStatus `json:"-"`
+	RootPath      string         `json:"-"`
+	RelativePath  string         `json:"-"`
+	Provenance    any            `json:"-"`
 }

@@ -154,6 +154,17 @@ func Build(results []model.CollectorResult) model.Inventory {
 	return inventory
 }
 
+// NormalizeEvidence returns a deterministically ID-ordered copy of evidence.
+// Evidence is appended after discovery graph construction, so it is normalized
+// separately from Build.
+func NormalizeEvidence(evidence []model.ContentEvidence) []model.ContentEvidence {
+	normalized := append([]model.ContentEvidence(nil), evidence...)
+	sort.SliceStable(normalized, func(i, j int) bool {
+		return normalized[i].ID < normalized[j].ID
+	})
+	return normalized
+}
+
 // Diff compares normalized inventory entities in deterministic entity and ID order.
 func Diff(previous, current model.Inventory) model.Delta {
 	delta := model.Delta{Changes: make([]model.Change, 0)}
