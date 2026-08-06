@@ -129,7 +129,14 @@ type ContentEvidence struct {
 - `file-sha256` — exact bytes of one regular file;
 - `tree-sha256` — a domain-separated manifest of a bounded directory tree;
 - `semantic-sha256` — a canonical, secret-free representation derived from an
-  already parsed configuration.
+  already parsed configuration;
+- `package-content` — reserved for package artifact evidence and emitted only
+  as `unsupported` in this sub-project;
+- `container-identity` — reserved for immutable image evidence and emitted only
+  as `unsupported` in this sub-project.
+
+The two reserved kinds cannot carry an algorithm, digest, size, or count until
+the External and Platform Evidence contract activates them in a later schema.
 
 `EvidenceStatus` values are:
 
@@ -180,6 +187,8 @@ removal/addition.
 - `entrypoint-browser`;
 - `payload-tree`;
 - `mcp-declaration`;
+- `package-content`;
+- `container-image`;
 - `project-manifest:<catalog-name>`;
 - `project-lockfile:<catalog-name>`.
 
@@ -296,7 +305,7 @@ bytes to the engine.
 terminal record but deliberately supplies no path. Preset targets cannot carry
 paths, anchor data, or a digest. Other preset values are rejected.
 
-Targets are accepted only when:
+Targets pass issuance and graph binding only when:
 
 - they were sealed by the collector instance that created the associated asset
   and observation;
@@ -304,13 +313,14 @@ Targets are accepted only when:
   seal;
 - the referenced observation survived graph normalization and belongs to the
   referenced asset;
-- for file and tree evidence, every relative path component is canonical,
-  non-empty, non-dot, and contains no separator or NUL when passed to a rooted
-  operation;
-- for file and tree evidence, the target remains below the collector's already
-  verified catalog or configured project root;
 - semantic evidence carries no filesystem path and is derived only from the
   schema-controlled fields of the referenced observation.
+
+After issuance and graph binding pass, file and tree paths are validated before
+any open. A sealed target with a non-canonical, empty, dot, parent, absolute,
+separator-bearing, or NUL-bearing component produces an evidence record with
+`unavailable/path_invalid` and zero filesystem access. A valid relative target
+must remain below the collector's verified catalog or configured project root.
 
 The private provenance proof also seals the discovery-time identity of the
 catalog root and observed asset directory. When asset identity came from a
@@ -327,9 +337,10 @@ Collectors compute an anchor SHA-256 while processing bytes they already read;
 this does not introduce a second path read or a public evidence record before
 graph normalization.
 
-Forged or altered targets become fixed `target_rejected` coverage errors. Raw
-targets are cleared before report generation or persistence and are prohibited
-by persistence validation.
+Forged or altered seals, absent graph references, and asset/observation mismatch
+become fixed `target_rejected` coverage errors and produce no evidence record.
+Raw targets are cleared before report generation or persistence and are
+prohibited by persistence validation.
 
 The baseline pipeline order is fixed:
 
@@ -569,6 +580,12 @@ identity mismatch cause a miss or rejection, never scan failure or trusted
 evidence. Cache rows are written in a separate best-effort transaction only
 after the corresponding snapshot has committed. Failure rolls back only that
 cache transaction; the valid snapshot remains available.
+
+Cache retention is bounded independently from immutable snapshots. A successful
+cache transaction removes rows not used for 90 days, then removes the oldest
+rows until at most 250,000 remain. Tests use reduced injected limits; production
+limits are not CLI-configurable in this schema. Pruning uses only cache
+timestamps and opaque keys.
 
 ## 10. Persistence and compatibility
 
