@@ -985,6 +985,77 @@ func TestValidateSnapshotRejectsRawAbsolutePersistedPathFields(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotRejectsCanonicalEncodedPathCorpus(t *testing.T) {
+	for _, testCase := range canonicalEncodedPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			scan, inventory := persistenceSafePathFixture()
+			inventory.Assets[0].Metadata["entry_point"] = testCase.value
+
+			if err := validateSnapshot(scan, inventory); !errors.Is(err, errUnsafeSnapshotPath) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSnapshotMetadataPathKeyBoundaries(t *testing.T) {
+	for _, key := range []string{
+		"args", "command", "command_basename", "cwd_ref", "entry_point", "manifest_path",
+		"path", "probe_source", "ref", "root_ref", "runtime_source", "symlink_chain",
+	} {
+		t.Run("path-"+key, func(t *testing.T) {
+			scan, inventory := persistenceSafePathFixture()
+			inventory.Assets[0].Metadata[key] = persistedRawPathSentinel
+			if err := validateSnapshot(scan, inventory); !errors.Is(err, errUnsafeSnapshotPath) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	for _, key := range []string{"path_id", "ref_target", "command_type", "entry_point_name", "symlink_kind", "args_id"} {
+		t.Run("opaque-"+key, func(t *testing.T) {
+			scan, inventory := persistenceSafePathFixture()
+			inventory.Assets[0].Metadata[key] = persistedRawPathSentinel
+			if err := validateSnapshot(scan, inventory); err != nil {
+				t.Fatalf("opaque metadata value rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestSaveRejectsCanonicalEncodedPathCorpusAtomicallyWithoutPersistingBytes(t *testing.T) {
+	for _, testCase := range canonicalEncodedPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan, inventory := persistenceSafePathFixture()
+			inventory.Assets[0].Metadata["entry_point"] = testCase.value
+
+			if err := s.SaveScan(context.Background(), scan, inventory); !errors.Is(err, errUnsafeSnapshotPath) {
+				t.Fatalf("error = %v", err)
+			}
+			assertNoSnapshotRows(t, s)
+			assertSQLiteFilesExclude(t, s.Path(), testCase.value)
+		})
+	}
+}
+
+func TestLatestSnapshotRejectsCorruptedCanonicalEncodedPathCorpus(t *testing.T) {
+	for _, testCase := range canonicalEncodedPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan, inventory := persistenceSafePathFixture()
+			if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
+				t.Fatal(err)
+			}
+
+			inventory.Assets[0].Metadata["entry_point"] = testCase.value
+			corruptPersistedPathCase(t, s, "inventory-asset", scan, inventory)
+			if _, ok, err := s.LatestSnapshot(context.Background()); err == nil || ok {
+				t.Fatalf("ok=%v error=%v", ok, err)
+			}
+		})
+	}
+}
+
 func TestSaveRejectsRawAbsolutePersistedPathFieldsAtomicallyWithoutPersistingBytes(t *testing.T) {
 	for _, testCase := range persistedRawPathCases() {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -1095,6 +1166,12 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 		{name: "safe JSON object keys and values", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["args"] = `{"dist/config.json":{"nested":"relative/value"}}`
 		}},
+		{name: "safe literal percent", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "progress=100%"
+		}},
+		{name: "safe malformed percent literal", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "literal=%ZZ"
+		}},
 		{name: "probe source identifier metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Observations[0].Metadata["probe_source_id"] = "/Volumes/opaque-identifier"
 		}},
@@ -1149,10 +1226,18 @@ func TestApprovedPackageReferenceRequiresConformantLocalPURLGrammar(t *testing.T
 		{value: "pkg:npm/example@1.0.0?arch=arm64&arch=x86_64"},
 		{value: "pkg:npm/example@1.0.0#dist/../private"},
 		{value: "pkg:npm/example%2Fprivate@1.0.0"},
+		{value: "pkg:npm/example@feature%2Fbranch"},
+		{value: "pkg:npm/example@1.0.0?arch=arm%2F64"},
 		{value: "pkg:npm/example@1.0.0?root=/Volumes/private"},
 		{value: "pkg:npm/example@1.0.0?root=%2FVolumes%2Fprivate"},
 		{value: "pkg:npm/example@1.0.0#/Volumes/private"},
 		{value: "pkg:npm/example@%2FVolumes%2Fprivate"},
+		{value: "pkg:npm/%252FVolumes%252Fprivate@1.0.0"},
+		{value: "pkg:npm/example@1.0.0#%252e%252e/Volumes/private"},
+		{value: "pkg:npm/%FF@1.0.0"},
+		{value: "pkg:npm/example@%00"},
+		{value: "pkg:npm/example@1.0.0?arch=%1F"},
+		{value: "pkg:npm/example@1.0.0#file:/Volumes/private"},
 		{value: "pkg:npm/example@1.0.0|/Volumes/private"},
 		{value: "pkg:npm/%GGexample@1.0.0"},
 	} {
@@ -1425,6 +1510,25 @@ func errorsIsContext(err error) bool {
 }
 
 const persistedRawPathSentinel = "/Volumes/ssc-init-final-review-private-marker"
+
+type canonicalEncodedPathCase struct {
+	name  string
+	value string
+}
+
+func canonicalEncodedPathCases() []canonicalEncodedPathCase {
+	return []canonicalEncodedPathCase{
+		{name: "mixed malformed encoded absolute", value: "%ZZ%2FVolumes%2Fprivate"},
+		{name: "mixed malformed encoded file URI", value: "%ZZfile%3A%2F%2FVolumes%2Fprivate"},
+		{name: "mixed malformed double-encoded absolute", value: "prefix=%ZZ%252FVolumes%252Fprivate"},
+		{name: "PURL double-encoded name absolute", value: "pkg:npm/%252FVolumes%252Fprivate@1.0.0"},
+		{name: "PURL double-encoded subpath traversal", value: "pkg:npm/example@1.0.0#%252e%252e/Volumes/private"},
+		{name: "PURL invalid UTF-8 name", value: "pkg:npm/%FF@1.0.0"},
+		{name: "PURL NUL version", value: "pkg:npm/example@%00"},
+		{name: "PURL control qualifier", value: "pkg:npm/example@1.0.0?arch=%1F"},
+		{name: "PURL local file subpath", value: "pkg:npm/example@1.0.0#file:/Volumes/private"},
+	}
+}
 
 type persistedPathCase struct {
 	name    string

@@ -293,6 +293,11 @@ func metadataKeyCarriesPath(key string) bool {
 	case "args", "command", "command_basename", "cwd_ref", "entry_point", "manifest_path", "path", "probe_source", "ref", "root_ref", "symlink_chain":
 		return true
 	default:
+		for _, suffix := range []string{"_id", "_target", "_type", "_kind", "_name", "_label"} {
+			if strings.HasSuffix(normalized, suffix) {
+				return false
+			}
+		}
 		return metadataKeyHasSemanticAffix(normalized, "args") ||
 			metadataKeyHasSemanticAffix(normalized, "command") ||
 			metadataKeyHasSemanticAffix(normalized, "entry_point") ||
@@ -398,39 +403,94 @@ func structuredValueCarriesRawPOSIXAbsolutePath(value any, depth int) bool {
 
 func textCarriesRawPOSIXAbsolutePath(value string) bool {
 	value = strings.TrimSpace(value)
-	if value == "" || approvedRemoteOrPackageReference(value) {
+	if value == "" {
 		return false
 	}
-	decoded, exhausted := boundedPercentDecode(value)
-	if exhausted {
+	decoded, unsafe := boundedPercentDecode(value)
+	if unsafe {
 		return true
+	}
+	if approvedRemoteOrPackageReference(value) {
+		return false
 	}
 	decoded = strings.TrimSpace(decoded)
 	if decoded == "" || approvedRemoteOrPackageReference(decoded) {
 		return false
 	}
-	return containsLocalFileReference(decoded) || containsAbsolutePathComponent(decoded)
+	return packageReferenceCarriesSubpathTraversal(decoded) || containsLocalFileReference(decoded) || containsAbsolutePathComponent(decoded)
 }
 
 func boundedPercentDecode(value string) (string, bool) {
 	decoded := value
 	for range maxPercentDecodeRounds {
-		if !strings.ContainsRune(decoded, '%') {
+		next, changed := decodePercentTriplets(decoded)
+		if !changed {
 			return decoded, false
 		}
-		next, err := url.PathUnescape(decoded)
-		if err != nil || next == decoded {
-			return decoded, false
+		if hasMalformedPercentEscape(decoded) {
+			return next, true
+		}
+		if !validDecodedPathText(next) {
+			return next, true
 		}
 		decoded = next
 	}
-	if strings.ContainsRune(decoded, '%') {
-		next, err := url.PathUnescape(decoded)
-		if err == nil && next != decoded {
-			return decoded, true
-		}
+	if hasDecodablePercentTriplet(decoded) {
+		return decoded, true
 	}
 	return decoded, false
+}
+
+func decodePercentTriplets(value string) (string, bool) {
+	if !hasDecodablePercentTriplet(value) {
+		return value, false
+	}
+	var decoded strings.Builder
+	decoded.Grow(len(value))
+	for index := 0; index < len(value); {
+		if value[index] == '%' && index+2 < len(value) && isHexadecimal(value[index+1]) && isHexadecimal(value[index+2]) {
+			decoded.WriteByte(hexadecimalValue(value[index+1])<<4 | hexadecimalValue(value[index+2]))
+			index += 3
+			continue
+		}
+		decoded.WriteByte(value[index])
+		index++
+	}
+	return decoded.String(), true
+}
+
+func hasDecodablePercentTriplet(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if value[index] == '%' && isHexadecimal(value[index+1]) && isHexadecimal(value[index+2]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMalformedPercentEscape(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] != '%' {
+			continue
+		}
+		if index+2 >= len(value) || !isHexadecimal(value[index+1]) || !isHexadecimal(value[index+2]) {
+			return true
+		}
+		index += 2
+	}
+	return false
+}
+
+func validDecodedPathText(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func approvedRemoteOrPackageReference(value string) bool {
@@ -482,11 +542,8 @@ func approvedPackageReference(value string) bool {
 	}
 	pathPart := packagePath[:versionSeparator]
 	version := packagePath[versionSeparator+1:]
-	if !validEncodedPURLPart(version, true) {
-		return false
-	}
-	decodedVersion, err := url.PathUnescape(version)
-	if err != nil || decodedVersion == "" || purlDecodedPartCarriesLocalPath(decodedVersion) {
+	decodedVersion, ok := decodePURLPart(version, true)
+	if !ok || decodedVersion == "." || decodedVersion == ".." || strings.ContainsRune(decodedVersion, '/') || purlDecodedPartCarriesLocalPath(decodedVersion) {
 		return false
 	}
 	segments := strings.Split(pathPart, "/")
@@ -499,6 +556,22 @@ func approvedPackageReference(value string) bool {
 		}
 	}
 	return true
+}
+
+func packageReferenceCarriesSubpathTraversal(value string) bool {
+	if !strings.HasPrefix(value, "pkg:") {
+		return false
+	}
+	_, subpath, found := strings.Cut(value[len("pkg:"):], "#")
+	if !found {
+		return false
+	}
+	for _, segment := range strings.Split(subpath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func containsLocalFileReference(value string) bool {
@@ -578,11 +651,19 @@ func validPURLType(value string) bool {
 }
 
 func validPURLPathSegment(value string) bool {
-	if !validEncodedPURLPart(value, false) {
+	decoded, ok := decodePURLPart(value, false)
+	if !ok {
 		return false
 	}
-	decoded, err := url.PathUnescape(value)
-	return err == nil && decoded != "" && decoded != "." && decoded != ".." && !strings.ContainsRune(decoded, '/')
+	return decoded != "." && decoded != ".." && !strings.ContainsRune(decoded, '/') && !purlDecodedPartCarriesLocalPath(decoded)
+}
+
+func decodePURLPart(value string, allowAt bool) (string, bool) {
+	if !validEncodedPURLPart(value, allowAt) {
+		return "", false
+	}
+	decoded, unsafe := boundedPercentDecode(value)
+	return decoded, !unsafe && decoded != ""
 }
 
 func validEncodedPURLPart(value string, allowAt bool) bool {
@@ -620,11 +701,11 @@ func validPURLQualifiers(value string) bool {
 	previousKey := ""
 	for _, qualifier := range strings.Split(value, "&") {
 		key, rawValue, found := strings.Cut(qualifier, "=")
-		if !found || !validPURLQualifierKey(key) || key <= previousKey || !validEncodedPURLPart(rawValue, true) {
+		if !found || !validPURLQualifierKey(key) || key <= previousKey {
 			return false
 		}
-		decoded, err := url.PathUnescape(rawValue)
-		if err != nil || decoded == "" || purlDecodedPartCarriesLocalPath(decoded) {
+		decoded, ok := decodePURLPart(rawValue, true)
+		if !ok || decoded == "." || decoded == ".." || strings.ContainsRune(decoded, '/') || purlDecodedPartCarriesLocalPath(decoded) {
 			return false
 		}
 		previousKey = key
@@ -652,12 +733,16 @@ func validPURLSubpath(value string) bool {
 	if value == "" {
 		return false
 	}
+	decodedSegments := make([]string, 0, strings.Count(value, "/")+1)
 	for _, segment := range strings.Split(value, "/") {
-		if !validPURLPathSegment(segment) {
+		decoded, ok := decodePURLPart(segment, false)
+		if !ok || decoded == "." || decoded == ".." || strings.ContainsRune(decoded, '/') || purlDecodedPartCarriesLocalPath(decoded) {
 			return false
 		}
+		decodedSegments = append(decodedSegments, decoded)
 	}
-	return true
+	decodedSubpath := strings.Join(decodedSegments, "/")
+	return !containsLocalFileReference(decodedSubpath) && !containsAbsolutePathComponent(decodedSubpath)
 }
 
 func purlDecodedPartCarriesLocalPath(value string) bool {
@@ -667,6 +752,17 @@ func purlDecodedPartCarriesLocalPath(value string) bool {
 
 func isHexadecimal(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+}
+
+func hexadecimalValue(value byte) byte {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0'
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10
+	default:
+		return value - 'A' + 10
+	}
 }
 
 func validateRequiredString(field, value string) error {
