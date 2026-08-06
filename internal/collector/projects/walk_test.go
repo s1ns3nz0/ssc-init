@@ -38,7 +38,7 @@ func TestResolveRootsDefaultsSortsAndRejectsUnsafeValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(defaults, []Root{{Path: filepath.Join(home, "Projects"), Ref: "$HOME/Projects"}}) {
+	if len(defaults) != 1 || defaults[0].Path != filepath.Join(home, "Projects") || defaults[0].Ref != "$HOME/Projects" {
 		t.Fatalf("defaults=%+v", defaults)
 	}
 	externalA := filepath.Join(filepath.Dir(home), "external-a")
@@ -231,6 +231,15 @@ func collectProjectTest(t *testing.T, projectCollector *projectCollector) model.
 			}
 		}
 	}
+	values := make([]string, len(projectCollector.roots))
+	for index, root := range projectCollector.roots {
+		values[index] = root.Path
+	}
+	resolved, err := ResolveRoots(home, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectCollector.roots = resolved
 	got, err := projectCollector.Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +294,11 @@ func TestWalkCancellationReturnsContextError(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (&projectCollector{roots: []Root{{Path: root, Ref: "$HOME/Projects"}}, limits: defaultWalkLimits()}).Collect(ctx, testutil.Environment(t, home))
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(ctx, testutil.Environment(t, home))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}

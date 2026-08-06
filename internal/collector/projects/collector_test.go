@@ -35,17 +35,97 @@ func TestProjectCollectorAdvertisesOnlyRootTarget(t *testing.T) {
 		t.Fatalf("targets changed through caller slice: %+v", got)
 	}
 	var _ collector.TargetedCollector = projectCollector
+	var _ func([]projects.Root) collector.TargetedCollector = projects.New
 }
 
-func TestProjectCollectorResolvesLegacyStringRootsAgainstEnvironmentHome(t *testing.T) {
+func TestProjectCollectorRejectsForgedRootWithoutLeakage(t *testing.T) {
+	forged := []projects.Root{{
+		Path: "/private/very-sensitive-client-root",
+		Ref:  "private-ref-must-not-leak",
+	}}
+	assertRejectedRoots(t, forged, "/private/very-sensitive-client-root", "private-ref-must-not-leak")
+}
+
+func TestProjectCollectorRejectsMutatedResolvedRootWithoutLeakage(t *testing.T) {
 	home := t.TempDir()
-	config := filepath.Join(home, "Projects", "sample", ".mcp.json")
-	writeProjectFile(t, config, `{}`)
-	got, err := projects.New([]string{"$HOME/Projects"}).Collect(context.Background(), testutil.Environment(t, home))
+	for _, testCase := range []struct {
+		name      string
+		mutate    func(*projects.Root)
+		forbidden string
+	}{
+		{name: "path", mutate: func(root *projects.Root) { root.Path = "/private/mutated-client-root" }, forbidden: "/private/mutated-client-root"},
+		{name: "relative path", mutate: func(root *projects.Root) { root.Path = "relative-client-root" }, forbidden: "relative-client-root"},
+		{name: "non-canonical path", mutate: func(root *projects.Root) { root.Path += "/../Projects" }, forbidden: "/../Projects"},
+		{name: "ref", mutate: func(root *projects.Root) { root.Ref = "mutated-ref-must-not-leak" }, forbidden: "mutated-ref-must-not-leak"},
+		{name: "non-deterministic ref", mutate: func(root *projects.Root) { root.Ref = "external-root-9" }, forbidden: "external-root-9"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(&roots[0])
+			assertRejectedRoots(t, roots, testCase.forbidden)
+		})
+	}
+}
+
+func TestProjectCollectorRejectsInvalidResolvedRootSets(t *testing.T) {
+	home := t.TempDir()
+	valid, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != config || got.Targets[0].InstanceRef != "$HOME/Projects" {
+	firstExternal, err := projects.ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondExternal, err := projects.ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := projects.ResolveRoots(home, []string{"$HOME/a", "$HOME/z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversed := []projects.Root{sorted[1], sorted[0]}
+	excess := make([]projects.Root, 33)
+	for index := range excess {
+		excess[index] = valid[0]
+	}
+	for _, testCase := range []struct {
+		name      string
+		roots     []projects.Root
+		forbidden string
+	}{
+		{name: "empty", roots: nil},
+		{name: "duplicate", roots: []projects.Root{valid[0], valid[0]}, forbidden: "$HOME/Projects"},
+		{name: "excess", roots: excess, forbidden: "$HOME/Projects"},
+		{name: "misordered", roots: reversed, forbidden: "$HOME/z"},
+		{name: "duplicate external ref", roots: []projects.Root{firstExternal[0], secondExternal[0]}, forbidden: "external-root-1"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertRejectedRoots(t, testCase.roots, testCase.forbidden)
+		})
+	}
+}
+
+func TestProjectCollectorCopiesValidatedRootsBeforeCollection(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, "Projects", "sample", ".mcp.json")
+	writeProjectFile(t, config, `{}`)
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectCollector := projects.New(roots)
+	roots[0].Path = "/private/mutated-after-new"
+	roots[0].Ref = "mutated-after-new"
+	got, err := projectCollector.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Targets) != 1 || got.Targets[0].InstanceRef != "$HOME/Projects" || len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != config {
 		t.Fatalf("result=%+v", got)
 	}
 }
@@ -206,5 +286,28 @@ func writeProjectFile(t *testing.T, path, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertRejectedRoots(t *testing.T, roots []projects.Root, forbidden ...string) {
+	t.Helper()
+	if refs := projects.RootRefs(roots); refs != nil {
+		t.Fatalf("forged roots exposed refs=%q", refs)
+	}
+	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, t.TempDir()))
+	if err == nil || err.Error() != "invalid project roots" {
+		t.Fatalf("result=%+v err=%v", got, err)
+	}
+	if len(got.Targets) != 0 || len(got.Assets) != 0 || len(got.Observations) != 0 || len(got.LocalTargets) != 0 {
+		t.Fatalf("rejected roots produced evidence: %+v", got)
+	}
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, value := range forbidden {
+		if value != "" && (strings.Contains(string(encoded), value) || strings.Contains(err.Error(), value)) {
+			t.Fatalf("rejected root leaked %q: result=%s err=%v", value, encoded, err)
+		}
 	}
 }

@@ -29,6 +29,10 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	env.Platform = "darwin"
 	env.Scope = model.ScanScope{ProjectRoots: []string{"$HOME/Projects"}}
 	env.FS = fixtureFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
+	roots, err := projects.ResolveRoots(env.Home, env.Scope.ProjectRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := env.Runner.(*testutil.FakeRunner); !ok {
 		t.Fatal("acceptance environment must use the fake runner")
 	}
@@ -39,7 +43,7 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 			agents.New(),
 			mcp.New(),
 			ide.New(),
-			projects.New([]string{"$HOME/Projects"}),
+			projects.New(roots),
 			packages.New(),
 		},
 	}

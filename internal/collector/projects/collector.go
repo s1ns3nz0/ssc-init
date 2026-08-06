@@ -27,18 +27,16 @@ const (
 type Root struct {
 	Path string
 	Ref  string
+
+	home string
+	seal [sha256.Size]byte
 }
 
 type projectCollector struct {
 	roots      []Root
-	rootValues []string
-	legacyMCP  bool
+	invalid    bool
 	limits     walkLimits
 	beforeOpen func(string)
-}
-
-type rootArgument interface {
-	Root | string
 }
 
 // ResolveRoots canonicalizes configured roots, applies the default project
@@ -81,6 +79,10 @@ func ResolveRoots(home string, values []string) ([]Root, error) {
 	for index, path := range externalPaths {
 		roots = append(roots, Root{Path: path, Ref: fmt.Sprintf("external-root-%d", index+1)})
 	}
+	for index := range roots {
+		roots[index].home = cleanHome
+		roots[index].seal = sealRoot(roots[index])
+	}
 	return roots, nil
 }
 
@@ -117,6 +119,9 @@ func homeRootRef(home, path string) (string, bool) {
 
 // RootRefs returns the deterministic persistence-safe scan scope references.
 func RootRefs(roots []Root) []string {
+	if validateResolvedRoots(roots) != nil {
+		return nil
+	}
 	refs := make([]string, len(roots))
 	for index, root := range roots {
 		refs[index] = root.Ref
@@ -124,21 +129,13 @@ func RootRefs(roots []Root) []string {
 	return refs
 }
 
-// New returns the targeted project collector. Production callers pass
-// resolved Root values; string values remain accepted for source compatibility
-// and are resolved against the injected environment home during collection.
-func New[T rootArgument](values []T) collector.TargetedCollector {
-	configured := &projectCollector{limits: defaultWalkLimits()}
-	for _, value := range values {
-		switch typed := any(value).(type) {
-		case Root:
-			configured.roots = append(configured.roots, typed)
-		case string:
-			configured.rootValues = append(configured.rootValues, typed)
-			configured.legacyMCP = true
-		}
+// New returns a targeted project collector for roots produced by ResolveRoots.
+func New(roots []Root) collector.TargetedCollector {
+	return &projectCollector{
+		roots:   append([]Root(nil), roots...),
+		invalid: validateResolvedRoots(roots) != nil,
+		limits:  defaultWalkLimits(),
 	}
-	return configured
 }
 
 func (*projectCollector) Name() string { return "projects" }
@@ -155,22 +152,16 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if c.invalid {
+		return result, errors.New("invalid project roots")
+	}
 	limits := c.limits
 	if !limits.valid() {
 		limits = defaultWalkLimits()
 	}
 	roots := c.roots
-	if c.rootValues != nil {
-		resolved, err := ResolveRoots(env.Home, c.rootValues)
-		if err != nil {
-			return result, errors.New("invalid project roots")
-		}
-		roots = resolved
-	}
-	if len(roots) == 0 {
-		result.Targets = []model.TargetCoverage{{TargetID: projectRootTargetID, Status: model.TargetNotPresent}}
-		result.Status = collector.AggregateTargetStatus(result.Targets)
-		return result, nil
+	if validateResolvedRoots(roots) != nil {
+		return result, errors.New("invalid project roots")
 	}
 
 	for _, root := range roots {
@@ -186,7 +177,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
-			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(env.Home, root, walked.configs, c.legacyMCP)
+			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(env.Home, root, walked.configs)
 			result.Assets = append(result.Assets, assets...)
 			result.Relationships = append(result.Relationships, relationships...)
 			result.Observations = append(result.Observations, observations...)
@@ -224,7 +215,54 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 	return result, nil
 }
 
-func buildEvidence(home string, root Root, configs []discoveredConfig, legacyMCP bool) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
+func sealRoot(root Root) [sha256.Size]byte {
+	return sha256.Sum256([]byte("ssc-init.resolved-project-root.v1\x00" + root.home + "\x00" + root.Path + "\x00" + root.Ref))
+}
+
+func validateResolvedRoots(roots []Root) error {
+	if len(roots) == 0 || len(roots) > maxConfiguredRoots {
+		return errors.New("invalid project roots")
+	}
+	home := roots[0].home
+	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home || strings.ContainsRune(home, '\x00') {
+		return errors.New("invalid project roots")
+	}
+	seenPaths := make(map[string]struct{}, len(roots))
+	seenRefs := make(map[string]struct{}, len(roots))
+	previousHomePath := ""
+	previousExternalPath := ""
+	externalIndex := 0
+	seenExternal := false
+	for _, root := range roots {
+		if root.home != home || root.Path == "" || root.Ref == "" || !filepath.IsAbs(root.Path) || filepath.Clean(root.Path) != root.Path || strings.ContainsRune(root.Path, '\x00') || strings.ContainsRune(root.Ref, '\x00') || root.seal != sealRoot(root) {
+			return errors.New("invalid project roots")
+		}
+		if _, duplicate := seenPaths[root.Path]; duplicate {
+			return errors.New("invalid project roots")
+		}
+		if _, duplicate := seenRefs[root.Ref]; duplicate {
+			return errors.New("invalid project roots")
+		}
+		seenPaths[root.Path] = struct{}{}
+		seenRefs[root.Ref] = struct{}{}
+		if ref, insideHome := homeRootRef(home, root.Path); insideHome {
+			if seenExternal || root.Ref != ref || (previousHomePath != "" && root.Path <= previousHomePath) {
+				return errors.New("invalid project roots")
+			}
+			previousHomePath = root.Path
+			continue
+		}
+		seenExternal = true
+		externalIndex++
+		if root.Ref != fmt.Sprintf("external-root-%d", externalIndex) || (previousExternalPath != "" && root.Path <= previousExternalPath) {
+			return errors.New("invalid project roots")
+		}
+		previousExternalPath = root.Path
+	}
+	return nil
+}
+
+func buildEvidence(home string, root Root, configs []discoveredConfig) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
 	assets := make([]model.Asset, 0, len(configs)*2)
 	relationships := make([]model.Relationship, 0, len(configs))
 	observations := make([]model.Observation, 0, len(configs))
@@ -256,17 +294,6 @@ func buildEvidence(home string, root Root, configs []discoveredConfig, legacyMCP
 			ID: configID, Type: model.AssetProject, Name: filepath.ToSlash(config.definition.relativePath), Source: "project-config",
 		})
 		relationships = append(relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
-		// Task 5 callers constructed project collectors from unresolved strings
-		// and handed this safe, home-redacted asset to the existing MCP follow-up.
-		// Keep only that source-compatibility path until Task 7 consumes
-		// LocalTargets directly. Resolved Root callers never emit this asset.
-		if legacyMCP && config.definition.targetID == "mcp.vscode.project" && strings.HasPrefix(locationRef, "$HOME/") {
-			legacyID := "project-file:mcp:" + locationRef
-			assets = append(assets, model.Asset{
-				ID: legacyID, Type: model.AssetProject, Name: "mcp.json", Path: locationRef, Source: "mcp",
-			})
-			relationships = append(relationships, model.Relationship{From: projectID, To: legacyID, Kind: "contains"})
-		}
 		observations = append(observations, observation)
 		localTargets = append(localTargets, model.LocalTarget{
 			TargetID: config.definition.targetID, InstanceRef: locationRef, Path: absoluteConfig,

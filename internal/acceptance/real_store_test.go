@@ -29,6 +29,10 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	env.Platform = "darwin"
 	env.Scope = model.ScanScope{ProjectRoots: []string{"$HOME/Projects"}}
 	env.FS = fixtureFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
+	roots, err := projects.ResolveRoots(env.Home, env.Scope.ProjectRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := env.Runner.(*testutil.FakeRunner); !ok {
 		t.Fatal("acceptance environment must use the fake runner")
 	}
@@ -36,7 +40,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 		Timeout:       time.Second,
 		MaxConcurrent: 4,
 		Collectors: []collector.Collector{
-			agents.New(), ide.New(), projects.New([]string{"$HOME/Projects"}), packages.New(),
+			agents.New(), ide.New(), projects.New(roots), packages.New(),
 		},
 	}
 	databasePath := filepath.Join(privateAcceptanceTempDir(t), "state.db")
@@ -61,15 +65,47 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 		t.Fatalf("initialized=%v latest=%#v result=%#v inventory=%#v", initialized, latestSnapshot, result, inventory)
 	}
 	latest := latestSnapshot.Inventory
-	foundProjectMCP := false
+	projectConfigID := ""
 	for _, asset := range latest.Assets {
 		if asset.ID == "mcp:vscode:workspace" {
-			foundProjectMCP = true
-			break
+			t.Fatalf("Task 7 project MCP target was parsed early: %+v", asset)
+		}
+		if asset.Type == model.AssetProject && asset.Source == "project-config" && asset.Name == ".vscode/mcp.json" {
+			if projectConfigID != "" || asset.Path != "" {
+				t.Fatalf("non-canonical project config asset: %+v", asset)
+			}
+			projectConfigID = asset.ID
 		}
 	}
-	if !foundProjectMCP {
-		t.Fatal("round-tripped inventory is missing project MCP asset mcp:vscode:workspace")
+	if projectConfigID == "" {
+		t.Fatal("round-tripped inventory is missing canonical project config evidence")
+	}
+	projectID := ""
+	for _, observation := range latest.Observations {
+		if observation.AssetID != projectConfigID {
+			continue
+		}
+		if observation.Collector != "projects" || observation.Source != "mcp.vscode.project" || observation.LocationRef != "$HOME/Projects/sample/.vscode/mcp.json" || observation.ProjectID == "" {
+			t.Fatalf("non-canonical project observation: %+v", observation)
+		}
+		projectID = observation.ProjectID
+	}
+	if projectID == "" {
+		t.Fatal("round-tripped inventory is missing the project config observation")
+	}
+	foundProject := false
+	for _, asset := range latest.Assets {
+		if asset.ID == projectID && asset.Type == model.AssetProject && asset.Name == "project" && asset.Path == "" {
+			foundProject = true
+		}
+	}
+	if !foundProject {
+		t.Fatalf("round-tripped inventory is missing location-free project asset %q", projectID)
+	}
+	for _, coverage := range result.Coverage {
+		if coverage.LocalTargets != nil {
+			t.Fatalf("raw project local targets survived scan: %+v", coverage.LocalTargets)
+		}
 	}
 
 	var output bytes.Buffer
