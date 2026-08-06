@@ -258,6 +258,8 @@ The source audit initially failed because project walking called host `os` APIs 
 
 The second review round closes three proof gaps. Commit `a993a4a` (`fix: preserve project root identity`) adds the narrow optional `NoFollowFileSystem` capability backed by `os.Lstat`; project traversal now compares that pre-open identity with the fd-anchored root identity before enumeration and fails closed when rooted or no-follow access is unavailable. Real and injected tests cover root replacement, ordinary directories, missing/unavailable/non-directory roots, and symlinks to directories, files, and missing targets. The source audit now examines disallowed selector references rather than calls alone, including aliases, function values, `os.OpenRoot`, and `os.DirFS`, with synthetic positive and negative cases. The hostile matrix uses a literal 52-target oracle that compares each target identity, status, count, and ordered error list exactly, including nil errors for unaffected targets and the three deterministic Codex-plugin errors with no duplicates or extras.
 
+The third review round makes the source audit mutation-sensitive and binding-aware. Independent hard-coded synthetic sources exercise every denied `os` and `path/filepath` selector, so removing any individual deny entry breaks a focused test. Negative sources shadow the imported package names with local values exposing `Open`, `OpenRoot`, and `WalkDir` fields; AST object bindings distinguish those harmless selectors from true package and import-alias references.
+
 ### Closed gaps
 
 Only these five gaps are closed by this foundation:

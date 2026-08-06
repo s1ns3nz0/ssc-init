@@ -296,6 +296,18 @@ func TestDirectHostFilesystemReferenceAudit(t *testing.T) {
 		source string
 		want   []string
 	}{
+		{name: "deny os Open", source: "package fixture\nimport \"os\"\nvar denied = os.Open", want: []string{"os.Open"}},
+		{name: "deny os OpenFile", source: "package fixture\nimport \"os\"\nvar denied = os.OpenFile", want: []string{"os.OpenFile"}},
+		{name: "deny os OpenRoot", source: "package fixture\nimport \"os\"\nvar denied = os.OpenRoot", want: []string{"os.OpenRoot"}},
+		{name: "deny os DirFS", source: "package fixture\nimport \"os\"\nvar denied = os.DirFS", want: []string{"os.DirFS"}},
+		{name: "deny os ReadDir", source: "package fixture\nimport \"os\"\nvar denied = os.ReadDir", want: []string{"os.ReadDir"}},
+		{name: "deny os ReadFile", source: "package fixture\nimport \"os\"\nvar denied = os.ReadFile", want: []string{"os.ReadFile"}},
+		{name: "deny os Readlink", source: "package fixture\nimport \"os\"\nvar denied = os.Readlink", want: []string{"os.Readlink"}},
+		{name: "deny os Lstat", source: "package fixture\nimport \"os\"\nvar denied = os.Lstat", want: []string{"os.Lstat"}},
+		{name: "deny os Stat", source: "package fixture\nimport \"os\"\nvar denied = os.Stat", want: []string{"os.Stat"}},
+		{name: "deny filepath Glob", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.Glob", want: []string{"path/filepath.Glob"}},
+		{name: "deny filepath Walk", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.Walk", want: []string{"path/filepath.Walk"}},
+		{name: "deny filepath WalkDir", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.WalkDir", want: []string{"path/filepath.WalkDir"}},
 		{
 			name: "direct call", source: `package fixture
 import "path/filepath"
@@ -335,6 +347,30 @@ import (
 var _ os.FileInfo
 var _ = os.SameFile
 var _ = filepath.Join`,
+		},
+		{
+			name: "local os Open field", source: `package fixture
+import "os"
+func harmless() {
+  os := struct{ Open func() }{}
+  _ = os.Open
+}`,
+		},
+		{
+			name: "local os OpenRoot field", source: `package fixture
+import "os"
+func harmless() {
+  os := struct{ OpenRoot func() }{}
+  _ = os.OpenRoot
+}`,
+		},
+		{
+			name: "local filepath WalkDir field", source: `package fixture
+import "path/filepath"
+func harmless() {
+  filepath := struct{ WalkDir func() }{}
+  _ = filepath.WalkDir
+}`,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -1094,6 +1130,9 @@ func directHostFilesystemReferences(filename string, source []byte) ([]string, e
 		}
 		packageName, ok := selector.X.(*ast.Ident)
 		if !ok {
+			return true
+		}
+		if packageName.Obj != nil {
 			return true
 		}
 		importPath := importPaths[packageName.Name]
