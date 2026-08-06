@@ -5,9 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -41,12 +39,7 @@ func FinalizeObservation(value model.Observation) (model.Observation, error) {
 // SafeLocationRef returns a home-redacted path or a stable, non-revealing
 // reference for a path outside home.
 func SafeLocationRef(home, path, externalLabel string) string {
-	cleanHome, cleanPath := filepath.Clean(home), filepath.Clean(path)
-	if redacted := platform.RedactHome(cleanHome, cleanPath); strings.HasPrefix(redacted, "$HOME") {
-		return filepath.ToSlash(redacted)
-	}
-	digest := sha256.Sum256([]byte(filepath.ToSlash(cleanPath)))
-	return fmt.Sprintf("%s/path-sha256:%x", externalLabel, digest)
+	return platform.SafeLocationRef(home, path, externalLabel)
 }
 
 func uniqueSorted(values []string) []string {

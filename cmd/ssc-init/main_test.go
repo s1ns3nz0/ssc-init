@@ -19,7 +19,7 @@ import (
 
 func TestDoctorCatalogMatchesConfiguredCollectorsAndPackageProbes(t *testing.T) {
 	ecosystems, commands := doctorCatalog()
-	wantEcosystems := []string{"agents", "brew", "cargo", "docker", "go", "ide", "mcp", "npm", "pip", "pipx", "projects", "uv"}
+	wantEcosystems := []string{"agents", "cargo", "docker", "go", "homebrew", "ide", "mcp", "npm", "pip", "pipx", "projects", "uv"}
 	wantCommands := []string{"brew", "cargo", "docker", "go", "npm", "pipx", "python3", "uv"}
 	if !reflect.DeepEqual(ecosystems, wantEcosystems) {
 		t.Fatalf("ecosystems=%v want=%v", ecosystems, wantEcosystems)
@@ -126,6 +126,9 @@ func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) 
 	if !reflect.DeepEqual(environment.Scope, wantScope) || environment.Platform != runtime.GOOS {
 		t.Fatalf("environment=%+v wantScope=%+v", environment, wantScope)
 	}
+	if environment.Inspector == nil {
+		t.Fatal("external-probe scan did not construct an executable inspector")
+	}
 	wantNames := []string{"agents", "ide", "projects", "packages"}
 	gotNames := make([]string, len(collectors))
 	for index, configuredCollector := range collectors {
@@ -137,6 +140,16 @@ func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) 
 	targeted, ok := collectors[2].(collector.TargetedCollector)
 	if !ok || len(targeted.Targets()) != 1 || targeted.Targets()[0].ID != "projects.root" {
 		t.Fatalf("project collector=%T targets=%+v", collectors[2], targeted)
+	}
+}
+
+func TestScanConfigurationLeavesInspectorUnwiredWhenExternalProbesAreDisabled(t *testing.T) {
+	environment, _, err := scanConfiguration(t.TempDir(), cli.Options{Command: "scan", JSON: true, Baseline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment.Scope.ExternalProbes || environment.Inspector != nil {
+		t.Fatalf("environment=%+v", environment)
 	}
 }
 

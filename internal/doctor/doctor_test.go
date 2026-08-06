@@ -95,3 +95,32 @@ func TestDirectoryWritableRequiresWriteAndSearchOnNearestExistingDirectory(t *te
 		t.Fatalf("access mode=%d want=%d", gotMode, unix.W_OK|unix.X_OK)
 	}
 }
+
+func TestCheckOnlyLooksUpOptionalExecutableAndNeverRunsPackageProbe(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "executed")
+	executable := filepath.Join(bin, "package-probe")
+	script := "#!/bin/sh\nprintf invoked > \"" + marker + "\"\n"
+	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	lookups := 0
+	checker := New(Config{
+		Paths:            platform.PathsForHome(t.TempDir()),
+		OptionalCommands: []string{"package-probe"},
+		LookPath: func(command string) (string, error) {
+			lookups++
+			return executable, nil
+		},
+		DirectoryWritable: func(string) bool { return true },
+	})
+
+	result := checker.Check(context.Background())
+	if result.Status != "ready" || lookups != 1 {
+		t.Fatalf("result=%+v lookups=%d", result, lookups)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("optional package probe executed: %v", err)
+	}
+}

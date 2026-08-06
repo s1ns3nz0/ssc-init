@@ -135,6 +135,9 @@ func scanConfiguration(home string, options cli.Options) (collector.Environment,
 		},
 		Now: func() time.Time { return time.Now().UTC() },
 	}
+	if options.ExternalProbes {
+		environment.Inspector = platform.NewExecutableInspector(16, 64<<20)
+	}
 	configuredCollectors := []collector.Collector{
 		agents.New(),
 		ide.New(),

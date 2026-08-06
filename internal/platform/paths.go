@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -9,6 +11,17 @@ import (
 type Paths struct {
 	Home    string
 	DataDir string
+}
+
+// SafeLocationRef returns a home-redacted path or a stable, non-revealing
+// reference for a path outside home.
+func SafeLocationRef(home, path, externalLabel string) string {
+	cleanHome, cleanPath := filepath.Clean(home), filepath.Clean(path)
+	if redacted := RedactHome(cleanHome, cleanPath); strings.HasPrefix(redacted, "$HOME") {
+		return filepath.ToSlash(redacted)
+	}
+	digest := sha256.Sum256([]byte(filepath.ToSlash(cleanPath)))
+	return fmt.Sprintf("%s/path-sha256:%x", externalLabel, digest)
 }
 
 // PathsForHome derives the SSC Init data location without reading the host environment.

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
 func TestFinalizeObservationCanonicalizesConsumersAndID(t *testing.T) {
@@ -46,5 +47,21 @@ func TestSafeLocationRefHidesOutsideHome(t *testing.T) {
 func TestSafeLocationRefRedactsHomeBoundary(t *testing.T) {
 	if got := SafeLocationRef("/Users/test", "/Users/test/Projects/a/.mcp.json", "external-root-1"); got != "$HOME/Projects/a/.mcp.json" {
 		t.Fatalf("ref=%q", got)
+	}
+}
+
+func TestSafeLocationRefMatchesPlatformPrimitive(t *testing.T) {
+	for _, testCase := range []struct {
+		home, path, label string
+	}{
+		{home: "/Users/test", path: "/Users/test/Projects/a", label: "external-root-1"},
+		{home: "/Users/test", path: "/Volumes/work/client", label: "external-root-1"},
+		{home: "", path: "../relative/unsafe", label: "external-root-1"},
+	} {
+		got := SafeLocationRef(testCase.home, testCase.path, testCase.label)
+		want := platform.SafeLocationRef(testCase.home, testCase.path, testCase.label)
+		if got != want {
+			t.Fatalf("case=%+v identity=%q platform=%q", testCase, got, want)
+		}
 	}
 }
