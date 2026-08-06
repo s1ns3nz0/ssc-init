@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/identity"
+	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/testutil"
 )
 
 type memorySnapshots struct {
@@ -283,12 +284,12 @@ func TestBaselineFollowsProjectLocalTargetsAndReplacesInitialMCPResult(t *testin
 	if err := os.WriteFile(projectConfig, []byte(`{"servers":{"fixture":{"command":"tool"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	localTarget := model.LocalTarget{
-		TargetID: "mcp.vscode.project", InstanceRef: "$HOME/Projects/sample/.vscode/mcp.json",
-		Path: projectConfig, Format: "json", Host: "vscode", Consumers: []string{"vscode"},
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	orchestrator := collector.Orchestrator{Timeout: time.Second, MaxConcurrent: 2, Collectors: []collector.Collector{
-		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{localTarget}}},
+		projects.New(roots),
 		fixedCollector{name: "mcp", result: model.CollectorResult{Status: model.CoverageFailed, Errors: []model.CoverageError{{Code: "stale"}}}},
 	}}
 	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
@@ -389,10 +390,16 @@ func TestBaselineParsesProjectLocalTargetsAndClearsRawPaths(t *testing.T) {
 		TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json",
 		Path: projectConfig, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
 	}}
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		projects.New(roots),
 		fixedCollector{name: "projects", result: model.CollectorResult{
-			Status: model.CoverageComplete, LocalTargets: rawTargets,
+			Status: model.CoverageComplete,
 		}},
+		fixedCollector{name: "other", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: rawTargets}},
 	}}
 	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
 	snapshots := &memorySnapshots{}
@@ -447,14 +454,13 @@ func TestBaselineOpensExternalProjectMCPThroughFreshVerifiedRoot(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte(`{"mcpServers":{"external":{"command":"tool"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	instance := identity.SafeLocationRef(home, projectConfig, "external-root-1")
-	localTarget := model.LocalTarget{
-		TargetID: "mcp.shared.project", InstanceRef: instance, Path: projectConfig,
-		Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	roots, err := projects.ResolveRoots(home, []string{external})
+	if err != nil {
+		t.Fatal(err)
 	}
 	rooted := &recordingRootFileSystem{}
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
-		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{localTarget}}},
+		projects.New(roots),
 	}}
 	env := collector.Environment{Home: home, FS: rooted, Runner: platform.ExecRunner{}, Now: fixedTime}
 	snapshots := &memorySnapshots{}
@@ -500,20 +506,37 @@ func TestBaselineOpensExternalProjectMCPThroughFreshVerifiedRoot(t *testing.T) {
 
 func TestBaselineCopiesOnlyValidatedProjectLocalTargets(t *testing.T) {
 	home := t.TempDir()
+	configuredRoot := filepath.Join(home, "Projects")
+	if err := os.MkdirAll(configuredRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	outside := t.TempDir()
 	forgedPath := filepath.Join(outside, ".mcp.json")
 	if err := os.WriteFile(forgedPath, []byte(`{"mcpServers":{"forged-secret-marker":{"command":"tool"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	forged := model.LocalTarget{
-		TargetID: "mcp.shared.project", InstanceRef: "external-root-1/path-sha256:" + strings.Repeat("0", 64),
-		Path: forgedPath, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	forgedRoots, err := projects.ResolveRoots(home, []string{outside})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedResult, err := projects.New(forgedRoots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forgedResult.LocalTargets) != 1 || forgedResult.LocalTargets[0].Path != forgedPath {
+		t.Fatalf("forged setup=%+v", forgedResult.LocalTargets)
 	}
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
-		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{forged}}},
-		fixedCollector{name: "other", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{forged}}},
+		projects.New(roots),
+		fixedCollector{name: "projects", result: forgedResult},
+		fixedCollector{name: "other", result: forgedResult},
 	}}
-	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
+	rooted := &recordingRootFileSystem{}
+	env := collector.Environment{Home: home, FS: rooted, Runner: platform.ExecRunner{}, Now: fixedTime}
 	service := NewService(orchestrator, &memorySnapshots{}, fixedTime, func() string {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
@@ -521,6 +544,9 @@ func TestBaselineCopiesOnlyValidatedProjectLocalTargets(t *testing.T) {
 	result, inventory, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if rooted.opened(filepath.Dir(forgedPath)) {
+		t.Fatalf("forged external parent was opened: %q", rooted.paths())
 	}
 	for _, asset := range inventory.Assets {
 		if strings.Contains(asset.ID, "forged-secret-marker") {

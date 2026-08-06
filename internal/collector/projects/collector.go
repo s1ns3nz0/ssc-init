@@ -39,6 +39,12 @@ type projectCollector struct {
 	beforeOpen func(string)
 }
 
+type localTargetProvenance struct {
+	owner      *projectCollector
+	rootSeal   [sha256.Size]byte
+	targetSeal [sha256.Size]byte
+}
+
 // ResolveRoots canonicalizes configured roots, applies the default project
 // root, and assigns deterministic references without exposing outside-home
 // absolute paths.
@@ -177,7 +183,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
-			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(env.Home, root, walked.configs)
+			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(c, env.Home, root, walked.configs)
 			result.Assets = append(result.Assets, assets...)
 			result.Relationships = append(result.Relationships, relationships...)
 			result.Observations = append(result.Observations, observations...)
@@ -262,7 +268,7 @@ func validateResolvedRoots(roots []Root) error {
 	return nil
 }
 
-func buildEvidence(home string, root Root, configs []discoveredConfig) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
+func buildEvidence(owner *projectCollector, home string, root Root, configs []discoveredConfig) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
 	assets := make([]model.Asset, 0, len(configs)*2)
 	relationships := make([]model.Relationship, 0, len(configs))
 	observations := make([]model.Observation, 0, len(configs))
@@ -295,13 +301,65 @@ func buildEvidence(home string, root Root, configs []discoveredConfig) ([]model.
 		})
 		relationships = append(relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
 		observations = append(observations, observation)
-		localTargets = append(localTargets, model.LocalTarget{
+		localTarget := model.LocalTarget{
 			TargetID: config.definition.targetID, InstanceRef: locationRef, Path: absoluteConfig,
 			Format: config.definition.format, Host: config.definition.host,
 			Consumers: append([]string(nil), config.definition.consumers...),
-		})
+		}
+		localTarget.Provenance = &localTargetProvenance{
+			owner: owner, rootSeal: root.seal, targetSeal: sealLocalTarget(root, &localTarget),
+		}
+		localTargets = append(localTargets, localTarget)
 	}
 	return assets, relationships, observations, localTargets, errorsOut
+}
+
+func sealLocalTarget(root Root, target *model.LocalTarget) [sha256.Size]byte {
+	material := "ssc-init.project-local-target.v1\x00" + string(root.seal[:]) + "\x00" +
+		target.TargetID + "\x00" + target.InstanceRef + "\x00" + target.Path + "\x00" +
+		target.Format + "\x00" + target.Host + "\x00" + strings.Join(target.Consumers, "\x00")
+	return sha256.Sum256([]byte(material))
+}
+
+// ValidIssuedLocalTarget authenticates a runtime-only handoff as emitted by a
+// project collector over one of its sealed configured roots.
+func ValidIssuedLocalTarget(home string, target *model.LocalTarget) bool {
+	if target == nil {
+		return false
+	}
+	proof, ok := target.Provenance.(*localTargetProvenance)
+	return ok && proof.owner != nil && proof.owner.validLocalTarget(home, target, proof)
+}
+
+// ValidLocalTarget authenticates a runtime-only handoff against the exact
+// configured project collector that issued it.
+func ValidLocalTarget(configured collector.Collector, home string, target *model.LocalTarget) bool {
+	if target == nil {
+		return false
+	}
+	owner, ok := configured.(*projectCollector)
+	if !ok {
+		return false
+	}
+	proof, ok := target.Provenance.(*localTargetProvenance)
+	return ok && proof.owner == owner && owner.validLocalTarget(home, target, proof)
+}
+
+func (c *projectCollector) validLocalTarget(home string, target *model.LocalTarget, proof *localTargetProvenance) bool {
+	if c == nil || proof.owner != c || validateResolvedRoots(c.roots) != nil || len(c.roots) == 0 || c.roots[0].home != filepath.Clean(home) {
+		return false
+	}
+	for _, root := range c.roots {
+		if root.seal != proof.rootSeal {
+			continue
+		}
+		relative, err := filepath.Rel(root.Path, target.Path)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return false
+		}
+		return proof.targetSeal == sealLocalTarget(root, target)
+	}
+	return false
 }
 
 func digestID(kind, domain, reference string) string {

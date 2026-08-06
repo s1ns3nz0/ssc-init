@@ -157,6 +157,91 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	}
 }
 
+func TestBaselinePersistsSameMCPServerFromTwoProjectsWithRealStore(t *testing.T) {
+	home := t.TempDir()
+	for _, project := range []string{"alpha", "beta"} {
+		config := filepath.Join(home, "Projects", project, ".mcp.json")
+		if err := os.MkdirAll(filepath.Dir(config), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config, []byte(`{"mcpServers":{"same":{"command":"--token=command-secret"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := collector.Environment{
+		Home: home, Platform: "darwin",
+		Scope: model.ScanScope{ProjectRoots: projects.RootRefs(roots)},
+		FS:    platform.OSFileSystem{}, Runner: &testutil.FakeRunner{}, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+	}
+	snapshots, err := store.Open(filepath.Join(privateAcceptanceTempDir(t), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshots.Close()
+	service := scan.NewService(collector.Orchestrator{
+		Timeout: time.Second, MaxConcurrent: 1,
+		Collectors: []collector.Collector{projects.New(roots)},
+	}, snapshots, env.Now, func() string { return "00000000-0000-4000-8000-000000000002" }, env)
+
+	result, inventory, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, initialized, err := snapshots.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initialized || !reflect.DeepEqual(latest.Scan, result) || !reflect.DeepEqual(latest.Inventory, inventory) {
+		t.Fatalf("initialized=%v latest=%#v result=%#v inventory=%#v", initialized, latest, result, inventory)
+	}
+	assetCount := 0
+	observationCount := 0
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:shared:same" {
+			assetCount++
+		}
+	}
+	for _, observation := range inventory.Observations {
+		if observation.AssetID == "mcp:shared:same" {
+			if observation.Metadata["command"] != "[redacted]" {
+				t.Fatalf("unsanitized observation=%+v", observation)
+			}
+			observationCount++
+		}
+	}
+	if assetCount != 1 || observationCount != 2 {
+		t.Fatalf("assets=%d observations=%d inventory=%+v", assetCount, observationCount, inventory)
+	}
+	instances := 0
+	for _, coverage := range result.Coverage {
+		if coverage.Collector != "mcp" {
+			continue
+		}
+		for _, target := range coverage.Targets {
+			if target.TargetID == "mcp.shared.project" && target.InstanceRef != "" {
+				if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+					t.Fatalf("target=%+v", target)
+				}
+				instances++
+			}
+		}
+	}
+	if instances != 2 {
+		t.Fatalf("project MCP instances=%d coverage=%+v", instances, result.Coverage)
+	}
+	encoded, err := json.Marshal(latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("command-secret")) {
+		t.Fatalf("SQLite round trip retained command secret: %s", encoded)
+	}
+}
+
 func privateAcceptanceTempDir(t *testing.T) string {
 	t.Helper()
 	directory, err := filepath.EvalSymlinks(t.TempDir())

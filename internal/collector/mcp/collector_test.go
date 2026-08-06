@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
+	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
@@ -122,7 +124,7 @@ func TestMCPCollectorPreservesCollisionCandidatesUntilGraphNormalization(t *test
 	localTargets := make([]model.LocalTarget, 0, len(paths))
 	for _, path := range paths {
 		writeMCPFile(t, path, `{"mcpServers":{"same":{"command":"node"}}}`)
-		localTargets = append(localTargets, sharedProjectTarget(home, path))
+		localTargets = append(localTargets, sharedProjectTarget(t, home, path))
 	}
 
 	got := collectMCP(t, home, localTargets...)
@@ -154,8 +156,8 @@ func TestMCPCollectorKeepsSameNameOnDifferentHostsDistinct(t *testing.T) {
 	writeMCPFile(t, vscodePath, `{"servers":{"same":{"command":"node"}}}`)
 
 	got := collectMCP(t, home,
-		projectTarget(home, cursorPath, "mcp.cursor.project", "json", "cursor", []string{"cursor"}),
-		projectTarget(home, vscodePath, "mcp.vscode.project", "json", "vscode", []string{"vscode"}),
+		projectTarget(t, home, cursorPath, "mcp.cursor.project", "json", "cursor", []string{"cursor"}),
+		projectTarget(t, home, vscodePath, "mcp.vscode.project", "json", "vscode", []string{"vscode"}),
 	)
 	if assetCount(got.Assets, "mcp:cursor:same") != 1 || assetCount(got.Assets, "mcp:vscode:same") != 1 {
 		t.Fatalf("assets=%+v", got.Assets)
@@ -168,7 +170,7 @@ func TestMCPCollectorQuarantinesSecretShapedIdentityAndKeepsSibling(t *testing.T
 	secretName := "ghp_12345678901234567890"
 	invalidName := "/private/client/identity"
 	writeMCPFile(t, path, `{"mcpServers":{"`+secretName+`":{"command":"bad"},"`+invalidName+`":{"command":"bad"},"safe":{"command":"good"}}}`)
-	localTarget := sharedProjectTarget(home, path)
+	localTarget := sharedProjectTarget(t, home, path)
 
 	got := collectMCP(t, home, localTarget)
 	target := assertTarget(t, got.Targets, localTarget.TargetID, localTarget.InstanceRef)
@@ -186,11 +188,8 @@ func TestMCPCollectorUsesSafeExternalLocationAndDeduplicatesInstances(t *testing
 	external := t.TempDir()
 	path := filepath.Join(external, "client", ".mcp.json")
 	writeMCPFile(t, path, `{"mcpServers":{"external":{"command":"node"}}}`)
-	instance := identity.SafeLocationRef(home, path, "external-root-1")
-	localTarget := model.LocalTarget{
-		TargetID: "mcp.shared.project", InstanceRef: instance, Path: path, Format: "json", Host: "shared",
-		Consumers: []string{"claude-code", "vscode"},
-	}
+	localTarget := sharedProjectTarget(t, home, path)
+	instance := localTarget.InstanceRef
 
 	got := collectMCP(t, home, localTarget, localTarget)
 	target := assertTarget(t, got.Targets, localTarget.TargetID, instance)
@@ -207,14 +206,89 @@ func TestMCPCollectorUsesSafeExternalLocationAndDeduplicatesInstances(t *testing
 	assertJSONExcludes(t, got, external, path)
 }
 
+func TestMCPCollectorRejectsForgedExternalTargetBeforeOpen(t *testing.T) {
+	home := t.TempDir()
+	external := t.TempDir()
+	path := filepath.Join(external, "client", ".mcp.json")
+	writeMCPFile(t, path, `{"mcpServers":{"forged-marker":{"command":"node"}}}`)
+	forged := model.LocalTarget{
+		TargetID: "mcp.shared.project", InstanceRef: identity.SafeLocationRef(home, path, "external-root-1"), Path: path,
+		Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"},
+	}
+	rooted := &recordingRootFileSystem{}
+	env := testutil.Environment(t, home)
+	env.FS = rooted
+
+	got, err := mcp.New(forged).Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rooted.opened(filepath.Dir(path)) {
+		t.Fatalf("forged external parent was opened: %q", rooted.paths())
+	}
+	if assetCount(got.Assets, "mcp:shared:forged-marker") != 0 {
+		t.Fatalf("forged target was inventoried: %+v", got)
+	}
+	target := assertTarget(t, got.Targets, "mcp.shared.project", "")
+	if target.Status != model.TargetPartial || !hasErrorCode(target.Errors, "invalid_local_target") {
+		t.Fatalf("target=%+v", target)
+	}
+	assertJSONExcludes(t, got, external, path, "forged-marker")
+}
+
+func TestMCPCollectorClearsCallerTargetBackingOnCancellation(t *testing.T) {
+	consumers := []string{"claude-code", "vscode"}
+	backing := []model.LocalTarget{{
+		TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/client/.mcp.json", Path: "/private/client/.mcp.json",
+		Format: "json", Host: "shared", Consumers: consumers,
+	}}
+	mcpCollector := mcp.New(backing...)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := mcpCollector.Collect(ctx, testutil.Environment(t, t.TempDir()))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if !reflect.DeepEqual(backing[0], model.LocalTarget{}) {
+		t.Fatalf("caller target backing retained data: %+v", backing[0])
+	}
+	if !reflect.DeepEqual(consumers, []string{"", ""}) {
+		t.Fatalf("consumer backing retained data: %q", consumers)
+	}
+}
+
+func TestMCPCollectorClearsCallerTargetBackingAfterSuccessfulCollection(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "Projects", "client", ".mcp.json")
+	writeMCPFile(t, path, `{"mcpServers":{"issued":{"command":"node"}}}`)
+	target := sharedProjectTarget(t, home, path)
+	consumers := target.Consumers
+	backing := []model.LocalTarget{target}
+
+	got, err := mcp.New(backing...).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assetCount(got.Assets, "mcp:shared:issued") != 1 {
+		t.Fatalf("issued target was not inventoried: %+v", got)
+	}
+	if !reflect.DeepEqual(backing[0], model.LocalTarget{}) {
+		t.Fatalf("caller target backing retained data: %+v", backing[0])
+	}
+	if !reflect.DeepEqual(consumers, []string{"", ""}) {
+		t.Fatalf("consumer backing retained data: %q", consumers)
+	}
+}
+
 func TestMCPCollectorMarksOnlyMalformedTargetPartialAndKeepsValidSibling(t *testing.T) {
 	home := t.TempDir()
 	badPath := filepath.Join(home, "Projects", "bad", ".mcp.json")
 	goodPath := filepath.Join(home, "Projects", "good", ".mcp.json")
 	writeMCPFile(t, badPath, `{"mcpServers":{"both":{"command":"node","url":"https://example.invalid"},"safe":{"command":"node","futureOption":"unknown-secret-value"}}}`)
 	writeMCPFile(t, goodPath, `{"mcpServers":{"other":{"command":"node"}}}`)
-	badTarget := sharedProjectTarget(home, badPath)
-	goodTarget := sharedProjectTarget(home, goodPath)
+	badTarget := sharedProjectTarget(t, home, badPath)
+	goodTarget := sharedProjectTarget(t, home, goodPath)
 
 	got := collectMCP(t, home, badTarget, goodTarget)
 	bad := assertTarget(t, got.Targets, badTarget.TargetID, badTarget.InstanceRef)
@@ -250,8 +324,11 @@ func TestMCPCollectorObservationContainsSanitizedSemanticsOnly(t *testing.T) {
       "url": "https://alice:password@example.invalid/mcp?access_token=query-secret&mode=safe#fragment-secret",
       "headers": {"Authorization": "Bearer header-secret"}
     },
-    "command-secret": {
-      "command": "runner --token embedded-command-secret"
+    "embedded-command": {
+      "command": "runner --token embedded-secret-marker"
+    },
+    "assignment-command": {
+      "command": "--token=command-secret"
     },
     "unsafe-unknown": {
       "command": "node",
@@ -274,13 +351,17 @@ func TestMCPCollectorObservationContainsSanitizedSemanticsOnly(t *testing.T) {
 	if remote.Metadata["url_shape"] != "https://example.invalid/mcp?query_keys=access_token,mode" || remote.Metadata["header_keys"] != "Authorization" {
 		t.Fatalf("remote metadata=%+v", remote.Metadata)
 	}
-	commandSecret := assertObservation(t, got.Observations, "mcp:cursor:command-secret", "$HOME/.cursor/mcp.json")
+	commandSecret := assertObservation(t, got.Observations, "mcp:cursor:embedded-command", "$HOME/.cursor/mcp.json")
 	if commandSecret.Metadata["command"] != "[redacted]" {
 		t.Fatalf("command metadata=%+v", commandSecret.Metadata)
 	}
+	singleTokenCommandSecret := assertObservation(t, got.Observations, "mcp:cursor:assignment-command", "$HOME/.cursor/mcp.json")
+	if singleTokenCommandSecret.Metadata["command"] != "[redacted]" {
+		t.Fatalf("single-token command metadata=%+v", singleTokenCommandSecret.Metadata)
+	}
 	assertJSONExcludes(t, got,
 		"argument-secret", "environment-secret", "query-secret", "password", "header-secret", "fragment-secret",
-		"embedded-command-secret", "unknown-field-secret",
+		"embedded-secret-marker", "command-secret", "unknown-field-secret",
 		"/private/tools/runner", "/private/client/data", "/private/client/work", "/private/client/unknown-field",
 	)
 }
@@ -365,15 +446,36 @@ func collectMCP(t *testing.T, home string, localTargets ...model.LocalTarget) mo
 	return got
 }
 
-func sharedProjectTarget(home, path string) model.LocalTarget {
-	return projectTarget(home, path, "mcp.shared.project", "json", "shared", []string{"claude-code", "vscode"})
+func sharedProjectTarget(t *testing.T, home, path string) model.LocalTarget {
+	t.Helper()
+	return projectTarget(t, home, path, "mcp.shared.project", "json", "shared", []string{"claude-code", "vscode"})
 }
 
-func projectTarget(home, path, targetID, format, host string, consumers []string) model.LocalTarget {
-	return model.LocalTarget{
-		TargetID: targetID, InstanceRef: identity.SafeLocationRef(home, path, "external-root"), Path: path,
-		Format: format, Host: host, Consumers: append([]string(nil), consumers...),
+func projectTarget(t *testing.T, home, path, targetID, format, host string, consumers []string) model.LocalTarget {
+	t.Helper()
+	projectRoot := filepath.Dir(path)
+	if targetID == "mcp.cursor.project" || targetID == "mcp.vscode.project" || targetID == "mcp.codex.project" {
+		projectRoot = filepath.Dir(projectRoot)
 	}
+	roots, err := projects.ResolveRoots(home, []string{projectRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range result.LocalTargets {
+		if target.Path != path || target.TargetID != targetID {
+			continue
+		}
+		if target.Format != format || target.Host != host || !reflect.DeepEqual(target.Consumers, consumers) || target.Provenance == nil {
+			t.Fatalf("issued target=%+v", target)
+		}
+		return target
+	}
+	t.Fatalf("project collector did not issue target %q for %q: %+v", targetID, path, result.LocalTargets)
+	return model.LocalTarget{}
 }
 
 func assertTarget(t *testing.T, targets []model.TargetCoverage, id, instance string) model.TargetCoverage {
@@ -478,4 +580,33 @@ func writeMCPBytes(t *testing.T, path string, contents []byte) {
 
 type pathOnlyFileSystem struct {
 	platform.FileSystem
+}
+
+type recordingRootFileSystem struct {
+	platform.OSFileSystem
+	mu    sync.Mutex
+	opens []string
+}
+
+func (f *recordingRootFileSystem) OpenRoot(path string) (platform.RootedDirectory, error) {
+	f.mu.Lock()
+	f.opens = append(f.opens, filepath.Clean(path))
+	f.mu.Unlock()
+	return f.OSFileSystem.OpenRoot(path)
+}
+
+func (f *recordingRootFileSystem) opened(path string) bool {
+	clean := filepath.Clean(path)
+	for _, opened := range f.paths() {
+		if opened == clean {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *recordingRootFileSystem) paths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.opens...)
 }

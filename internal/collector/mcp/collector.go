@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -29,15 +30,10 @@ type mcpCollector struct {
 	projectTargets []model.LocalTarget
 }
 
-// New returns a catalog-targeted collector. Raw project paths are copied only
-// for the lifetime of this collector and are never included in model output.
+// New returns a catalog-targeted collector. Raw project paths are retained only
+// for the lifetime of this single-use collector and are never included in model output.
 func New(projectTargets ...model.LocalTarget) collector.TargetedCollector {
-	copied := make([]model.LocalTarget, len(projectTargets))
-	for index, target := range projectTargets {
-		copied[index] = target
-		copied[index].Consumers = append([]string(nil), target.Consumers...)
-	}
-	return &mcpCollector{projectTargets: copied}
+	return &mcpCollector{projectTargets: projectTargets}
 }
 
 func (*mcpCollector) Name() string { return "mcp" }
@@ -46,6 +42,7 @@ func (*mcpCollector) Targets() []model.TargetSpec { return catalogSpecs() }
 
 func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
 	result := model.CollectorResult{Collector: c.Name()}
+	defer c.clearProjectTargets()
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -90,8 +87,8 @@ func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (
 					result.Targets = append(result.Targets, target)
 					continue
 				}
-				for _, instance := range instances {
-					if err := c.collectProjectTarget(ctx, &result, env, rootedFilesystem, hasRootedFilesystem, declaration, instance); err != nil {
+				for _, instanceIndex := range instances {
+					if err := c.collectProjectTarget(ctx, &result, env, rootedFilesystem, hasRootedFilesystem, declaration, &c.projectTargets[instanceIndex]); err != nil {
 						return result, err
 					}
 				}
@@ -118,6 +115,18 @@ func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (
 	return result, nil
 }
 
+func (c *mcpCollector) clearProjectTargets() {
+	clearLocalTargets(c.projectTargets)
+	c.projectTargets = nil
+}
+
+func clearLocalTargets(targets []model.LocalTarget) {
+	for index := range targets {
+		clear(targets[index].Consumers)
+		targets[index] = model.LocalTarget{}
+	}
+}
+
 func (c *mcpCollector) collectUserTarget(ctx context.Context, result *model.CollectorResult, home string, homeRoot platform.RootedDirectory, declaration targetDeclaration) error {
 	locationRef := "$HOME/" + filepath.ToSlash(declaration.relativePath)
 	read := readUserConfig(ctx, homeRoot, declaration)
@@ -128,7 +137,7 @@ func (c *mcpCollector) collectUserTarget(ctx context.Context, result *model.Coll
 	return nil
 }
 
-func (c *mcpCollector) collectProjectTarget(ctx context.Context, result *model.CollectorResult, env collector.Environment, rootedFilesystem platform.RootedFileSystem, hasRootedFilesystem bool, declaration targetDeclaration, instance model.LocalTarget) error {
+func (c *mcpCollector) collectProjectTarget(ctx context.Context, result *model.CollectorResult, env collector.Environment, rootedFilesystem platform.RootedFileSystem, hasRootedFilesystem bool, declaration targetDeclaration, instance *model.LocalTarget) error {
 	if !declaration.supported {
 		target := unsupportedTarget(declaration.spec.ID)
 		target.InstanceRef = instance.InstanceRef
@@ -198,11 +207,12 @@ func projectInstanceRef(declaration targetDeclaration, locationRef string) strin
 	return ""
 }
 
-func (c *mcpCollector) validatedProjectTargets(home string) (map[string][]model.LocalTarget, map[string]bool) {
-	valid := make(map[string][]model.LocalTarget)
+func (c *mcpCollector) validatedProjectTargets(home string) (map[string][]int, map[string]bool) {
+	valid := make(map[string][]int)
 	invalid := make(map[string]bool)
 	seen := make(map[string]struct{})
-	for _, target := range c.projectTargets {
+	for index := range c.projectTargets {
+		target := &c.projectTargets[index]
 		declaration, known := declarationByID(target.TargetID)
 		if !known || declaration.spec.Scope != model.ScopeProject {
 			continue
@@ -216,18 +226,20 @@ func (c *mcpCollector) validatedProjectTargets(home string) (map[string][]model.
 			continue
 		}
 		seen[key] = struct{}{}
-		target.Consumers = append([]string(nil), target.Consumers...)
-		valid[target.TargetID] = append(valid[target.TargetID], target)
+		valid[target.TargetID] = append(valid[target.TargetID], index)
 	}
 	for id := range valid {
 		sort.Slice(valid[id], func(i, j int) bool {
-			return valid[id][i].InstanceRef < valid[id][j].InstanceRef
+			return c.projectTargets[valid[id][i]].InstanceRef < c.projectTargets[valid[id][j]].InstanceRef
 		})
 	}
 	return valid, invalid
 }
 
-func validProjectTarget(home string, target model.LocalTarget, declaration targetDeclaration) bool {
+func validProjectTarget(home string, target *model.LocalTarget, declaration targetDeclaration) bool {
+	if !projects.ValidIssuedLocalTarget(home, target) {
+		return false
+	}
 	if target.TargetID != declaration.spec.ID || target.Format != declaration.spec.Format || target.Host != declaration.spec.Host || !slices.Equal(target.Consumers, declaration.consumers) {
 		return false
 	}
@@ -256,7 +268,10 @@ func validProjectTarget(home string, target model.LocalTarget, declaration targe
 // ValidProjectTarget reports whether a memory-only project handoff exactly
 // matches the immutable catalog and its persistence-safe instance identity.
 // It never returns or formats the raw path.
-func ValidProjectTarget(home string, target model.LocalTarget) bool {
+func ValidProjectTarget(home string, target *model.LocalTarget) bool {
+	if target == nil {
+		return false
+	}
 	declaration, known := declarationByID(target.TargetID)
 	return known && declaration.spec.Scope == model.ScopeProject && declaration.relativePath != "" && validProjectTarget(home, target, declaration)
 }
@@ -456,29 +471,27 @@ func sanitizeCommand(home, command string) string {
 	if command == "" {
 		return ""
 	}
+	fields := strings.Fields(command)
+	for _, field := range fields {
+		key := field
+		if before, _, found := strings.Cut(field, "="); found {
+			key = before
+		}
+		if credentialFlag(key) || sensitiveName(key) {
+			return redactedValue
+		}
+		if _, sensitive := combinedCredentialFlag(field); sensitive {
+			return redactedValue
+		}
+		if _, sensitive := sensitiveTextPrefix(field); sensitive {
+			return redactedValue
+		}
+	}
 	if absoluteURL(command) {
 		return sanitizeURLShape(command)
 	}
 	if filepath.IsAbs(command) {
 		return identity.SafeLocationRef(home, command, "external-command")
-	}
-	fields := strings.Fields(command)
-	if len(fields) > 1 {
-		for _, field := range fields {
-			key := field
-			if before, _, found := strings.Cut(field, "="); found {
-				key = before
-			}
-			if credentialFlag(key) || sensitiveName(key) {
-				return redactedValue
-			}
-			if _, sensitive := combinedCredentialFlag(field); sensitive {
-				return redactedValue
-			}
-			if _, sensitive := sensitiveTextPrefix(field); sensitive {
-				return redactedValue
-			}
-		}
 	}
 	if privacy.ContainsSensitiveValue(command) {
 		return redactedValue

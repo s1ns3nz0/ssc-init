@@ -77,6 +77,7 @@ type LocalTarget struct {
 	Format      string   `json:"-"`
 	Host        string   `json:"-"`
 	Consumers   []string `json:"-"`
+	Provenance  any      `json:"-"`
 }
 
 type ChangeEntity string

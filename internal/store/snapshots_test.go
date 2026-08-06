@@ -349,6 +349,43 @@ func TestRoundTripPreservesNilAndEmptyInventorySlices(t *testing.T) {
 	}
 }
 
+func TestCoverageAllowsOnlyIdenticalSameIDCandidateAssets(t *testing.T) {
+	t.Run("identical candidates", func(t *testing.T) {
+		s := openTestStore(t)
+		scan := testScan("identical-candidates", time.Unix(2, 0).UTC())
+		candidate := model.Asset{ID: "mcp:shared:same", Type: model.AssetMCP, Name: "same", Source: "shared"}
+		scan.Coverage = []model.CollectorResult{{
+			Collector: "mcp", Status: model.CoverageComplete,
+			Assets: []model.Asset{candidate, candidate},
+		}}
+		if err := s.SaveScan(context.Background(), scan, model.Inventory{Assets: []model.Asset{candidate}}); err != nil {
+			t.Fatal(err)
+		}
+		latest, ok, err := s.LatestSnapshot(context.Background())
+		if err != nil || !ok || !reflect.DeepEqual(latest.Scan, scan) {
+			t.Fatalf("ok=%v latest=%#v scan=%#v err=%v", ok, latest, scan, err)
+		}
+	})
+
+	t.Run("conflicting candidates", func(t *testing.T) {
+		s := openTestStore(t)
+		scan := testScan("conflicting-candidates", time.Unix(2, 0).UTC())
+		scan.Coverage = []model.CollectorResult{{
+			Collector: "mcp", Status: model.CoverageComplete,
+			Assets: []model.Asset{
+				{ID: "mcp:shared:same", Type: model.AssetMCP, Name: "same", Source: "shared"},
+				{ID: "mcp:shared:same", Type: model.AssetMCP, Name: "different", Source: "shared"},
+			},
+		}}
+		if err := s.SaveScan(context.Background(), scan, model.Inventory{}); err == nil {
+			t.Fatal("conflicting same-ID coverage candidates unexpectedly persisted")
+		}
+		if _, ok, err := s.LatestSnapshot(context.Background()); err != nil || ok {
+			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+	})
+}
+
 func TestDuplicateScanIsImmutable(t *testing.T) {
 	s := openTestStore(t)
 	scan := testScan("same", time.Unix(2, 0).UTC())

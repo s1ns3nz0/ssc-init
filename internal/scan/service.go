@@ -12,6 +12,7 @@ import (
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
+	"github.com/ssc-init/ssc-init/internal/collector/projects"
 	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 )
@@ -133,10 +134,10 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 	for index := range results {
 		localTargets := results[index].LocalTargets
 		results[index].LocalTargets = nil
-		for targetIndex, target := range localTargets {
-			if results[index].Collector == "projects" && mcp.ValidProjectTarget(s.environment.Home, target) {
-				target.Consumers = append([]string(nil), target.Consumers...)
-				projectTargets = append(projectTargets, target)
+		for targetIndex := range localTargets {
+			target := &localTargets[targetIndex]
+			if results[index].Collector == "projects" && s.validProjectLocalTarget(target) && mcp.ValidProjectTarget(s.environment.Home, target) {
+				projectTargets = append(projectTargets, *target)
 			}
 			localTargets[targetIndex] = model.LocalTarget{}
 		}
@@ -163,6 +164,15 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 	merged = append(merged, followUp[0])
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Collector < merged[j].Collector })
 	return merged
+}
+
+func (s *Service) validProjectLocalTarget(target *model.LocalTarget) bool {
+	for _, configured := range s.orchestrator.Collectors {
+		if projects.ValidLocalTarget(configured, s.environment.Home, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildScope(environment collector.Environment) model.ScanScope {

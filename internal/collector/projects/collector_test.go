@@ -174,8 +174,15 @@ func TestProjectCollectorRecognizesOnlyFixedProjectConfigs(t *testing.T) {
 		{TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json", Path: filepath.Join(project, ".mcp.json"), Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"}},
 		{TargetID: "mcp.vscode.project", InstanceRef: "$HOME/Projects/sample/.vscode/mcp.json", Path: filepath.Join(project, ".vscode", "mcp.json"), Format: "json", Host: "vscode", Consumers: []string{"vscode"}},
 	}
-	if !reflect.DeepEqual(got.LocalTargets, wantTargets) {
-		t.Fatalf("localTargets=%+v want=%+v", got.LocalTargets, wantTargets)
+	publicTargets := append([]model.LocalTarget(nil), got.LocalTargets...)
+	for index := range publicTargets {
+		if publicTargets[index].Provenance == nil {
+			t.Fatalf("local target is missing runtime provenance: %+v", publicTargets[index])
+		}
+		publicTargets[index].Provenance = nil
+	}
+	if !reflect.DeepEqual(publicTargets, wantTargets) {
+		t.Fatalf("localTargets=%+v want=%+v", publicTargets, wantTargets)
 	}
 	assetIDs := make(map[string]struct{}, len(got.Assets))
 	for _, asset := range got.Assets {

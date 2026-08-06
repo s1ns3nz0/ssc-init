@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -101,15 +102,15 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 			return errors.New("duplicate coverage collector")
 		}
 		collectors[result.Collector] = struct{}{}
-		resultAssets := make(map[string]struct{}, len(result.Assets))
+		resultAssets := make(map[string]model.Asset, len(result.Assets))
 		for _, asset := range result.Assets {
 			if err := validateAsset(asset); err != nil {
 				return err
 			}
-			if _, duplicate := resultAssets[asset.ID]; duplicate {
-				return errors.New("duplicate coverage asset id")
+			if existing, duplicate := resultAssets[asset.ID]; duplicate && !reflect.DeepEqual(existing, asset) {
+				return errors.New("conflicting coverage asset id")
 			}
-			resultAssets[asset.ID] = struct{}{}
+			resultAssets[asset.ID] = asset
 		}
 		resultRelationships := make(map[model.Relationship]struct{}, len(result.Relationships))
 		for _, relationship := range result.Relationships {
