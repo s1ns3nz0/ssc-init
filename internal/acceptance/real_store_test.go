@@ -57,6 +57,16 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	if !initialized || !reflect.DeepEqual(latest, inventory) {
 		t.Fatalf("initialized=%v latest=%#v inventory=%#v", initialized, latest, inventory)
 	}
+	foundProjectMCP := false
+	for _, asset := range latest.Assets {
+		if asset.ID == "mcp:vscode:workspace" {
+			foundProjectMCP = true
+			break
+		}
+	}
+	if !foundProjectMCP {
+		t.Fatal("round-tripped inventory is missing project MCP asset mcp:vscode:workspace")
+	}
 
 	var output bytes.Buffer
 	if err := report.WriteJSON(&output, result, inventory, delta); err != nil {

@@ -1,0 +1,7 @@
+{
+  "servers": {
+    "workspace": {
+      "url": "https://workspace.example.test/mcp"
+    }
+  }
+}

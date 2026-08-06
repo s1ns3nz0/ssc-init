@@ -26,8 +26,9 @@ func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
 
 	manifest := testutil.AssertAsset(t, got.Assets, "project-file:manifest:$HOME/Projects/sample/package.json")
 	lockfile := testutil.AssertAsset(t, got.Assets, "project-file:lockfile:$HOME/Projects/sample/package-lock.json")
-	if manifest.Path != "$HOME/Projects/sample/package.json" || lockfile.Path != "$HOME/Projects/sample/package-lock.json" {
-		t.Fatalf("manifest=%+v lockfile=%+v", manifest, lockfile)
+	projectMCP := testutil.AssertAsset(t, got.Assets, "project-file:mcp:$HOME/Projects/sample/.vscode/mcp.json")
+	if manifest.Path != "$HOME/Projects/sample/package.json" || lockfile.Path != "$HOME/Projects/sample/package-lock.json" || projectMCP.Path != "$HOME/Projects/sample/.vscode/mcp.json" {
+		t.Fatalf("manifest=%+v lockfile=%+v projectMCP=%+v", manifest, lockfile, projectMCP)
 	}
 	projectPath := "$HOME/Projects/sample"
 	projectID := fmt.Sprintf("project:sha256:%x", sha256.Sum256([]byte(projectPath)))
@@ -38,6 +39,7 @@ func TestProjectsCollectorFindsLockfileAndSkipsNodeModules(t *testing.T) {
 	wantRelationships := []model.Relationship{
 		{From: projectID, To: lockfile.ID, Kind: "contains"},
 		{From: projectID, To: manifest.ID, Kind: "contains"},
+		{From: projectID, To: projectMCP.ID, Kind: "contains"},
 	}
 	if !reflect.DeepEqual(got.Relationships, wantRelationships) {
 		t.Fatalf("relationships=%+v want=%+v", got.Relationships, wantRelationships)
