@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 )
 
 var errInvalidAgentManifest = errors.New("invalid agent manifest")
+var errInvalidAgentIdentity = errors.New("invalid agent identity")
 
 type pluginManifest struct {
 	name    string
@@ -48,10 +50,16 @@ func parsePluginManifest(contents []byte) (pluginManifest, error) {
 		}
 		switch key {
 		case "name":
+			if !utf8.Valid(raw) {
+				return pluginManifest{}, errInvalidAgentIdentity
+			}
 			if err := json.Unmarshal(raw, &manifest.name); err != nil {
 				return pluginManifest{}, errInvalidAgentManifest
 			}
 		case "version":
+			if !utf8.Valid(raw) {
+				return pluginManifest{}, errInvalidAgentIdentity
+			}
 			if err := json.Unmarshal(raw, &manifest.version); err != nil {
 				return pluginManifest{}, errInvalidAgentManifest
 			}

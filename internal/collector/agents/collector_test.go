@@ -11,11 +11,14 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/store"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
 
@@ -262,6 +265,76 @@ func TestAgentWalkQuarantinesCredentialShapedIdentityGenerically(t *testing.T) {
 	}
 }
 
+func TestAgentWalkQuarantinesInvalidUTF8IdentityAndPersistsSafeSiblings(t *testing.T) {
+	home := t.TempDir()
+	invalid := []byte{0xff}
+	invalidComponent := "invalid-" + string(invalid)
+
+	writeAgentBytes(t, filepath.Join(home, ".claude", "plugins", "bad-name", ".claude-plugin", "plugin.json"), append(append([]byte(`{"name":"`), invalid...), []byte(`","version":"1.0.0"}`)...))
+	writeAgentBytes(t, filepath.Join(home, ".claude", "plugins", "bad-version", ".claude-plugin", "plugin.json"), append(append([]byte(`{"name":"bad-version","version":"`), invalid...), []byte(`"}`)...))
+	writeAgentBytes(t, filepath.Join(home, ".codex", "skills", "bad-frontmatter", "SKILL.md"), append(append([]byte("---\nname: "), invalid...), []byte("\n---\nbody")...))
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "zz-safe", ".claude-plugin", "plugin.json"), `{"name":"safe-plugin","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "zz-safe", "SKILL.md"), "---\nname: safe-skill\n---\nbody")
+
+	got := collectAgents(t, New(), context.Background(), home)
+	fallback, err := parseSkillManifest([]byte("fallback body"), invalidComponent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualTarget := model.TargetCoverage{TargetID: "agents.codex.skills", Status: model.TargetComplete}
+	if appendAgentEvidence(home, immutableCatalog[3], markerCandidate{kind: markerSkill, relativePath: "fallback/SKILL.md"}, fallback, "", &got, &manualTarget) {
+		t.Fatal("invalid UTF-8 directory fallback was accepted")
+	}
+	invalidPath := "invalid-" + string(invalid) + "/.claude-plugin/plugin.json"
+	if appendAgentEvidence(home, immutableCatalog[0], markerCandidate{kind: markerClaudePlugin, relativePath: invalidPath}, "bad-path", "1.0.0", &got, &manualTarget) {
+		t.Fatal("invalid UTF-8 observation path was accepted")
+	}
+	if manualTarget.Status != model.TargetPartial || len(manualTarget.Errors) != 2 {
+		t.Fatalf("manual quarantine target=%+v", manualTarget)
+	}
+	for _, issue := range manualTarget.Errors {
+		if issue.Code != "identity_rejected" || issue.Path != "" {
+			t.Fatalf("non-generic quarantine issue=%+v", issue)
+		}
+	}
+	if len(got.Assets) != 2 || len(got.Observations) != 2 {
+		t.Fatalf("invalid UTF-8 evidence escaped quarantine: assets=%+v observations=%+v", got.Assets, got.Observations)
+	}
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe-plugin@1.0.0")
+	testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe-skill")
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "identity_rejected")
+	assertTargetIssue(t, got, "agents.codex.skills", model.TargetPartial, "identity_rejected")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.Valid(encoded) || bytes.Contains(encoded, invalid) || bytes.Contains(encoded, []byte("\ufffd")) {
+		t.Fatalf("invalid UTF-8 survived result: %q", encoded)
+	}
+
+	databaseDirectory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(databaseDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Open(filepath.Join(databaseDirectory, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	scan := model.ScanResult{
+		SchemaVersion: "ssc-init.scan.v2", ScanID: "agents-invalid-utf8", Status: "partial",
+		StartedAt: time.Unix(1, 0).UTC(), FinishedAt: time.Unix(2, 0).UTC(),
+		Coverage: []model.CollectorResult{got},
+		Scope:    model.ScanScope{Platform: "darwin", CatalogVersion: collector.CatalogVersion},
+	}
+	if err := state.SaveScan(context.Background(), scan, inventory.Build(scan.Coverage)); err != nil {
+		t.Fatalf("persist safe siblings: %v", err)
+	}
+}
+
 func TestAgentWalkRejectsSymlinkedRootsEntriesAndMarkers(t *testing.T) {
 	home := t.TempDir()
 	outside := t.TempDir()
@@ -407,6 +480,21 @@ func TestAgentWalkEnforcesRootDepthEntryManifestAndByteLimits(t *testing.T) {
 		testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:ok")
 		assertTargetCounts(t, got, "agents.claude.plugins", 1, 1)
 	})
+}
+
+func TestAgentWalkNonPluginSkillsDoNotExhaustManifestBudget(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "a-not-plugin", "skills", "hostile", "SKILL.md"), "---\nname: hostile\n---\n")
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "z-valid", ".claude-plugin", "plugin.json"), `{"name":"valid-plugin","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "z-valid", "skills", "helper", "SKILL.md"), "---\nname: valid-helper\n---\n")
+	limits := defaultWalkLimits()
+	limits.maxManifests = 2
+
+	got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:valid-plugin@1.0.0")
+	testutil.AssertAsset(t, got.Assets, "agent-skill:claude:valid-helper")
+	assertNoAssetNamed(t, got.Assets, "hostile")
+	assertTarget(t, got, "agents.claude.plugins", model.TargetComplete, 2, 2)
 }
 
 func TestAgentWalkHonorsCancellationBeforeAndDuringTraversal(t *testing.T) {
@@ -622,6 +710,16 @@ func writeAgentFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeAgentBytes(t *testing.T, path string, contents []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
