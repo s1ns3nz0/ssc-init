@@ -137,3 +137,32 @@ func TestOrchestratorContainsCollectorFailure(t *testing.T) {
 		t.Fatalf("got=%+v", got)
 	}
 }
+
+func TestOrchestratorAppliesTargetContractOnlyToTargetedCollectors(t *testing.T) {
+	targeted := targetedCollectorWithResult{
+		fakeCollector: fakeCollector{name: "targeted", result: model.CollectorResult{Status: model.CoverageComplete}},
+		specs: []model.TargetSpec{{
+			ID: "targeted.user", Collector: "targeted", Platform: "darwin",
+			Scope: model.ScopeUser, Method: model.TargetFile,
+		}},
+	}
+	untargeted := fakeCollector{name: "untargeted", result: model.CollectorResult{Status: model.CoverageComplete}}
+
+	got := (Orchestrator{Collectors: []Collector{untargeted, targeted}, MaxConcurrent: 2}).Collect(context.Background(), Environment{})
+	if len(got) != 2 {
+		t.Fatalf("got=%+v", got)
+	}
+	if got[0].Collector != "targeted" || got[0].Status != model.CoveragePartial || len(got[0].Targets) != 1 || got[0].Targets[0].Status != model.TargetUnsupported {
+		t.Fatalf("targeted=%+v", got[0])
+	}
+	if got[1].Collector != "untargeted" || got[1].Status != model.CoverageComplete || got[1].Targets != nil {
+		t.Fatalf("untargeted=%+v", got[1])
+	}
+}
+
+type targetedCollectorWithResult struct {
+	fakeCollector
+	specs []model.TargetSpec
+}
+
+func (c targetedCollectorWithResult) Targets() []model.TargetSpec { return c.specs }

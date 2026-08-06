@@ -63,18 +63,23 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 type cliMemorySnapshots struct {
-	latest    model.Inventory
+	latest    model.Snapshot
 	hasLatest bool
+	loadErr   error
 	saved     []model.ScanResult
+	inventory []model.Inventory
 }
 
-func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult, _ model.Inventory) error {
+func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult, inventory model.Inventory) error {
 	m.saved = append(m.saved, result)
+	m.inventory = append(m.inventory, inventory)
+	m.latest = model.Snapshot{Scan: result, Inventory: inventory}
+	m.hasLatest = true
 	return nil
 }
 
-func (m *cliMemorySnapshots) LatestInventory(context.Context) (model.Inventory, bool, error) {
-	return m.latest, m.hasLatest, nil
+func (m *cliMemorySnapshots) LatestSnapshot(context.Context) (model.Snapshot, bool, error) {
+	return m.latest, m.hasLatest, m.loadErr
 }
 
 type cliCollector struct {
@@ -82,6 +87,13 @@ type cliCollector struct {
 	result model.CollectorResult
 	err    error
 }
+
+type cliTargetedCollector struct {
+	cliCollector
+	specs []model.TargetSpec
+}
+
+func (c cliTargetedCollector) Targets() []model.TargetSpec { return c.specs }
 
 func (c cliCollector) Name() string { return c.name }
 func (c cliCollector) Collect(context.Context, collector.Environment) (model.CollectorResult, error) {
@@ -95,12 +107,31 @@ func (d fakeDoctor) Check(context.Context) doctor.Result { return d.result }
 func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	snapshots := &cliMemorySnapshots{}
 	orchestrator := collector.Orchestrator{Timeout: time.Second, MaxConcurrent: 2, Collectors: []collector.Collector{
-		cliCollector{name: "agents", result: model.CollectorResult{Status: model.CoverageComplete}},
+		cliTargetedCollector{
+			cliCollector: cliCollector{name: "agents", result: model.CollectorResult{
+				Status: model.CoverageComplete,
+				Assets: []model.Asset{{ID: "tool:new", Type: model.AssetTool, Name: "new"}},
+				Targets: []model.TargetCoverage{{
+					TargetID: "agents.user", Status: model.TargetComplete, Assets: 1,
+				}},
+				LocalTargets: []model.LocalTarget{{TargetID: "agents.user", Path: "/raw/private/target"}},
+			}},
+			specs: []model.TargetSpec{{
+				ID: "agents.user", Collector: "agents", Platform: "darwin",
+				Scope: model.ScopeUser, Method: model.TargetDirectory,
+			}},
+		},
 		cliCollector{name: "docker", err: errors.New("daemon unavailable")},
 	}}
+	env := collector.Environment{
+		Platform: "darwin",
+		Scope: model.ScanScope{
+			ProjectRoots: []string{"$HOME/Projects"},
+		},
+	}
 	scanner := scan.NewService(orchestrator, snapshots, func() time.Time {
 		return time.Unix(1_700_000_000, 0).UTC()
-	}, func() string { return "00000000-0000-4000-8000-000000000001" })
+	}, func() string { return "00000000-0000-4000-8000-000000000001" }, env)
 	app := App{Version: "test", BaselineScanner: scanner, StatusReader: snapshots, Doctor: fakeDoctor{}}
 	var out, errOut bytes.Buffer
 
@@ -115,19 +146,61 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if out.String() != string(want) {
 		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
 	}
+	if strings.Contains(out.String(), "/raw/private/target") {
+		t.Fatalf("local target leaked: %s", out.String())
+	}
 	if len(snapshots.saved) != 1 {
 		t.Fatal("scan not persisted")
 	}
+	if snapshots.latest.Scan.SchemaVersion != "ssc-init.scan.v2" || len(snapshots.latest.Inventory.Assets) != 1 {
+		t.Fatalf("snapshot=%+v", snapshots.latest)
+	}
 }
 
-func TestStatusJSONHasStableEmptyAndInitializedShapes(t *testing.T) {
+func TestStatusJSONHasStableEmptyV1AndV2Shapes(t *testing.T) {
+	legacyInventory := model.Inventory{
+		Assets:        []model.Asset{{ID: "tool:legacy", Type: model.AssetTool, Name: "legacy"}},
+		Relationships: []model.Relationship{},
+	}
+	emptyInventory := model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}
+	v2Scope := model.ScanScope{
+		Platform: "darwin", CatalogVersion: collector.CatalogVersion,
+		ProjectRoots: []string{"$HOME/Projects"}, ExternalProbes: false,
+	}
 	for _, tc := range []struct {
-		name        string
-		snapshots   *cliMemorySnapshots
-		initialized bool
+		name      string
+		snapshots *cliMemorySnapshots
+		want      string
 	}{
-		{name: "empty", snapshots: &cliMemorySnapshots{}, initialized: false},
-		{name: "initialized", snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}}, initialized: true},
+		{
+			name:      "empty",
+			snapshots: &cliMemorySnapshots{},
+			want:      "{\"schemaVersion\":\"ssc-init.status.v2\",\"initialized\":false}\n",
+		},
+		{
+			name: "v1 legacy inventory",
+			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
+				Scan: model.ScanResult{
+					SchemaVersion: "ssc-init.scan.v1",
+					Scope:         v2Scope,
+					Coverage:      []model.CollectorResult{{Collector: "must-not-be-synthesized", Status: model.CoverageComplete}},
+				},
+				Inventory: legacyInventory,
+			}},
+			want: "{\"schemaVersion\":\"ssc-init.status.v2\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v1\",\"legacyInventory\":true,\"inventory\":{\"assets\":[{\"id\":\"tool:legacy\",\"type\":\"tool\",\"name\":\"legacy\"}],\"relationships\":[]}}\n",
+		},
+		{
+			name: "v2 provenance",
+			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
+				Scan: model.ScanResult{
+					SchemaVersion: "ssc-init.scan.v2",
+					Scope:         v2Scope,
+					Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoverageComplete}},
+				},
+				Inventory: emptyInventory,
+			}},
+			want: "{\"schemaVersion\":\"ssc-init.status.v2\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v2\",\"scope\":{\"platform\":\"darwin\",\"catalogVersion\":\"ssc-init.catalog.v1\",\"projectRoots\":[\"$HOME/Projects\"],\"externalProbes\":false},\"coverage\":[{\"collector\":\"agents\",\"status\":\"complete\"}],\"inventory\":{\"assets\":[],\"relationships\":[]}}\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app := App{StatusReader: tc.snapshots}
@@ -135,19 +208,8 @@ func TestStatusJSONHasStableEmptyAndInitializedShapes(t *testing.T) {
 			if code := app.Run(context.Background(), []string{"status", "--json"}, &out, &errOut); code != 0 {
 				t.Fatalf("code=%d stderr=%s", code, errOut.String())
 			}
-			var got struct {
-				SchemaVersion string           `json:"schemaVersion"`
-				Initialized   bool             `json:"initialized"`
-				Inventory     *model.Inventory `json:"inventory"`
-			}
-			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-				t.Fatal(err)
-			}
-			if got.SchemaVersion != "ssc-init.status.v1" || got.Initialized != tc.initialized {
-				t.Fatalf("status=%+v", got)
-			}
-			if (got.Inventory != nil) != tc.initialized {
-				t.Fatalf("inventory=%+v initialized=%v", got.Inventory, tc.initialized)
+			if out.String() != tc.want {
+				t.Fatalf("output=%s want=%s", out.String(), tc.want)
 			}
 		})
 	}

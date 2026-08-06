@@ -16,12 +16,12 @@ import (
 	"github.com/ssc-init/ssc-init/internal/model"
 )
 
-const schemaVersion = "ssc-init.scan.v1"
+const schemaVersion = "ssc-init.scan.v2"
 
 // SnapshotStore is the persistence boundary required by a baseline scan.
 type SnapshotStore interface {
 	SaveScan(context.Context, model.ScanResult, model.Inventory) error
-	LatestInventory(context.Context) (model.Inventory, bool, error)
+	LatestSnapshot(context.Context) (model.Snapshot, bool, error)
 }
 
 // Service runs collectors and persists their normalized result.
@@ -49,8 +49,11 @@ func NewService(orchestrator collector.Orchestrator, snapshots SnapshotStore, no
 	}
 	switch len(environments) {
 	case 0:
+		service.environment.Scope.CatalogVersion = collector.CatalogVersion
 	case 1:
 		service.environment = environments[0]
+		service.environment.Scope = buildScope(service.environment)
+		service.environment.Platform = service.environment.Scope.Platform
 		service.hasEnv = true
 	default:
 		service.configErr = errors.New("scan service has an ambiguous environment")
@@ -84,12 +87,16 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 			return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
 		}
 	}
+	for index := range results {
+		results[index].LocalTargets = nil
+	}
 
 	current := inventory.Build(results)
-	previous, exists, err := s.snapshots.LatestInventory(ctx)
+	previousSnapshot, exists, err := s.snapshots.LatestSnapshot(ctx)
 	if err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("load previous inventory")
 	}
+	previous := previousSnapshot.Inventory
 	if !exists {
 		previous = model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}
 	}
@@ -113,6 +120,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		StartedAt:     startedAt,
 		FinishedAt:    finishedAt,
 		Coverage:      results,
+		Scope:         s.environment.Scope,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("save baseline snapshot")
@@ -132,6 +140,9 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 			}
 		}
 	}
+	if len(projectAssets) == 0 {
+		return results
+	}
 	followUp := collector.Orchestrator{
 		Collectors:    []collector.Collector{mcp.New(projectAssets...)},
 		Timeout:       s.orchestrator.Timeout,
@@ -150,6 +161,16 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 	merged = append(merged, followUp[0])
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Collector < merged[j].Collector })
 	return merged
+}
+
+func buildScope(environment collector.Environment) model.ScanScope {
+	scope := environment.Scope
+	if environment.Platform != "" {
+		scope.Platform = environment.Platform
+	}
+	scope.CatalogVersion = collector.CatalogVersion
+	scope.ProjectRoots = append([]string(nil), scope.ProjectRoots...)
+	return scope
 }
 
 func overallStatus(results []model.CollectorResult, current model.Inventory) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 type memorySnapshots struct {
-	latest    model.Inventory
+	latest    model.Snapshot
 	hasLatest bool
 	loadErr   error
 	saveErr   error
@@ -28,10 +29,12 @@ func (m *memorySnapshots) SaveScan(_ context.Context, result model.ScanResult, i
 	}
 	m.saved = append(m.saved, result)
 	m.inventory = append(m.inventory, inventory)
+	m.latest = model.Snapshot{Scan: result, Inventory: inventory}
+	m.hasLatest = true
 	return nil
 }
 
-func (m *memorySnapshots) LatestInventory(context.Context) (model.Inventory, bool, error) {
+func (m *memorySnapshots) LatestSnapshot(context.Context) (model.Snapshot, bool, error) {
 	return m.latest, m.hasLatest, m.loadErr
 }
 
@@ -54,7 +57,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 		Assets:        []model.Asset{{ID: "tool:old", Type: model.AssetTool, Name: "old"}},
 		Relationships: []model.Relationship{},
 	}
-	snapshots := &memorySnapshots{latest: previous, hasLatest: true}
+	snapshots := &memorySnapshots{latest: model.Snapshot{Inventory: previous}, hasLatest: true}
 	orchestrator := collector.Orchestrator{Timeout: time.Second, MaxConcurrent: 2, Collectors: []collector.Collector{
 		fixedCollector{name: "agents", result: model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{{ID: "tool:new", Type: model.AssetTool, Name: "new"}}}},
 		fixedCollector{name: "docker", err: context.DeadlineExceeded},
@@ -67,7 +70,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v1" {
+	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v2" {
 		t.Fatalf("result=%+v", result)
 	}
 	if len(snapshots.saved) != 1 || snapshots.saved[0].ScanID != result.ScanID {
@@ -88,6 +91,74 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 			t.Fatalf("delta[%d]=%+v want=%+v", i, delta.Changes[i], want[i])
 		}
 	}
+}
+
+func TestBaselineBuildsAndPersistsV2ScopeAndDropsLocalTargets(t *testing.T) {
+	projectRoots := []string{"$HOME/Projects"}
+	wantScope := model.ScanScope{
+		Platform:       "darwin",
+		CatalogVersion: collector.CatalogVersion,
+		ProjectRoots:   []string{"$HOME/Projects"},
+		ExternalProbes: false,
+	}
+	var collectedScope model.ScanScope
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{collectorFunc{
+		name: "evidence",
+		fn: func(_ context.Context, env collector.Environment) (model.CollectorResult, error) {
+			collectedScope = env.Scope
+			return model.CollectorResult{
+				Status:       model.CoverageComplete,
+				LocalTargets: []model.LocalTarget{{TargetID: "private", Path: "/raw/private/path"}},
+			}, nil
+		},
+	}}}
+	home := t.TempDir()
+	env := collector.Environment{
+		Home:     home,
+		Platform: "darwin",
+		Scope:    model.ScanScope{ProjectRoots: projectRoots},
+		FS:       platform.OSFileSystem{},
+		Runner:   platform.ExecRunner{},
+		Now:      fixedTime,
+	}
+	snapshots := &memorySnapshots{}
+	service := NewService(orchestrator, snapshots, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	}, env)
+	projectRoots[0] = "$HOME/Mutated"
+
+	result, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SchemaVersion != "ssc-init.scan.v2" || !reflect.DeepEqual(result.Scope, wantScope) {
+		t.Fatalf("result=%+v", result)
+	}
+	if !reflect.DeepEqual(collectedScope, wantScope) {
+		t.Fatalf("collector scope=%+v want=%+v", collectedScope, wantScope)
+	}
+	if len(result.Coverage) != 1 || result.Coverage[0].Collector != "evidence" {
+		t.Fatalf("coverage=%+v", result.Coverage)
+	}
+	if len(snapshots.saved) != 1 || !reflect.DeepEqual(snapshots.saved[0].Scope, wantScope) {
+		t.Fatalf("saved=%+v", snapshots.saved)
+	}
+	for _, coverage := range append(result.Coverage, snapshots.saved[0].Coverage...) {
+		if coverage.LocalTargets != nil {
+			t.Fatalf("local targets survived: %+v", coverage.LocalTargets)
+		}
+	}
+}
+
+type collectorFunc struct {
+	name string
+	fn   func(context.Context, collector.Environment) (model.CollectorResult, error)
+}
+
+func (c collectorFunc) Name() string { return c.name }
+
+func (c collectorFunc) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
+	return c.fn(ctx, env)
 }
 
 func TestBaselineRejectsInvalidInjectedIDBeforePersistence(t *testing.T) {

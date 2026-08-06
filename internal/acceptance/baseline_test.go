@@ -17,6 +17,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
 	"github.com/ssc-init/ssc-init/internal/collector/packages"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/report"
 	"github.com/ssc-init/ssc-init/internal/scan"
@@ -25,6 +26,8 @@ import (
 
 func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	env := testutil.Environment(t, "../../testdata/home")
+	env.Platform = "darwin"
+	env.Scope = model.ScanScope{ProjectRoots: []string{"$HOME/Projects"}}
 	env.FS = fixtureFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
 	if _, ok := env.Runner.(*testutil.FakeRunner); !ok {
 		t.Fatal("acceptance environment must use the fake runner")
@@ -68,8 +71,11 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, output.String())
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v1" {
+	if document["schemaVersion"] != "ssc-init.scan.v2" {
 		t.Fatalf("schemaVersion=%v", document["schemaVersion"])
+	}
+	if scope, ok := document["scope"].(map[string]any); !ok || scope["platform"] != "darwin" || scope["catalogVersion"] != collector.CatalogVersion {
+		t.Fatalf("scope=%v", document["scope"])
 	}
 	if realHome := os.Getenv("HOME"); realHome != "" && realHome != env.Home && strings.Contains(output.String(), realHome) {
 		t.Fatalf("real home leaked into fixture report: %q", realHome)

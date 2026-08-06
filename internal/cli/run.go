@@ -16,9 +16,9 @@ type BaselineScanner interface {
 	Baseline(context.Context) (model.ScanResult, model.Inventory, model.Delta, error)
 }
 
-// StatusReader loads the latest persisted inventory, if one exists.
+// StatusReader loads the latest persisted scan and inventory, if one exists.
 type StatusReader interface {
-	LatestInventory(context.Context) (model.Inventory, bool, error)
+	LatestSnapshot(context.Context) (model.Snapshot, bool, error)
 }
 
 // Doctor performs read-only runtime diagnostics.
@@ -73,14 +73,22 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 			fmt.Fprintln(stderr, "status is unavailable")
 			return 1
 		}
-		inventory, initialized, err := a.StatusReader.LatestInventory(ctx)
+		snapshot, initialized, err := a.StatusReader.LatestSnapshot(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "failed to read status")
 			return 1
 		}
-		status := statusPayload{SchemaVersion: "ssc-init.status.v1", Initialized: initialized}
+		status := statusPayload{SchemaVersion: "ssc-init.status.v2", Initialized: initialized}
 		if initialized {
-			status.Inventory = &inventory
+			status.InventorySchemaVersion = snapshot.Scan.SchemaVersion
+			status.Inventory = &snapshot.Inventory
+			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v2" {
+				scope := snapshot.Scan.Scope
+				status.Scope = &scope
+				status.Coverage = snapshot.Scan.Coverage
+			} else {
+				status.LegacyInventory = true
+			}
 		}
 		if err := writeJSON(stdout, status); err != nil {
 			fmt.Fprintln(stderr, "failed to write status output")
@@ -113,12 +121,14 @@ func (a App) Run(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return 2
 }
 
-// statusPayload deliberately reports inventory initialization only. The
-// SnapshotStore does not expose the status of the scan that created it.
 type statusPayload struct {
-	SchemaVersion string           `json:"schemaVersion"`
-	Initialized   bool             `json:"initialized"`
-	Inventory     *model.Inventory `json:"inventory,omitempty"`
+	SchemaVersion          string                  `json:"schemaVersion"`
+	Initialized            bool                    `json:"initialized"`
+	InventorySchemaVersion string                  `json:"inventorySchemaVersion,omitempty"`
+	LegacyInventory        bool                    `json:"legacyInventory,omitempty"`
+	Scope                  *model.ScanScope        `json:"scope,omitempty"`
+	Coverage               []model.CollectorResult `json:"coverage,omitempty"`
+	Inventory              *model.Inventory        `json:"inventory,omitempty"`
 }
 
 func writeJSON(writer io.Writer, value any) error {

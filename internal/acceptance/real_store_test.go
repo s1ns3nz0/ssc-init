@@ -16,6 +16,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector/ide"
 	"github.com/ssc-init/ssc-init/internal/collector/packages"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/report"
 	"github.com/ssc-init/ssc-init/internal/scan"
@@ -25,6 +26,8 @@ import (
 
 func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	env := testutil.Environment(t, "../../testdata/home")
+	env.Platform = "darwin"
+	env.Scope = model.ScanScope{ProjectRoots: []string{"$HOME/Projects"}}
 	env.FS = fixtureFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
 	if _, ok := env.Runner.(*testutil.FakeRunner); !ok {
 		t.Fatal("acceptance environment must use the fake runner")
@@ -50,13 +53,14 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	latest, initialized, err := snapshots.LatestInventory(context.Background())
+	latestSnapshot, initialized, err := snapshots.LatestSnapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !initialized || !reflect.DeepEqual(latest, inventory) {
-		t.Fatalf("initialized=%v latest=%#v inventory=%#v", initialized, latest, inventory)
+	if !initialized || !reflect.DeepEqual(latestSnapshot.Inventory, inventory) || !reflect.DeepEqual(latestSnapshot.Scan, result) {
+		t.Fatalf("initialized=%v latest=%#v result=%#v inventory=%#v", initialized, latestSnapshot, result, inventory)
 	}
+	latest := latestSnapshot.Inventory
 	foundProjectMCP := false
 	for _, asset := range latest.Assets {
 		if asset.ID == "mcp:vscode:workspace" {

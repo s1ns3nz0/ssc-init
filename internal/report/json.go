@@ -15,6 +15,7 @@ type baselinePayload struct {
 	Status        string                  `json:"status"`
 	StartedAt     time.Time               `json:"startedAt"`
 	FinishedAt    time.Time               `json:"finishedAt"`
+	Scope         model.ScanScope         `json:"scope"`
 	Coverage      []model.CollectorResult `json:"coverage"`
 	Inventory     model.Inventory         `json:"inventory"`
 	Delta         model.Delta             `json:"delta"`
@@ -30,6 +31,7 @@ func WriteJSON(writer io.Writer, scan model.ScanResult, inventory model.Inventor
 		Status:        scan.Status,
 		StartedAt:     scan.StartedAt,
 		FinishedAt:    scan.FinishedAt,
+		Scope:         scan.Scope,
 		Coverage:      scan.Coverage,
 		Inventory:     inventory,
 		Delta:         delta,

@@ -97,6 +97,9 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 	if err != nil {
 		return failedResult(name, "collector_error", "collector failed")
 	}
+	if targeted, ok := c.(TargetedCollector); ok {
+		result = ApplyTargetContract(name, targeted.Targets(), result)
+	}
 	return result
 }
 
