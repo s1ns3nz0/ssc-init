@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -568,6 +569,16 @@ func TestDockerFailureClassificationIsBoundedEphemeralAndAlwaysVerified(t *testi
 			runErr: errors.New("exit status 1"), wantStatus: model.TargetUnavailable,
 		},
 		{
+			name:   "identified daemon socket permission failure",
+			result: platform.CommandResult{ExitCode: 1, Stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///private/docker.sock: private-socket-marker"},
+			runErr: errors.New("exit status 1"), wantStatus: model.TargetUnavailable,
+		},
+		{
+			name:   "arbitrary permission failure",
+			result: platform.CommandResult{ExitCode: 1, Stderr: "permission denied while reading /private/docker-config-marker"},
+			runErr: errors.New("exit status 1"), wantStatus: model.TargetPartial,
+		},
+		{
 			name:   "timeout",
 			result: platform.CommandResult{ExitCode: -1, Stderr: "Cannot connect to the Docker daemon"},
 			runErr: &platform.TimeoutError{Command: "/private/docker"}, wantStatus: model.TargetPartial,
@@ -885,7 +896,7 @@ func TestNPMEntryBudgetExactLimitAndPlusOne(t *testing.T) {
 		wantAssets int
 	}{
 		{name: "exact limit", entries: 2, wantAssets: 2},
-		{name: "limit plus one", entries: 3, wantLoss: true, wantAssets: 2},
+		{name: "limit plus one", entries: 3, wantLoss: true, wantAssets: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -910,21 +921,88 @@ func TestNPMEntryBudgetIsSharedWithScopedPackages(t *testing.T) {
 	writeFile(t, filepath.Join(root, "@scope", "second", "package.json"), `{"name":"@scope/second","version":"1.0.0"}`)
 
 	assets, err := parseNPMWithEntryLimit(context.Background(), testutil.Environment(t, home), root+"\n", 3)
-	if len(assets) != 2 || !errors.Is(err, errParserLoss) {
+	if len(assets) != 1 || !errors.Is(err, errParserLoss) {
 		t.Fatalf("assets=%+v error=%v", assets, err)
 	}
 	testutil.AssertAsset(t, assets, "pkg:npm/direct@1.0.0")
 }
 
-func TestGoEntryBudgetIsSharedAcrossGOPATHDirectories(t *testing.T) {
+func TestGoOverflowPreservesAssetsFromEarlierCompleteGOPATHDirectory(t *testing.T) {
 	home := t.TempDir()
 	first, second := filepath.Join(home, "go-one"), filepath.Join(home, "go-two")
 	writeFile(t, filepath.Join(first, "bin", "first-tool"), "binary")
 	writeFile(t, filepath.Join(second, "bin", "second-tool"), "binary")
 	writeFile(t, filepath.Join(second, "bin", "third-tool"), "binary")
 	assets, err := parseGoPathWithEntryLimit(context.Background(), testutil.Environment(t, home), strings.Join([]string{first, second}, string(os.PathListSeparator)), 2)
-	if len(assets) != 2 || !errors.Is(err, errParserLoss) {
+	if len(assets) != 1 || assets[0].ID != "tool:go:first-tool" || !errors.Is(err, errParserLoss) {
 		t.Fatalf("assets=%+v error=%v", assets, err)
+	}
+}
+
+func TestGoOverflowDiscardsOrderDependentDirectoryPrefix(t *testing.T) {
+	home := t.TempDir()
+	goPath := filepath.Join(home, "go")
+	binPath := filepath.Join(goPath, "bin")
+	for _, name := range []string{"alpha", "bravo", "charlie"} {
+		writeFile(t, filepath.Join(binPath, name), "binary")
+	}
+	orders := [][]string{
+		{"alpha", "bravo", "charlie"},
+		{"charlie", "bravo", "alpha"},
+	}
+	var outputs [][]model.Asset
+	for _, order := range orders {
+		env := testutil.Environment(t, home)
+		env.FS = &orderedEnumerationFS{OSFileSystem: platform.OSFileSystem{}, directory: binPath, order: order}
+		assets, err := parseGoPathWithEntryLimit(context.Background(), env, goPath+"\n", 2)
+		if len(assets) != 0 || !errors.Is(err, errParserLoss) {
+			t.Fatalf("order=%q assets=%+v error=%v", order, assets, err)
+		}
+		outputs = append(outputs, assets)
+	}
+	if !reflect.DeepEqual(outputs[0], outputs[1]) {
+		t.Fatalf("order-dependent overflow outputs: first=%+v second=%+v", outputs[0], outputs[1])
+	}
+}
+
+func TestGoPathWithNoUsableComponentsReportsParserLoss(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	for _, testCase := range []struct {
+		name   string
+		stdout string
+	}{
+		{name: "separator only", stdout: separator},
+		{name: "repeated separators", stdout: strings.Repeat(separator, 4)},
+		{name: "whitespace components", stdout: separator + " " + separator + "\t" + separator},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assets, err := parseGoPath(context.Background(), testutil.Environment(t, t.TempDir()), testCase.stdout)
+			if len(assets) != 0 || !errors.Is(err, errParserLoss) {
+				t.Fatalf("assets=%+v error=%v", assets, err)
+			}
+		})
+	}
+}
+
+func TestGoPathIgnoresEmptyComponentsAroundValidMultipleRoots(t *testing.T) {
+	home := t.TempDir()
+	first, second := filepath.Join(home, "go-one"), filepath.Join(home, "go-two")
+	writeFile(t, filepath.Join(first, "bin", "first-tool"), "binary")
+	writeFile(t, filepath.Join(second, "bin", "second-tool"), "binary")
+	separator := string(os.PathListSeparator)
+	stdout := strings.Join([]string{"", first, " ", second, ""}, separator)
+
+	assets, err := parseGoPath(context.Background(), testutil.Environment(t, home), stdout)
+	if err != nil {
+		t.Fatalf("error=%v", err)
+	}
+	want := []string{"tool:go:first-tool", "tool:go:second-tool"}
+	got := make([]string, len(assets))
+	for index, asset := range assets {
+		got[index] = asset.ID
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("assets=%q want=%q", got, want)
 	}
 }
 
@@ -1134,6 +1212,82 @@ type replacingRootedFS struct {
 	replacement string
 	once        sync.Once
 	replaceErr  error
+}
+
+type orderedEnumerationFS struct {
+	platform.OSFileSystem
+	directory string
+	order     []string
+}
+
+func (f *orderedEnumerationFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &orderedEnumerationRoot{RootedDirectory: root, path: name, fs: f}, nil
+}
+
+type orderedEnumerationRoot struct {
+	platform.RootedDirectory
+	path string
+	fs   *orderedEnumerationFS
+}
+
+func (r *orderedEnumerationRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &orderedEnumerationRoot{RootedDirectory: child, path: filepath.Join(r.path, name), fs: r.fs}, nil
+}
+
+func (r *orderedEnumerationRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil || name != "." || r.path != r.fs.directory {
+		return file, err
+	}
+	listed, err := os.ReadDir(r.path)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	byName := make(map[string]os.DirEntry, len(listed))
+	for _, entry := range listed {
+		byName[entry.Name()] = entry
+	}
+	ordered := make([]os.DirEntry, 0, len(r.fs.order))
+	for _, entryName := range r.fs.order {
+		entry, ok := byName[entryName]
+		if !ok {
+			_ = file.Close()
+			return nil, fmt.Errorf("ordered entry %q is missing", entryName)
+		}
+		ordered = append(ordered, entry)
+	}
+	return &orderedRootedFile{RootedFile: file, entries: ordered}, nil
+}
+
+type orderedRootedFile struct {
+	platform.RootedFile
+	entries []os.DirEntry
+	offset  int
+}
+
+func (f *orderedRootedFile) ReadDir(n int) ([]os.DirEntry, error) {
+	if f.offset >= len(f.entries) {
+		return nil, io.EOF
+	}
+	end := f.offset + n
+	if end > len(f.entries) {
+		end = len(f.entries)
+	}
+	entries := append([]os.DirEntry(nil), f.entries[f.offset:end]...)
+	f.offset = end
+	if len(entries) < n {
+		return entries, io.EOF
+	}
+	return entries, nil
 }
 
 func (f *replacingRootedFS) OpenRoot(name string) (platform.RootedDirectory, error) {

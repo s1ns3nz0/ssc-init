@@ -175,6 +175,9 @@ func dockerDaemonUnavailable(result platform.CommandResult, runErr error) bool {
 		stderr = stderr[:maxDockerFailureClassifyBytes]
 	}
 	stderr = strings.ToLower(stderr)
+	if strings.Contains(stderr, "permission denied") && strings.Contains(stderr, "docker daemon") && strings.Contains(stderr, "socket") {
+		return true
+	}
 	for _, marker := range []string{
 		"cannot connect to the docker daemon",
 		"is the docker daemon running",
@@ -710,13 +713,16 @@ func parseGoPathWithEntryLimit(ctx context.Context, env collector.Environment, s
 	accessIncomplete := false
 	loss := false
 	budget := newPackageEntryBudget(entryLimit)
+	usableRoots := 0
 	for _, goPath := range filepath.SplitList(strings.TrimSpace(stdout)) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		goPath = strings.TrimSpace(goPath)
 		if goPath == "" {
 			continue
 		}
+		usableRoots++
 		binPath := filepath.Join(goPath, "bin")
 		binRoot, err := rootedFS.OpenRoot(binPath)
 		if err != nil {
@@ -774,6 +780,9 @@ func parseGoPathWithEntryLimit(ctx context.Context, env collector.Environment, s
 			})
 		}
 		_ = binRoot.Close()
+	}
+	if usableRoots == 0 {
+		loss = true
 	}
 	sort.SliceStable(assets, func(i, j int) bool { return assets[i].ID < assets[j].ID })
 	return assets, packageParseError(accessIncomplete, loss)
@@ -893,8 +902,7 @@ func readPackageDirectory(ctx context.Context, root platform.RootedDirectory, bu
 		batch, readErr := directory.ReadDir(request)
 		for _, entry := range batch {
 			if !budget.take() {
-				sort.SliceStable(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-				return entries, true, nil
+				return nil, true, nil
 			}
 			entries = append(entries, entry)
 		}
