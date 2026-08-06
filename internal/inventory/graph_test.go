@@ -242,6 +242,37 @@ func TestDiffReportsObservationOnlyChange(t *testing.T) {
 	}
 }
 
+func TestDiffReportsEvidenceDigestChange(t *testing.T) {
+	before := model.Inventory{Evidence: []model.ContentEvidence{{ID: "e", Digest: strings.Repeat("a", 64)}}}
+	after := model.Inventory{Evidence: []model.ContentEvidence{{ID: "e", Digest: strings.Repeat("b", 64)}}}
+	got := Diff(before, after)
+	want := model.Delta{Changes: []model.Change{{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "e"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v want=%+v", got, want)
+	}
+}
+
+func TestDiffOrdersAssetEvidenceObservationChanges(t *testing.T) {
+	previous := model.Inventory{
+		Assets:       []model.Asset{{ID: "asset-a", Name: "before"}},
+		Evidence:     []model.ContentEvidence{{ID: "evidence-a", Digest: "before"}},
+		Observations: []model.Observation{{ID: "observation-a", AssetID: "a", Collector: "test", Scope: model.ScopeUser, LocationRef: "$HOME/before"}},
+	}
+	current := model.Inventory{
+		Assets:       []model.Asset{{ID: "asset-a", Name: "after"}},
+		Evidence:     []model.ContentEvidence{{ID: "evidence-a", Digest: "after"}},
+		Observations: []model.Observation{{ID: "observation-a", AssetID: "a", Collector: "test", Scope: model.ScopeUser, LocationRef: "$HOME/after"}},
+	}
+	want := []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: "asset-a"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence-a"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityObservation, EntityID: "observation-a"},
+	}
+	if got := Diff(previous, current).Changes; !reflect.DeepEqual(got, want) {
+		t.Fatalf("changes=%+v want=%+v", got, want)
+	}
+}
+
 func cloneCollectorResults(in []model.CollectorResult) []model.CollectorResult {
 	out := make([]model.CollectorResult, len(in))
 	for index, result := range in {
