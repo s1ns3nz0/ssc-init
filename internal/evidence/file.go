@@ -30,9 +30,9 @@ var fixedFileErrors = map[string]model.EvidenceError{
 	"read":     {Code: "read_unavailable", Message: "evidence file is unavailable"},
 }
 
-// afterOpenFile is a deterministic test seam for mutations between opening and
-// hashing. Production leaves it nil.
-var afterOpenFile func()
+// afterOpenFileContextKey scopes deterministic mutation hooks to one hash
+// operation. Production callers do not set it.
+type afterOpenFileContextKey struct{}
 
 // HashVerifiedFile hashes a regular file relative to root without following
 // symbolic links. It returns evidence only if the file identity remains stable
@@ -68,8 +68,8 @@ func HashVerifiedFile(ctx context.Context, root platform.RootedDirectory, relati
 	if !ok {
 		return unavailableFile("read")
 	}
-	if afterOpenFile != nil {
-		afterOpenFile()
+	if afterOpen, ok := ctx.Value(afterOpenFileContextKey{}).(func()); ok {
+		afterOpen()
 	}
 
 	hasher := sha256.New()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -104,13 +105,69 @@ func TestHashVerifiedFileRejectsAfterOpenChanges(t *testing.T) {
 			}
 			defer root.Close()
 
-			afterOpenFile = func() { testCase.mutate(t, path) }
-			t.Cleanup(func() { afterOpenFile = nil })
+			ctx := context.WithValue(context.Background(), afterOpenFileContextKey{}, func() { testCase.mutate(t, path) })
 
-			got, status, errs := HashVerifiedFile(context.Background(), root, "payload", 64)
+			got, status, errs := HashVerifiedFile(ctx, root, "payload", 64)
 			if got != (FileDigest{}) || status != model.EvidenceUnavailable || len(errs) != 1 || errs[0].Code != "identity_changed" {
 				t.Fatalf("got=%+v status=%s errors=%+v", got, status, errs)
 			}
 		})
+	}
+}
+
+func TestHashVerifiedFileScopesAfterOpenMutationToContext(t *testing.T) {
+	type hashResult struct {
+		digest FileDigest
+		status model.EvidenceStatus
+		errs   []model.EvidenceError
+	}
+
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	results := make(chan hashResult, 2)
+	mutationErrors := make(chan error, 2)
+
+	for _, name := range []string{"first", "second"} {
+		rootPath := t.TempDir()
+		path := filepath.Join(rootPath, "payload")
+		if err := os.WriteFile(path, []byte("trusted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { root.Close() })
+
+		ctx := context.WithValue(context.Background(), afterOpenFileContextKey{}, func() {
+			ready <- struct{}{}
+			<-release
+			mutationErrors <- os.Truncate(path, int64(len(name)))
+		})
+		go func() {
+			digest, status, errs := HashVerifiedFile(ctx, root, "payload", 64)
+			results <- hashResult{digest: digest, status: status, errs: errs}
+		}()
+	}
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for range 2 {
+		select {
+		case <-ready:
+		case <-timer.C:
+			close(release)
+			t.Fatal("concurrent hash did not reach its context-scoped after-open hook")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-mutationErrors; err != nil {
+			t.Fatal(err)
+		}
+		result := <-results
+		if result.digest != (FileDigest{}) || result.status != model.EvidenceUnavailable || len(result.errs) != 1 || result.errs[0].Code != "identity_changed" {
+			t.Fatalf("got=%+v status=%s errors=%+v", result.digest, result.status, result.errs)
+		}
 	}
 }
