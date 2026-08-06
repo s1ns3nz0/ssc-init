@@ -1053,8 +1053,29 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 		{name: "URL entrypoint", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["entry_point"] = "https://example.test/Volumes/extension.js;mode=/Volumes/safe"
 		}},
-		{name: "PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+		{name: "HTTP percent-encoded path", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "https://example.test/%2FVolumes/safe?root=%2FVolumes%2Fsafe"
+		}},
+		{name: "embedded HTTP command argument", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["command"] = `runner --url="https://example.test/Volumes/safe?root=/Volumes/safe"`
+		}},
+		{name: "npm PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0"
+		}},
+		{name: "scoped npm PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/%40scope/tool@2.0.0"
+		}},
+		{name: "pypi PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:pypi/requests@2.32.3"
+		}},
+		{name: "cargo PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:cargo/ripgrep@14.1.0"
+		}},
+		{name: "brew PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:brew/openssl%403@3.3.2"
+		}},
+		{name: "docker PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:docker/library/alpine@3.20"
 		}},
 		{name: "command basename", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["command"] = "python3"
@@ -1068,8 +1089,32 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 		{name: "HTTPS location reference", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Observations[0].LocationRef = "https://example.test/Volumes/tool?root=/Volumes/safe"
 		}},
-		{name: "PURL with path-shaped qualifier", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
-			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0?root=/Volumes/safe"
+		{name: "PURL with qualifiers and subpath", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0?arch=arm64&os=darwin#dist/bin"
+		}},
+		{name: "safe JSON object keys and values", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["args"] = `{"dist/config.json":{"nested":"relative/value"}}`
+		}},
+		{name: "probe source identifier metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["probe_source_id"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "source target metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["source_target"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "source type metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["artifact_source_type"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "source kind metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["runtime_source_kind"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "source name metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["package_source_name"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "unrelated build source metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["build_source"] = "/Volumes/opaque-identifier"
+		}},
+		{name: "probe source label metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Metadata["probe_source_label"] = "/Volumes/opaque-identifier"
 		}},
 		{name: "unrelated metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["publisher"] = "/Volumes/private-is-a-publisher"
@@ -1082,6 +1127,38 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 				t.Fatalf("safe reference rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestApprovedPackageReferenceRequiresConformantLocalPURLGrammar(t *testing.T) {
+	for _, testCase := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "pkg:npm/example@1.0.0", want: true},
+		{value: "pkg:npm/%40scope/tool@2.0.0", want: true},
+		{value: "pkg:pypi/requests@2.32.3", want: true},
+		{value: "pkg:cargo/ripgrep@14.1.0", want: true},
+		{value: "pkg:brew/openssl%403@3.3.2", want: true},
+		{value: "pkg:docker/library/alpine@3.20", want: true},
+		{value: "pkg:npm/example@1.0.0?arch=arm64&os=darwin#dist/bin", want: true},
+		{value: "pkg:NPM/example@1.0.0"},
+		{value: "pkg:npm//example@1.0.0"},
+		{value: "pkg:npm/example@"},
+		{value: "pkg:npm/example@1.0.0?arch="},
+		{value: "pkg:npm/example@1.0.0?arch=arm64&arch=x86_64"},
+		{value: "pkg:npm/example@1.0.0#dist/../private"},
+		{value: "pkg:npm/example%2Fprivate@1.0.0"},
+		{value: "pkg:npm/example@1.0.0?root=/Volumes/private"},
+		{value: "pkg:npm/example@1.0.0?root=%2FVolumes%2Fprivate"},
+		{value: "pkg:npm/example@1.0.0#/Volumes/private"},
+		{value: "pkg:npm/example@%2FVolumes%2Fprivate"},
+		{value: "pkg:npm/example@1.0.0|/Volumes/private"},
+		{value: "pkg:npm/%GGexample@1.0.0"},
+	} {
+		if got := approvedPackageReference(testCase.value); got != testCase.want {
+			t.Errorf("approvedPackageReference(%q)=%v want %v", testCase.value, got, testCase.want)
+		}
 	}
 }
 
@@ -1356,7 +1433,7 @@ type persistedPathCase struct {
 }
 
 func persistedRawPathCases() []persistedPathCase {
-	return []persistedPathCase{
+	cases := []persistedPathCase{
 		{name: "scope project root", storage: "scope", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Scope.ProjectRoots[0] = raw }},
 		{name: "inventory asset path", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) { inventory.Assets[0].Path = raw }},
 		{name: "inventory asset manifest metadata", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
@@ -1422,11 +1499,35 @@ func persistedRawPathCases() []persistedPathCase {
 		{name: "inventory observation nested JSON args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
 			inventory.Observations[0].Metadata["args"] = `{"config":{"argv":["--root","` + raw + `"]}}`
 		}},
+		{name: "inventory observation JSON object key args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = `{"` + raw + `":"safe"}`
+		}},
+		{name: "inventory observation nested JSON object key args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = `{"config":{"` + raw + `":"safe"}}`
+		}},
+		{name: "inventory observation deeply nested JSON args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, _ string) {
+			inventory.Observations[0].Metadata["args"] = strings.Repeat("[", 65) + `"safe"` + strings.Repeat("]", 65)
+		}},
+		{name: "inventory observation oversized args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, _ string) {
+			inventory.Observations[0].Metadata["args"] = strings.Repeat("a", (64<<10)+1)
+		}},
 		{name: "inventory observation punctuated command metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
 			inventory.Observations[0].Metadata["command"] = `("--root":"` + raw + `")`
 		}},
 		{name: "inventory observation malformed PURL metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
 			inventory.Observations[0].Metadata["entry_point"] = "pkg:" + raw
+		}},
+		{name: "inventory observation PURL suffix path metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0|" + raw
+		}},
+		{name: "inventory observation PURL qualifier path metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0?root=" + raw
+		}},
+		{name: "inventory observation PURL encoded qualifier path metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0?root=" + strings.ReplaceAll(raw, "/", "%2F")
+		}},
+		{name: "inventory observation PURL subpath path metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0#" + raw
 		}},
 		{name: "inventory observation file URI location", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
 			inventory.Observations[0].LocationRef = "file://" + raw
@@ -1458,10 +1559,56 @@ func persistedRawPathCases() []persistedPathCase {
 		{name: "coverage target encoded file URI instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
 			scan.Coverage[0].Targets[0].InstanceRef = "file:" + strings.ReplaceAll(raw, "/", "%2F")
 		}},
+		{name: "coverage target encoded file scheme instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = "file%3A%2F%2F" + strings.TrimPrefix(strings.ReplaceAll(raw, "/", "%2F"), "%2F")
+		}},
+		{name: "coverage target mixed-case encoded file scheme instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = "f%69le%3a%2F%2f" + strings.TrimPrefix(strings.ReplaceAll(raw, "/", "%2F"), "%2F")
+		}},
+		{name: "coverage target double-encoded file URI instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			doubleEncoded := strings.ReplaceAll(strings.ReplaceAll(raw, "%", "%25"), "/", "%252F")
+			scan.Coverage[0].Targets[0].InstanceRef = "file%253A%252F%252F" + strings.TrimPrefix(doubleEncoded, "%252F")
+		}},
+		{name: "coverage target encoded absolute instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = strings.ReplaceAll(raw, "/", "%2F")
+		}},
 		{name: "coverage target error path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
 			scan.Coverage[0].Targets[0].Errors[0].Path = raw
 		}},
 	}
+
+	for _, punctuation := range []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{name: "question mark", prefix: "?"},
+		{name: "hash", prefix: "#"},
+		{name: "ampersand", prefix: "&"},
+		{name: "backslash", prefix: `\`},
+		{name: "pipe", prefix: "|"},
+		{name: "comma", prefix: ","},
+		{name: "colon", prefix: ":"},
+		{name: "equals", prefix: "="},
+		{name: "brackets", prefix: "[", suffix: "]"},
+		{name: "parentheses", prefix: "(", suffix: ")"},
+		{name: "braces", prefix: "{", suffix: "}"},
+		{name: "closing brace", prefix: "}"},
+		{name: "angle brackets", prefix: "<", suffix: ">"},
+		{name: "at sign", prefix: "@"},
+		{name: "single quotes", prefix: `'`, suffix: `'`},
+		{name: "quotes", prefix: `"`, suffix: `"`},
+	} {
+		punctuation := punctuation
+		cases = append(cases, persistedPathCase{
+			name:    "inventory observation command punctuation " + punctuation.name,
+			storage: "inventory-observation",
+			mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+				inventory.Observations[0].Metadata["command"] = "runner" + punctuation.prefix + raw + punctuation.suffix
+			},
+		})
+	}
+	return cases
 }
 
 func persistenceSafePathFixture() (model.ScanResult, model.Inventory) {

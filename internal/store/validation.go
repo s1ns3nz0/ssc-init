@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/model"
@@ -21,6 +22,12 @@ var ErrSensitiveSnapshot = errors.New("snapshot contains sensitive data")
 var errUnsafeSnapshotPath = errors.New("snapshot contains unsafe path reference")
 
 var safeKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+const (
+	maxPersistedPathValueBytes = 64 << 10
+	maxStructuredPathDepth     = 64
+	maxPercentDecodeRounds     = 3
+)
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	for field, value := range map[string]string{
@@ -238,8 +245,10 @@ func validateMetadata(owner string, metadata map[string]string) error {
 		if err := validateOptionalString(owner+" metadata value", value); err != nil {
 			return err
 		}
-		if metadataKeyCarriesPath(key) && containsRawPOSIXAbsolutePath(value) {
-			return errUnsafeSnapshotPath
+		if metadataKeyCarriesPath(key) {
+			if len(value) > maxPersistedPathValueBytes || containsRawPOSIXAbsolutePath(value) {
+				return errUnsafeSnapshotPath
+			}
 		}
 	}
 	return nil
@@ -272,7 +281,7 @@ func validatePersistenceSafePath(field, value string) error {
 	if err := validateOptionalString(field, value); err != nil {
 		return err
 	}
-	if containsRawPOSIXAbsolutePath(value) {
+	if len(value) > maxPersistedPathValueBytes || containsRawPOSIXAbsolutePath(value) {
 		return errUnsafeSnapshotPath
 	}
 	return nil
@@ -293,7 +302,7 @@ func metadataKeyCarriesPath(key string) bool {
 			metadataKeyHasSemanticAffix(normalized, "refs") ||
 			metadataKeyHasSemanticAffix(normalized, "symlink") ||
 			metadataKeyHasSemanticAffix(normalized, "symlink_chain") ||
-			strings.HasSuffix(normalized, "_source") || strings.HasPrefix(normalized, "probe_source_")
+			metadataSourceKeyCarriesPath(normalized)
 	}
 }
 
@@ -301,30 +310,85 @@ func metadataKeyHasSemanticAffix(key, semantic string) bool {
 	return strings.HasPrefix(key, semantic+"_") || strings.HasSuffix(key, "_"+semantic)
 }
 
+func metadataSourceKeyCarriesPath(key string) bool {
+	switch key {
+	case "probe_source", "runtime_source":
+		return true
+	default:
+		return false
+	}
+}
+
 func containsRawPOSIXAbsolutePath(value string) bool {
+	if len(value) > maxPersistedPathValueBytes {
+		return true
+	}
 	var structured any
-	if json.Valid([]byte(value)) && json.Unmarshal([]byte(value), &structured) == nil {
+	encoded := []byte(value)
+	if json.Valid(encoded) {
+		if !structuredJSONWithinDepth(encoded) {
+			return true
+		}
+		if json.Unmarshal(encoded, &structured) != nil {
+			return true
+		}
 		switch structured.(type) {
 		case string, []any, map[string]any:
-			return structuredValueCarriesRawPOSIXAbsolutePath(structured)
+			return structuredValueCarriesRawPOSIXAbsolutePath(structured, 0)
+		default:
+			return false
 		}
 	}
 	return textCarriesRawPOSIXAbsolutePath(value)
 }
 
-func structuredValueCarriesRawPOSIXAbsolutePath(value any) bool {
+func structuredJSONWithinDepth(value []byte) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for _, character := range value {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case character == '\\':
+				escaped = true
+			case character == '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > maxStructuredPathDepth {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true
+}
+
+func structuredValueCarriesRawPOSIXAbsolutePath(value any, depth int) bool {
+	if depth > maxStructuredPathDepth {
+		return true
+	}
 	switch typed := value.(type) {
 	case string:
 		return textCarriesRawPOSIXAbsolutePath(typed)
 	case []any:
 		for _, item := range typed {
-			if structuredValueCarriesRawPOSIXAbsolutePath(item) {
+			if structuredValueCarriesRawPOSIXAbsolutePath(item, depth+1) {
 				return true
 			}
 		}
 	case map[string]any:
-		for _, item := range typed {
-			if structuredValueCarriesRawPOSIXAbsolutePath(item) {
+		for key, item := range typed {
+			if textCarriesRawPOSIXAbsolutePath(key) || structuredValueCarriesRawPOSIXAbsolutePath(item, depth+1) {
 				return true
 			}
 		}
@@ -334,42 +398,58 @@ func structuredValueCarriesRawPOSIXAbsolutePath(value any) bool {
 
 func textCarriesRawPOSIXAbsolutePath(value string) bool {
 	value = strings.TrimSpace(value)
-	value = strings.Trim(value, `"'()[]{}<>`)
 	if value == "" || approvedRemoteOrPackageReference(value) {
 		return false
 	}
-	if containsLocalFileReference(value) {
+	decoded, exhausted := boundedPercentDecode(value)
+	if exhausted {
 		return true
 	}
-	parts := strings.FieldsFunc(value, pathCompositeBoundary)
-	if len(parts) > 1 || len(parts) == 1 && parts[0] != value {
-		for _, part := range parts {
-			if textCarriesRawPOSIXAbsolutePath(part) {
-				return true
-			}
-		}
+	decoded = strings.TrimSpace(decoded)
+	if decoded == "" || approvedRemoteOrPackageReference(decoded) {
 		return false
 	}
-	return strings.HasPrefix(value, "/")
+	return containsLocalFileReference(decoded) || containsAbsolutePathComponent(decoded)
 }
 
-func pathCompositeBoundary(character rune) bool {
-	if character == '\x1f' || character == '\n' || character == '\r' || character == '\t' || character == ' ' {
-		return true
+func boundedPercentDecode(value string) (string, bool) {
+	decoded := value
+	for range maxPercentDecodeRounds {
+		if !strings.ContainsRune(decoded, '%') {
+			return decoded, false
+		}
+		next, err := url.PathUnescape(decoded)
+		if err != nil || next == decoded {
+			return decoded, false
+		}
+		decoded = next
 	}
-	return strings.ContainsRune(`="'()[]{}<>,:;|`, character)
+	if strings.ContainsRune(decoded, '%') {
+		next, err := url.PathUnescape(decoded)
+		if err == nil && next != decoded {
+			return decoded, true
+		}
+	}
+	return decoded, false
 }
 
 func approvedRemoteOrPackageReference(value string) bool {
 	if approvedPackageReference(value) {
 		return true
 	}
+	return approvedHTTPReference(value)
+}
+
+func approvedHTTPReference(value string) bool {
+	if strings.ContainsAny(value, " \t\r\n\x1f\\") {
+		return false
+	}
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Opaque != "" || parsed.Hostname() == "" {
 		return false
 	}
 	switch strings.ToLower(parsed.Scheme) {
-	case "git", "http", "https", "ssh", "ws", "wss":
+	case "http", "https":
 		return true
 	default:
 		return false
@@ -377,27 +457,216 @@ func approvedRemoteOrPackageReference(value string) bool {
 }
 
 func approvedPackageReference(value string) bool {
-	if !strings.HasPrefix(strings.ToLower(value), "pkg:") || strings.ContainsAny(value, " \t\r\n\x1f") {
+	if !strings.HasPrefix(value, "pkg:") || len(value) > maxPersistedPathValueBytes || strings.ContainsAny(value, " \t\r\n\x1f") {
 		return false
 	}
-	packageType, name, found := strings.Cut(value[len("pkg:"):], "/")
-	return found && packageType != "" && name != "" && !strings.HasPrefix(name, "/")
+	body := value[len("pkg:"):]
+	if strings.Count(body, "#") > 1 || strings.Count(body, "?") > 1 {
+		return false
+	}
+	mainAndQualifiers, subpath, hasSubpath := strings.Cut(body, "#")
+	if hasSubpath && !validPURLSubpath(subpath) || strings.ContainsRune(subpath, '?') {
+		return false
+	}
+	main, qualifiers, hasQualifiers := strings.Cut(mainAndQualifiers, "?")
+	if hasQualifiers && !validPURLQualifiers(qualifiers) {
+		return false
+	}
+	packageType, packagePath, found := strings.Cut(main, "/")
+	if !found || !validPURLType(packageType) {
+		return false
+	}
+	versionSeparator := strings.LastIndexByte(packagePath, '@')
+	if versionSeparator <= 0 || versionSeparator == len(packagePath)-1 {
+		return false
+	}
+	pathPart := packagePath[:versionSeparator]
+	version := packagePath[versionSeparator+1:]
+	if !validEncodedPURLPart(version, true) {
+		return false
+	}
+	decodedVersion, err := url.PathUnescape(version)
+	if err != nil || decodedVersion == "" || purlDecodedPartCarriesLocalPath(decodedVersion) {
+		return false
+	}
+	segments := strings.Split(pathPart, "/")
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if !validPURLPathSegment(segment) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsLocalFileReference(value string) bool {
-	lower := strings.ToLower(value)
-	for offset := 0; offset < len(lower); {
-		index := strings.Index(lower[offset:], "file:")
-		if index < 0 {
-			return false
-		}
-		index += offset
-		if index == 0 || pathCompositeBoundary(rune(lower[index-1])) {
+	for index := range value {
+		if index+len("file:") <= len(value) && strings.EqualFold(value[index:index+len("file:")], "file:") && isComponentStart(value, index) {
 			return true
 		}
-		offset = index + len("file:")
 	}
 	return false
+}
+
+func containsAbsolutePathComponent(value string) bool {
+	for index := 0; index < len(value); {
+		character, size := utf8.DecodeRuneInString(value[index:])
+		if isComponentStart(value, index) {
+			end := componentCandidateEnd(value, index)
+			candidateEnd := trimReferenceWrappersRight(value, index, end)
+			if candidateEnd > index && approvedRemoteOrPackageReference(value[index:candidateEnd]) {
+				index = candidateEnd
+				continue
+			}
+			if character == '/' {
+				return true
+			}
+		}
+		index += size
+	}
+	return false
+}
+
+func isComponentStart(value string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous, _ := utf8.DecodeLastRuneInString(value[:index])
+	return !isPathComponentRune(previous)
+}
+
+func isPathComponentRune(character rune) bool {
+	return unicode.IsLetter(character) || unicode.IsNumber(character) || strings.ContainsRune("_-.$~+", character)
+}
+
+func componentCandidateEnd(value string, start int) int {
+	for offset, character := range value[start:] {
+		if unicode.IsSpace(character) || character == '\x1f' {
+			return start + offset
+		}
+	}
+	return len(value)
+}
+
+func trimReferenceWrappersRight(value string, start, end int) int {
+	for end > start {
+		character, size := utf8.DecodeLastRuneInString(value[start:end])
+		if !strings.ContainsRune(`"'()[]{}<>`, character) {
+			break
+		}
+		end -= size
+	}
+	return end
+}
+
+func validPURLType(value string) bool {
+	if value == "" || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value {
+		if character < 'a' || character > 'z' {
+			if character < '0' || character > '9' {
+				if !strings.ContainsRune(".+-", character) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func validPURLPathSegment(value string) bool {
+	if !validEncodedPURLPart(value, false) {
+		return false
+	}
+	decoded, err := url.PathUnescape(value)
+	return err == nil && decoded != "" && decoded != "." && decoded != ".." && !strings.ContainsRune(decoded, '/')
+}
+
+func validEncodedPURLPart(value string, allowAt bool) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); {
+		character := value[index]
+		if character == '%' {
+			if index+2 >= len(value) || !isHexadecimal(value[index+1]) || !isHexadecimal(value[index+2]) {
+				return false
+			}
+			index += 3
+			continue
+		}
+		if character >= utf8.RuneSelf {
+			return false
+		}
+		allowed := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("-._~!$&'()*+,;=:", rune(character))
+		if allowAt && character == '@' {
+			allowed = true
+		}
+		if !allowed {
+			return false
+		}
+		index++
+	}
+	return true
+}
+
+func validPURLQualifiers(value string) bool {
+	if value == "" {
+		return false
+	}
+	previousKey := ""
+	for _, qualifier := range strings.Split(value, "&") {
+		key, rawValue, found := strings.Cut(qualifier, "=")
+		if !found || !validPURLQualifierKey(key) || key <= previousKey || !validEncodedPURLPart(rawValue, true) {
+			return false
+		}
+		decoded, err := url.PathUnescape(rawValue)
+		if err != nil || decoded == "" || purlDecodedPartCarriesLocalPath(decoded) {
+			return false
+		}
+		previousKey = key
+	}
+	return true
+}
+
+func validPURLQualifierKey(value string) bool {
+	if value == "" || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value {
+		if character < 'a' || character > 'z' {
+			if character < '0' || character > '9' {
+				if !strings.ContainsRune("._-", character) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func validPURLSubpath(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if !validPURLPathSegment(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func purlDecodedPartCarriesLocalPath(value string) bool {
+	decoded, exhausted := boundedPercentDecode(value)
+	return exhausted || containsLocalFileReference(decoded) || containsAbsolutePathComponent(decoded)
+}
+
+func isHexadecimal(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 func validateRequiredString(field, value string) error {
