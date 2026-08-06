@@ -86,6 +86,45 @@ func Build(results []model.CollectorResult) model.Inventory {
 	for _, id := range assetIDs {
 		validAssets[id] = struct{}{}
 	}
+	observationsByID := make(map[string]model.Observation)
+	canonicalObservationsByID := make(map[string][]byte)
+	observationConflicts := make(map[string]struct{})
+	for _, result := range results {
+		for _, candidate := range result.Observations {
+			canonical := canonicalObservation(candidate)
+			existing, exists := canonicalObservationsByID[candidate.ID]
+			if exists && !bytes.Equal(existing, canonical) {
+				observationConflicts[candidate.ID] = struct{}{}
+			}
+			if !exists || bytes.Compare(canonical, existing) < 0 {
+				observationsByID[candidate.ID] = candidate
+				canonicalObservationsByID[candidate.ID] = canonical
+			}
+		}
+	}
+
+	observationIDs := make([]string, 0, len(observationsByID))
+	for id := range observationsByID {
+		observationIDs = append(observationIDs, id)
+	}
+	sort.Strings(observationIDs)
+	for _, id := range observationIDs {
+		observation := observationsByID[id]
+		if _, exists := validAssets[observation.AssetID]; !exists {
+			inventory.Errors = append(inventory.Errors, orphanObservationError())
+			continue
+		}
+		inventory.Observations = append(inventory.Observations, observation)
+	}
+	conflictIDs := make([]string, 0, len(observationConflicts))
+	for id := range observationConflicts {
+		conflictIDs = append(conflictIDs, id)
+	}
+	sort.Strings(conflictIDs)
+	for _, id := range conflictIDs {
+		inventory.Errors = append(inventory.Errors, observationConflict(id))
+	}
+
 	relationships := make(map[model.Relationship]struct{})
 	for _, result := range results {
 		for _, relationship := range result.Relationships {
@@ -115,37 +154,44 @@ func Build(results []model.CollectorResult) model.Inventory {
 	return inventory
 }
 
-// Diff compares normalized inventory assets in deterministic AssetID order.
+// Diff compares normalized inventory entities in deterministic entity and ID order.
 func Diff(previous, current model.Inventory) model.Delta {
-	previousByID := deterministicAssetsByID(previous.Assets)
-	currentByID := deterministicAssetsByID(current.Assets)
-	ids := make(map[string]struct{}, len(previousByID)+len(currentByID))
-	for id := range previousByID {
-		ids[id] = struct{}{}
-	}
-	for id := range currentByID {
-		ids[id] = struct{}{}
-	}
-	orderedIDs := make([]string, 0, len(ids))
-	for id := range ids {
-		orderedIDs = append(orderedIDs, id)
-	}
-	sort.Strings(orderedIDs)
-
 	delta := model.Delta{Changes: make([]model.Change, 0)}
-	for _, id := range orderedIDs {
-		before, existedBefore := previousByID[id]
-		after, existsNow := currentByID[id]
+	appendEntityChanges(&delta.Changes, model.ChangeEntityAsset, canonicalAssetsByID(previous.Assets), canonicalAssetsByID(current.Assets))
+	appendEntityChanges(&delta.Changes, model.ChangeEntityObservation, canonicalObservationsForDiffByID(previous.Observations), canonicalObservationsForDiffByID(current.Observations))
+	sort.Slice(delta.Changes, func(i, j int) bool {
+		left, right := delta.Changes[i], delta.Changes[j]
+		if left.Entity != right.Entity {
+			return left.Entity < right.Entity
+		}
+		if left.EntityID != right.EntityID {
+			return left.EntityID < right.EntityID
+		}
+		return left.Kind < right.Kind
+	})
+	return delta
+}
+
+func appendEntityChanges(changes *[]model.Change, entity model.ChangeEntity, previous, current map[string][]byte) {
+	ids := make(map[string]struct{}, len(previous)+len(current))
+	for id := range previous {
+		ids[id] = struct{}{}
+	}
+	for id := range current {
+		ids[id] = struct{}{}
+	}
+	for id := range ids {
+		before, existedBefore := previous[id]
+		after, existsNow := current[id]
 		switch {
 		case !existedBefore:
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: id})
+			*changes = append(*changes, model.Change{Kind: model.ChangeAdded, Entity: entity, EntityID: id})
 		case !existsNow:
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: id})
-		case !bytes.Equal(canonicalAssetForDiff(before), canonicalAssetForDiff(after)):
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: id})
+			*changes = append(*changes, model.Change{Kind: model.ChangeRemoved, Entity: entity, EntityID: id})
+		case !bytes.Equal(before, after):
+			*changes = append(*changes, model.Change{Kind: model.ChangeChanged, Entity: entity, EntityID: id})
 		}
 	}
-	return delta
 }
 
 func canonicalAssetWithoutMetadata(asset model.Asset) (model.Asset, []byte) {
@@ -172,21 +218,49 @@ func canonicalAssetForDiff(asset model.Asset) []byte {
 	return canonical
 }
 
-func deterministicAssetsByID(assets []model.Asset) map[string]model.Asset {
-	byID := make(map[string]model.Asset, len(assets))
-	canonicalByID := make(map[string][]byte, len(assets))
-	for _, asset := range assets {
-		canonical := canonicalAssetForDiff(asset)
-		if existing, exists := canonicalByID[asset.ID]; !exists || bytes.Compare(canonical, existing) < 0 {
-			byID[asset.ID] = asset
-			canonicalByID[asset.ID] = canonical
+func canonicalAssetsByID(assets []model.Asset) map[string][]byte {
+	return canonicalValuesByID(assets, func(asset model.Asset) string { return asset.ID }, canonicalAssetForDiff)
+}
+
+func canonicalObservationsForDiffByID(observations []model.Observation) map[string][]byte {
+	return canonicalValuesByID(observations, func(observation model.Observation) string { return observation.ID }, canonicalObservation)
+}
+
+func canonicalValuesByID[T any](values []T, id func(T) string, canonicalize func(T) []byte) map[string][]byte {
+	canonicalByID := make(map[string][]byte, len(values))
+	for _, value := range values {
+		canonical := canonicalize(value)
+		entityID := id(value)
+		if existing, exists := canonicalByID[entityID]; !exists || bytes.Compare(canonical, existing) < 0 {
+			canonicalByID[entityID] = canonical
 		}
 	}
-	return byID
+	return canonicalByID
+}
+
+func canonicalObservation(observation model.Observation) []byte {
+	canonical, _ := json.Marshal(observation)
+	return canonical
 }
 
 func conflictFingerprintPath(assetID, metadataKey string) string {
 	assetDigest := sha256.Sum256([]byte(assetID))
 	keyDigest := sha256.Sum256([]byte(metadataKey))
 	return fmt.Sprintf("asset-sha256:%x/metadata-key-sha256:%x", assetDigest, keyDigest)
+}
+
+func observationConflict(observationID string) model.CoverageError {
+	digest := sha256.Sum256([]byte(observationID))
+	return model.CoverageError{
+		Code:    "observation-conflict",
+		Message: "conflicting observation variants normalized",
+		Path:    fmt.Sprintf("observation-id-sha256:%x", digest),
+	}
+}
+
+func orphanObservationError() model.CoverageError {
+	return model.CoverageError{
+		Code:    "orphan-observation",
+		Message: "observation references an absent asset",
+	}
 }

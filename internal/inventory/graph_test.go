@@ -150,6 +150,53 @@ func TestBuildSortsMetadataConflictsByAssetAndKey(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesMultipleObservationsForOneAsset(t *testing.T) {
+	asset := model.Asset{ID: "mcp:vscode:workspace", Type: model.AssetMCP, Name: "workspace"}
+	first := model.Observation{ID: "observation:sha256:1", AssetID: asset.ID, Collector: "mcp", Scope: model.ScopeProject, LocationRef: "$HOME/Projects/a/.vscode/mcp.json"}
+	second := model.Observation{ID: "observation:sha256:2", AssetID: asset.ID, Collector: "mcp", Scope: model.ScopeProject, LocationRef: "$HOME/Projects/b/.vscode/mcp.json"}
+	got := Build([]model.CollectorResult{{Collector: "mcp", Assets: []model.Asset{asset, asset}, Observations: []model.Observation{second, first}}})
+	if !reflect.DeepEqual(got.Observations, []model.Observation{first, second}) {
+		t.Fatalf("observations=%+v", got.Observations)
+	}
+}
+
+func TestBuildDropsOrphanObservationWithGenericError(t *testing.T) {
+	got := Build([]model.CollectorResult{{Collector: "mcp", Observations: []model.Observation{{ID: "observation:sha256:1", AssetID: "missing"}}}})
+	if len(got.Observations) != 0 || len(got.Errors) != 1 || got.Errors[0].Code != "orphan-observation" {
+		t.Fatalf("inventory=%+v", got)
+	}
+	encoded, err := json.Marshal(got.Errors[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "missing") {
+		t.Fatalf("orphan error leaked asset identity: %s", encoded)
+	}
+}
+
+func TestBuildNormalizesDuplicateObservationIDConflict(t *testing.T) {
+	asset := model.Asset{ID: "asset"}
+	first := model.Observation{ID: "observation:sha256:1", AssetID: asset.ID, Collector: "mcp", Scope: model.ScopeProject, LocationRef: "$HOME/alpha"}
+	second := model.Observation{ID: first.ID, AssetID: asset.ID, Collector: "mcp", Scope: model.ScopeProject, LocationRef: "$HOME/zulu"}
+
+	got := Build([]model.CollectorResult{{Assets: []model.Asset{asset}, Observations: []model.Observation{second, first}}})
+	if !reflect.DeepEqual(got.Observations, []model.Observation{first}) {
+		t.Fatalf("observations=%+v", got.Observations)
+	}
+	if len(got.Errors) != 1 || got.Errors[0].Code != "observation-conflict" || got.Errors[0].Path != wantObservationConflictFingerprint(first.ID) {
+		t.Fatalf("errors=%+v", got.Errors)
+	}
+	encoded, err := json.Marshal(got.Errors[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"alpha", "zulu", first.ID} {
+		if strings.Contains(string(encoded), raw) {
+			t.Fatalf("observation conflict leaked %q: %s", raw, encoded)
+		}
+	}
+}
+
 func TestDiffIgnoresOnlyDefinedObservationTimesAndSortsByAssetID(t *testing.T) {
 	previous := model.Inventory{Assets: []model.Asset{
 		{ID: "d", Name: "removed"},
@@ -182,6 +229,19 @@ func TestDiffTreatsOrdinaryMetadataAsSecurityRelevant(t *testing.T) {
 	}
 }
 
+func TestDiffReportsObservationOnlyChange(t *testing.T) {
+	before := model.Inventory{Observations: []model.Observation{{ID: "observation:sha256:1", AssetID: "a", Collector: "mcp", Scope: model.ScopeUser, LocationRef: "$HOME/a"}}}
+	after := model.Inventory{Observations: []model.Observation{{ID: "observation:sha256:2", AssetID: "a", Collector: "mcp", Scope: model.ScopeUser, LocationRef: "$HOME/b"}}}
+	got := Diff(before, after)
+	want := []model.Change{
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityObservation, EntityID: "observation:sha256:1"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityObservation, EntityID: "observation:sha256:2"},
+	}
+	if !reflect.DeepEqual(got.Changes, want) {
+		t.Fatalf("changes=%+v", got.Changes)
+	}
+}
+
 func cloneCollectorResults(in []model.CollectorResult) []model.CollectorResult {
 	out := make([]model.CollectorResult, len(in))
 	for index, result := range in {
@@ -196,6 +256,18 @@ func cloneCollectorResults(in []model.CollectorResult) []model.CollectorResult {
 			}
 		}
 		out[index].Relationships = append([]model.Relationship(nil), result.Relationships...)
+		out[index].Observations = append([]model.Observation(nil), result.Observations...)
+		for observationIndex := range out[index].Observations {
+			if result.Observations[observationIndex].Consumers != nil {
+				out[index].Observations[observationIndex].Consumers = append([]string(nil), result.Observations[observationIndex].Consumers...)
+			}
+			if result.Observations[observationIndex].Metadata != nil {
+				out[index].Observations[observationIndex].Metadata = make(map[string]string, len(result.Observations[observationIndex].Metadata))
+				for key, value := range result.Observations[observationIndex].Metadata {
+					out[index].Observations[observationIndex].Metadata[key] = value
+				}
+			}
+		}
 		out[index].Errors = append([]model.CoverageError(nil), result.Errors...)
 	}
 	return out
@@ -205,4 +277,9 @@ func wantConflictFingerprintPath(assetID, metadataKey string) string {
 	assetDigest := sha256.Sum256([]byte(assetID))
 	keyDigest := sha256.Sum256([]byte(metadataKey))
 	return fmt.Sprintf("asset-sha256:%x/metadata-key-sha256:%x", assetDigest, keyDigest)
+}
+
+func wantObservationConflictFingerprint(observationID string) string {
+	digest := sha256.Sum256([]byte(observationID))
+	return fmt.Sprintf("observation-id-sha256:%x", digest)
 }
