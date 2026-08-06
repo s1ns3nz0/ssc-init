@@ -278,6 +278,7 @@ type LocalEvidenceTarget struct {
     ObservationID string
     Kind          EvidenceKind
     Subject       string
+    PresetStatus  EvidenceStatus
     RootPath      string
     RelativePath  string
     Provenance    any
@@ -289,6 +290,11 @@ configured project root and `RelativePath` is the path below that root. For a
 semantic kind, both path fields are empty and the engine canonicalizes the
 referenced normalized observation; collectors do not hand arbitrary semantic
 bytes to the engine.
+
+`PresetStatus` is empty for attempted local evidence. It may be
+`unsupported` or `skipped` only when the immutable catalog requires a visible
+terminal record but deliberately supplies no path. Preset targets cannot carry
+paths, anchor data, or a digest. Other preset values are rejected.
 
 Targets are accepted only when:
 
