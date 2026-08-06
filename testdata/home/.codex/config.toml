@@ -1,0 +1,8 @@
+[mcp_servers.codex_user_local]
+command = "fake-codex-mcp"
+args = ["--mode", "fixture"]
+env = { FIXTURE_TOKEN = "placeholder-value" }
+
+[mcp_servers.codex_user_remote]
+url = "https://codex-user.invalid/mcp"
+http_headers = { X-Fixture = "placeholder-value" }

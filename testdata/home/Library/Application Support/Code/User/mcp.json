@@ -1,0 +1,7 @@
+{
+  "servers": {
+    "vscode-user": {
+      "url": "https://vscode-user.invalid/mcp"
+    }
+  }
+}

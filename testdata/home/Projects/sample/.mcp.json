@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "shared-project": {
+      "url": "https://shared-project.invalid/mcp"
+    }
+  }
+}

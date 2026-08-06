@@ -2,21 +2,23 @@
 
 **Initialize Your Software Supply Chain Security.**
 
-SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain on macOS. The current foundation scans the current user's developer environment across the laptop, records an immutable local baseline, and reports explicit collection coverage.
+SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain. The current foundation provides macOS local inventory within versioned developer-tool catalogs and configured project roots, records a local baseline, and reports explicit target coverage.
 
-This foundation is not an EDR. It installs no daemon or kernel sensor, does not continuously monitor processes or files, and does not scan arbitrary personal data. Inventory and detection results are not a guarantee that an asset is safe; missing or failed coverage is reported as partial rather than silently treated as success.
+This foundation is not an EDR. There is no daemon, kernel sensor, arbitrary personal-file scan, malware verdict, or safety guarantee. It does not continuously monitor processes or files. Missing or failed coverage remains visible instead of being silently treated as success.
 
 ## Current coverage
 
 The baseline collector inventories:
 
-- Claude, Codex, Cursor, Windsurf, and other supported fixed agent configuration, plugin, and skill paths;
+- manifest-backed plugins and skills found in supported fixed Claude, Codex, and Cursor catalog paths;
 - user-level and project-level MCP configurations and their declared commands or endpoints;
 - VS Code, Cursor, Windsurf, and JetBrains extensions;
-- global developer package ecosystems and tools when their optional commands are available; and
+- global developer package ecosystems and Docker only when command probes are explicitly enabled; and
 - projects under bounded configured roots, including recognized manifests and lockfiles.
 
-Project policies and first-party rules are intended to use Git-managed YAML in later implementation slices. This foundation does not yet provide policy enforcement, blocking, threat-intelligence updates, signing/notarization, continuous monitoring, or host-specific Claude/Codex/Cursor adapters.
+Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed.
+
+Plugin/project content hashing, threat intelligence (TI), Git-managed policy, organization integrations, host adapters, warnings, and blocking remain later programs.
 
 ## Commands
 
@@ -26,10 +28,12 @@ All current commands return JSON:
 ssc-init version --json
 ssc-init doctor --json
 ssc-init scan --baseline --json
+ssc-init scan --baseline --json --external-probes
+ssc-init scan --baseline --json --project-root '$HOME/Projects' --project-root '$HOME/Developer'
 ssc-init status --json
 ```
 
-`doctor` reports runtime and optional-tool availability without reading asset contents. `scan --baseline` performs read-only discovery and persists one baseline. `status` reads the latest local inventory.
+`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery and persists one baseline. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted full inventory snapshot.
 
 State is local-first and stored at:
 
@@ -37,7 +41,7 @@ State is local-first and stored at:
 $HOME/Library/Application Support/SSC Init/state.db
 ```
 
-The executable has no mandatory runtime installation or external runtime dependencies. Optional developer tools only enrich their corresponding inventory coverage.
+The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity of the executable used; it does not make that executable trusted.
 
 ## Download and verify
 

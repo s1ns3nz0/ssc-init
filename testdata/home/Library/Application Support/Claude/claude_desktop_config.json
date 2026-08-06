@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "claude-desktop": {
+      "url": "https://claude-desktop.invalid/mcp",
+      "headers": {
+        "X-Fixture": "placeholder-value"
+      }
+    }
+  }
+}

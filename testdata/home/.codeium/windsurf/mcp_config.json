@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "windsurf-user": {
+      "command": "fake-windsurf-mcp",
+      "args": ["--mode", "fixture"]
+    }
+  }
+}

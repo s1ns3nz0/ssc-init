@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "copilot-user": {
+      "url": "https://copilot-user.invalid/mcp"
+    }
+  }
+}

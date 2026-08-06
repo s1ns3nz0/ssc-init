@@ -1,0 +1,6 @@
+[mcp_servers.codex_project_local]
+command = "fake-codex-project-mcp"
+args = ["--mode", "fixture"]
+
+[mcp_servers.codex_project_remote]
+url = "https://codex-project.invalid/mcp"

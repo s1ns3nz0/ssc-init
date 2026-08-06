@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude-user": {
+      "command": "fake-claude-mcp",
+      "args": ["--mode", "fixture"],
+      "env": {
+        "FIXTURE_TOKEN": "fixture-secret"
+      }
+    }
+  }
+}

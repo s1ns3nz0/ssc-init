@@ -3,10 +3,9 @@
     "filesystem": {
       "command": "$HOME/.local/bin/filesystem-mcp",
       "args": [
-        "--token",
-        "fixture-secret",
-        "--root=$HOME/Projects",
-        "https://alice:fixture-secret@example.test/rpc?api_key=fixture-secret&mode=safe"
+        "--mode",
+        "fixture",
+        "--root=$HOME/Projects"
       ],
       "env": {
         "GITHUB_TOKEN": "fixture-secret"

@@ -1,7 +1,7 @@
 {
   "servers": {
     "workspace": {
-      "url": "https://workspace.example.test/mcp"
+      "url": "https://workspace.invalid/mcp"
     }
   }
 }

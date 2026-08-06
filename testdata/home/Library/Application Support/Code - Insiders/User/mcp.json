@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "vscode-insiders-user": {
+      "command": "fake-vscode-insiders-mcp",
+      "args": ["--mode", "fixture"]
+    }
+  }
+}

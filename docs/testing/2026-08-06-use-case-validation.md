@@ -221,3 +221,40 @@ High statement coverage does not imply correct product scope. Most false negativ
 - [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
 - [VS Code extension locations and marketplace](https://code.visualstudio.com/docs/configure/extensions/extension-marketplace)
 - [JetBrains plugin management](https://www.jetbrains.com/help/idea/managing-plugins.html)
+
+## Revalidation — 2026-08-06
+
+The inventory trust foundation was revalidated after the implementation range `8cc39c1^..518e577`. Task 13's official matrix, synthetic fixtures, and corrected public claims are recorded by the commit named `test: validate trustworthy inventory scope` that contains this section. The original evidence above is preserved as the pre-implementation baseline.
+
+Exact acceptance and release commands:
+
+```sh
+go test ./internal/acceptance -run 'TestOfficialCatalogMatrix|TestV2BaselineReopenStatus' -count=1
+gofmt -w cmd internal
+go test -race -count=1 ./...
+go vet ./...
+go mod verify
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/ssc-init-linux-compile-guard ./cmd/ssc-init
+git diff --check
+rg -n 'across the laptop|laptop-wide|all plugins|must-not-persist|super-secret|Bearer secret' README.md docs internal testdata
+go test ./scripts -count=1
+sh scripts/build-darwin.sh
+file dist/ssc-init-darwin-arm64 dist/ssc-init-darwin-amd64
+shasum -a 256 -c dist/checksums.txt
+./dist/ssc-init-darwin-$(go env GOARCH) version --json
+git status --short
+```
+
+### Closed gaps
+
+Only these five gaps are closed by this foundation:
+
+1. **Truthful target coverage** — every versioned catalog target is reported with explicit target status; unsupported and bounded expanded surfaces remain visible.
+2. **Occurrence preservation** — same-name MCP, same-extension-location, and same-package multi-manager occurrences persist as distinct observations.
+3. **Official local catalog parsing** — the isolated matrix covers every user and project MCP path in the approved catalog, both JSON container spellings, and Codex TOML stdio and HTTP.
+4. **External-probe opt-in and evidence** — package and Docker commands are skipped by default; enabled fake probes retain executable identity evidence and fixed command provenance.
+5. **Non-Darwin rejection** — operational commands reject unsupported systems before home-path or state initialization.
+
+### Open programs
+
+Content hashing and provenance remain open, including plugin/project payload hashes and immutable Docker digest evidence. Threat intelligence, Git-managed policy, organizational integrations, host adapters, warnings, and blocking also remain open. This revalidation makes no malware verdict and does not claim that inventoried assets are safe.

@@ -28,7 +28,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	env := testutil.Environment(t, "../../testdata/home")
 	env.Platform = "darwin"
 	env.Scope = model.ScanScope{ProjectRoots: []string{"$HOME/Projects"}}
-	env.FS = fixtureFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
+	env.FS = &matrixFileSystem{OSFileSystem: platform.OSFileSystem{}, root: env.Home}
 	roots, err := projects.ResolveRoots(env.Home, env.Scope.ProjectRoots)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 			agents.New(), ide.New(), projects.New(roots), packages.New(),
 		},
 	}
-	databasePath := filepath.Join(privateAcceptanceTempDir(t), "state.db")
+	databasePath := filepath.Join(privateMatrixTempDir(t), "state.db")
 	snapshots, err := store.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	foundProjectMCPObservation := false
 	for _, observation := range latest.Observations {
 		if observation.AssetID == "mcp:vscode:workspace" {
-			if foundProjectMCPObservation || observation.Collector != "mcp" || observation.Host != "vscode" || !reflect.DeepEqual(observation.Consumers, []string{"vscode"}) || observation.Scope != model.ScopeProject || observation.Source != "mcp.vscode.project" || observation.LocationRef != "$HOME/Projects/sample/.vscode/mcp.json" || observation.Metadata["transport"] != "http" || observation.Metadata["url_shape"] != "https://workspace.example.test/mcp" || observation.Metadata["source_target"] != "mcp.vscode.project" {
+			if foundProjectMCPObservation || observation.Collector != "mcp" || observation.Host != "vscode" || !reflect.DeepEqual(observation.Consumers, []string{"vscode"}) || observation.Scope != model.ScopeProject || observation.Source != "mcp.vscode.project" || observation.LocationRef != "$HOME/Projects/sample/.vscode/mcp.json" || observation.Metadata["transport"] != "http" || observation.Metadata["url_shape"] != "https://workspace.invalid/mcp" || observation.Metadata["source_target"] != "mcp.vscode.project" {
 				t.Fatalf("non-canonical project MCP observation: %+v", observation)
 			}
 			foundProjectMCPObservation = true
@@ -177,7 +177,7 @@ func TestBaselinePersistsSameMCPServerFromTwoProjectsWithRealStore(t *testing.T)
 		Scope: model.ScanScope{ProjectRoots: projects.RootRefs(roots)},
 		FS:    platform.OSFileSystem{}, Runner: &testutil.FakeRunner{}, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
 	}
-	snapshots, err := store.Open(filepath.Join(privateAcceptanceTempDir(t), "state.db"))
+	snapshots, err := store.Open(filepath.Join(privateMatrixTempDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,16 +240,4 @@ func TestBaselinePersistsSameMCPServerFromTwoProjectsWithRealStore(t *testing.T)
 	if bytes.Contains(encoded, []byte("command-secret")) {
 		t.Fatalf("SQLite round trip retained command secret: %s", encoded)
 	}
-}
-
-func privateAcceptanceTempDir(t *testing.T) string {
-	t.Helper()
-	directory, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return directory
 }
