@@ -1,0 +1,6 @@
+[mcp_servers.remote]
+url = "https://example.invalid/mcp?mode=safe"
+http_headers = { X-Client = "http-secret-client", Authorization = "Bearer http-secret-token" }
+env_http_headers = { X-Region = "REGION_NAME", Authorization = "AUTH_HEADER_TOKEN" }
+bearer_token_env_var = "MCP_TOKEN"
+enabled_tools = ["search"]

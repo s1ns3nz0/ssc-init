@@ -1,0 +1,9 @@
+[mcp_servers.local]
+command = "uvx"
+args = ["demo", "--mode=safe"]
+cwd = "/tmp/work"
+enabled = false
+env = { Z_KEY = "stdio-secret-z", A_KEY = "stdio-secret-a" }
+env_vars = ["FORWARD_TOKEN", "HOME", "FORWARD_TOKEN"]
+enabled_tools = ["write", "read", "write"]
+disabled_tools = ["delete", "delete"]

@@ -1,0 +1,15 @@
+model = "unrelated-secret-model"
+
+[telemetry]
+future_option = "unrelated-secret-value"
+
+[mcp_servers.both]
+command = "bad-command"
+url = "https://bad.example.invalid/mcp"
+
+[mcp_servers.missing]
+enabled = true
+
+[mcp_servers.safe]
+command = "node"
+future_option = "unknown-secret-value"

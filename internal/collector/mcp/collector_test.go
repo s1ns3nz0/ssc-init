@@ -43,7 +43,7 @@ func TestMCPCollectorAdvertisesImmutableCatalog(t *testing.T) {
 	var _ func(...model.LocalTarget) collector.TargetedCollector = mcp.New
 }
 
-func TestMCPCollectorInventoriesEveryOfficialJSONUserPath(t *testing.T) {
+func TestMCPCollectorInventoriesEveryOfficialUserPath(t *testing.T) {
 	home := t.TempDir()
 	targets := []struct {
 		id        string
@@ -55,6 +55,7 @@ func TestMCPCollectorInventoriesEveryOfficialJSONUserPath(t *testing.T) {
 		{id: "mcp.claude-code.user", relative: ".claude.json", host: "claude-code", container: "mcpServers", consumers: []string{"claude-code"}},
 		{id: "mcp.claude-code.legacy-user", relative: ".claude/settings.json", host: "claude-code", container: "mcpServers", consumers: []string{"claude-code"}},
 		{id: "mcp.claude-desktop.user", relative: "Library/Application Support/Claude/claude_desktop_config.json", host: "claude-desktop", container: "mcpServers", consumers: []string{"claude-desktop"}},
+		{id: "mcp.codex.user", relative: ".codex/config.toml", host: "codex", consumers: []string{"codex"}},
 		{id: "mcp.cursor.user", relative: ".cursor/mcp.json", host: "cursor", container: "mcpServers", consumers: []string{"cursor"}},
 		{id: "mcp.windsurf.user", relative: ".codeium/windsurf/mcp_config.json", host: "windsurf", container: "mcpServers", consumers: []string{"windsurf"}},
 		{id: "mcp.windsurf.legacy-user", relative: ".windsurf/mcp.json", host: "windsurf", container: "mcpServers", consumers: []string{"windsurf"}},
@@ -63,11 +64,17 @@ func TestMCPCollectorInventoriesEveryOfficialJSONUserPath(t *testing.T) {
 		{id: "mcp.github-copilot.user", relative: ".copilot/mcp-config.json", host: "github-copilot", container: "mcpServers", consumers: []string{"github-copilot"}},
 	}
 	for _, target := range targets {
-		writeMCPFile(t, filepath.Join(home, filepath.FromSlash(target.relative)), `{"`+target.container+`":{"fixture":{"command":"tool"}}}`)
+		contents := `{"` + target.container + `":{"fixture":{"command":"tool"}}}`
+		if target.id == "mcp.codex.user" {
+			contents = `model = "unrelated-setting"
+[mcp_servers.fixture]
+command = "tool"
+env = { API_TOKEN = "toml-secret-marker" }
+env_vars = ["HOME"]
+`
+		}
+		writeMCPFile(t, filepath.Join(home, filepath.FromSlash(target.relative)), contents)
 	}
-	writeMCPFile(t, filepath.Join(home, ".codex", "config.toml"), `[mcp_servers.must_not_parse]
-command = "toml-secret-marker"
-`)
 
 	got := collectMCP(t, home)
 	if got.Status != model.CoveragePartial {
@@ -98,9 +105,6 @@ command = "toml-secret-marker"
 			t.Fatalf("project base target=%+v", target)
 		}
 	}
-	if target := assertTarget(t, got.Targets, "mcp.codex.user", ""); target.Status != model.TargetUnsupported {
-		t.Fatalf("Codex user target=%+v", target)
-	}
 	for _, unsupportedID := range []string{"mcp.dev-container", "mcp.dynamic-api", "mcp.environment-relocated", "mcp.profile-specific", "mcp.remote-user", "mcp.service-managed"} {
 		if target := assertTarget(t, got.Targets, unsupportedID, ""); target.Status != model.TargetUnsupported {
 			t.Fatalf("unsupported target=%+v", target)
@@ -112,6 +116,69 @@ command = "toml-secret-marker"
 	}
 	if bytes.Contains(encoded, []byte("toml-secret-marker")) || bytes.Contains(encoded, []byte(home)) {
 		t.Fatalf("private data persisted: %s", encoded)
+	}
+}
+
+func TestMCPCollectorInventoriesCodexProjectTOMLWithIssuedProvenance(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "Projects", "app", ".codex", "config.toml")
+	writeMCPFile(t, path, `
+[mcp_servers.remote]
+url = "https://example.invalid/mcp?mode=safe"
+http_headers = { Authorization = "Bearer project-header-secret" }
+env_http_headers = { X-Token = "PROJECT_HTTP_TOKEN" }
+bearer_token_env_var = "PROJECT_BEARER_TOKEN"
+`)
+	localTarget := projectTarget(t, home, path, "mcp.codex.project", "toml", "codex", []string{"codex"})
+
+	got := collectMCP(t, home, localTarget)
+	target := assertTarget(t, got.Targets, localTarget.TargetID, localTarget.InstanceRef)
+	if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 {
+		t.Fatalf("target=%+v", target)
+	}
+	asset := assertAsset(t, got.Assets, "mcp:codex:remote")
+	if asset.Type != model.AssetMCP || asset.Name != "remote" || asset.Source != "codex" {
+		t.Fatalf("asset=%+v", asset)
+	}
+	observation := assertObservation(t, got.Observations, asset.ID, localTarget.InstanceRef)
+	if observation.Scope != model.ScopeProject || observation.Source != "mcp.codex.project" || observation.Metadata["url_shape"] != "https://example.invalid/mcp?query_keys=mode" || observation.Metadata["header_keys"] != "Authorization,X-Token" || observation.Metadata["env_keys"] != "PROJECT_BEARER_TOKEN,PROJECT_HTTP_TOKEN" {
+		t.Fatalf("observation=%+v", observation)
+	}
+	assertJSONExcludes(t, got, "project-header-secret", "Bearer", path, home)
+}
+
+func TestMCPCollectorMarksOnlyCodexServerUnknownFieldPartial(t *testing.T) {
+	home := t.TempDir()
+	writeMCPFile(t, filepath.Join(home, ".codex", "config.toml"), `
+model = "unrelated-value"
+[unrelated]
+future = "unrelated-secret"
+
+[mcp_servers.safe]
+command = "node"
+future_option = "server-secret"
+`)
+
+	got := collectMCP(t, home)
+	target := assertTarget(t, got.Targets, "mcp.codex.user", "")
+	if target.Status != model.TargetPartial || target.Assets != 1 || target.Observations != 1 || !hasErrorCode(target.Errors, "unknown_server_field") {
+		t.Fatalf("target=%+v", target)
+	}
+	observation := assertObservation(t, got.Observations, "mcp:codex:safe", "$HOME/.codex/config.toml")
+	if observation.Metadata["unknown_fields"] != "future_option" {
+		t.Fatalf("metadata=%+v", observation.Metadata)
+	}
+	assertJSONExcludes(t, got, "server-secret", "unrelated-secret", "unrelated-value")
+}
+
+func TestMCPCollectorMarksMalformedCodexTOMLPartial(t *testing.T) {
+	home := t.TempDir()
+	writeMCPFile(t, filepath.Join(home, ".codex", "config.toml"), "[mcp_servers.broken\ncommand = \"node\"\n")
+
+	got := collectMCP(t, home)
+	target := assertTarget(t, got.Targets, "mcp.codex.user", "")
+	if target.Status != model.TargetPartial || !hasErrorCode(target.Errors, "config_invalid") || target.Assets != 0 || target.Observations != 0 {
+		t.Fatalf("target=%+v", target)
 	}
 }
 

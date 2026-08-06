@@ -172,7 +172,7 @@ func collectReadEvidence(result *model.CollectorResult, home, locationRef string
 		return
 	}
 
-	parsed, err := parseJSONContainer(read.contents, declaration.container)
+	parsed, err := parseConfig(read.contents, declaration)
 	if err != nil {
 		target.Status = model.TargetPartial
 		target.Errors = append(target.Errors, coverageError("config_invalid", "MCP configuration is invalid", locationRef))
@@ -198,6 +198,17 @@ func collectReadEvidence(result *model.CollectorResult, home, locationRef string
 		target.Observations++
 	}
 	result.Targets = append(result.Targets, target)
+}
+
+func parseConfig(contents []byte, declaration targetDeclaration) (ParseResult, error) {
+	switch declaration.spec.Format {
+	case "json":
+		return parseJSONContainer(contents, declaration.container)
+	case "toml":
+		return ParseTOML(contents)
+	default:
+		return ParseResult{}, errInvalidConfig
+	}
 }
 
 func projectInstanceRef(declaration targetDeclaration, locationRef string) string {
