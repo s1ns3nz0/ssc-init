@@ -35,9 +35,9 @@ type CollectorResult struct {
 // Inventory is a normalized asset graph.
 type Inventory struct {
 	Assets        []Asset         `json:"assets"`
+	Observations  []Observation   `json:"observations,omitempty"`
 	Relationships []Relationship  `json:"relationships"`
 	Errors        []CoverageError `json:"errors,omitempty"`
-	Observations  []Observation   `json:"observations,omitempty"`
 }
 
 // ChangeKind identifies how an asset changed from the previous inventory.

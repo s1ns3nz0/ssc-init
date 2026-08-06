@@ -16,6 +16,8 @@ import (
 // snapshot contains a high-confidence credential shape.
 var ErrSensitiveSnapshot = errors.New("snapshot contains sensitive data")
 
+var errUnsafeSnapshotPath = errors.New("snapshot contains unsafe path reference")
+
 var safeKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
@@ -40,7 +42,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 		}
 	}
 	for _, projectRoot := range scan.Scope.ProjectRoots {
-		if err := validateOptionalString("scan scope project root", projectRoot); err != nil {
+		if err := validatePersistenceSafePath("scan scope project root", projectRoot); err != nil {
 			return err
 		}
 	}
@@ -144,7 +146,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 			if err := validateRequiredString("target id", target.TargetID); err != nil {
 				return err
 			}
-			if err := validateOptionalString("target instance reference", target.InstanceRef); err != nil {
+			if err := validatePersistenceSafePath("target instance reference", target.InstanceRef); err != nil {
 				return err
 			}
 			if !validTargetStatus(target.Status) {
@@ -169,11 +171,14 @@ func validateAsset(asset model.Asset) error {
 	}
 	for field, value := range map[string]string{
 		"asset type": string(asset.Type), "asset name": asset.Name, "asset version": asset.Version,
-		"asset path": asset.Path, "asset source": asset.Source, "asset sha256": asset.SHA256,
+		"asset source": asset.Source, "asset sha256": asset.SHA256,
 	} {
 		if err := validateOptionalString(field, value); err != nil {
 			return err
 		}
+	}
+	if err := validatePersistenceSafePath("asset path", asset.Path); err != nil {
+		return err
 	}
 	return validateMetadata("asset", asset.Metadata)
 }
@@ -192,6 +197,9 @@ func validateObservation(observation model.Observation) error {
 	}
 	if !validObservationScope(observation.Scope) {
 		return errors.New("invalid observation scope")
+	}
+	if err := validatePersistenceSafePath("observation location ref", observation.LocationRef); err != nil {
+		return err
 	}
 	for field, value := range map[string]string{
 		"observation host":       observation.Host,
@@ -228,6 +236,9 @@ func validateMetadata(owner string, metadata map[string]string) error {
 		if err := validateOptionalString(owner+" metadata value", value); err != nil {
 			return err
 		}
+		if metadataKeyCarriesPath(key) && containsRawPOSIXAbsolutePath(value) {
+			return errUnsafeSnapshotPath
+		}
 	}
 	return nil
 }
@@ -252,7 +263,70 @@ func validateCoverageError(coverageError model.CoverageError) error {
 	if err := validateRequiredString("coverage error message", coverageError.Message); err != nil {
 		return err
 	}
-	return validateOptionalString("coverage error path", coverageError.Path)
+	return validatePersistenceSafePath("coverage error path", coverageError.Path)
+}
+
+func validatePersistenceSafePath(field, value string) error {
+	if err := validateOptionalString(field, value); err != nil {
+		return err
+	}
+	if containsRawPOSIXAbsolutePath(value) {
+		return errUnsafeSnapshotPath
+	}
+	return nil
+}
+
+func metadataKeyCarriesPath(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(key))
+	switch normalized {
+	case "args", "command", "entry_point", "path", "ref", "symlink_chain":
+		return true
+	default:
+		return strings.HasSuffix(normalized, "_path") || strings.HasSuffix(normalized, "_paths") ||
+			strings.HasSuffix(normalized, "_ref") || strings.HasSuffix(normalized, "_refs")
+	}
+}
+
+func containsRawPOSIXAbsolutePath(value string) bool {
+	for _, token := range strings.FieldsFunc(value, func(character rune) bool {
+		return character == '\x1f' || character == '\n' || character == '\r' || character == '\t' || character == ' '
+	}) {
+		if tokenCarriesRawPOSIXAbsolutePath(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenCarriesRawPOSIXAbsolutePath(token string) bool {
+	token = strings.TrimLeft(token, `"'([{`)
+	if token == "" || hasReferenceScheme(token) {
+		return false
+	}
+	if strings.HasPrefix(token, "/") {
+		return true
+	}
+	if _, assigned, found := strings.Cut(token, "="); found {
+		return tokenCarriesRawPOSIXAbsolutePath(assigned)
+	}
+	return false
+}
+
+func hasReferenceScheme(value string) bool {
+	colon := strings.IndexByte(value, ':')
+	if colon < 1 {
+		return false
+	}
+	for index, character := range value[:colon] {
+		if index == 0 && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+			return false
+		}
+		if index > 0 && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') && character != '+' && character != '-' && character != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRequiredString(field, value string) error {

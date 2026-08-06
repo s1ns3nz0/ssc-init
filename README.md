@@ -13,8 +13,7 @@ The baseline collector inventories:
 - manifest-backed plugins and skills found in supported fixed Claude, Codex, and Cursor catalog paths;
 - user-level and project-level MCP configurations and their declared commands or endpoints;
 - VS Code, Cursor, Windsurf, and JetBrains extensions;
-- global developer package ecosystems and Docker only when command probes are explicitly enabled; and
-- projects under bounded configured roots, including recognized manifests and lockfiles.
+- global developer package ecosystems and Docker only when command probes are explicitly enabled.
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed.
 

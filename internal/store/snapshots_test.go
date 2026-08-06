@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -968,6 +969,107 @@ func TestSaveRejectsInvalidShapeWithoutRows(t *testing.T) {
 	assertNoSnapshotRows(t, s)
 }
 
+func TestValidateSnapshotRejectsRawAbsolutePersistedPathFields(t *testing.T) {
+	for _, testCase := range persistedRawPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			scan, inventory := persistenceSafePathFixture()
+			testCase.mutate(&scan, &inventory, persistedRawPathSentinel)
+			err := validateSnapshot(scan, inventory)
+			if err == nil {
+				t.Fatal("raw absolute path unexpectedly validated")
+			}
+			if strings.Contains(err.Error(), persistedRawPathSentinel) {
+				t.Fatalf("validation error exposed raw path: %v", err)
+			}
+		})
+	}
+}
+
+func TestSaveRejectsRawAbsolutePersistedPathFieldsAtomicallyWithoutPersistingBytes(t *testing.T) {
+	for _, testCase := range persistedRawPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan, inventory := persistenceSafePathFixture()
+			testCase.mutate(&scan, &inventory, persistedRawPathSentinel)
+
+			err := s.SaveScan(context.Background(), scan, inventory)
+			if err == nil {
+				t.Fatal("raw absolute path unexpectedly saved")
+			}
+			if strings.Contains(err.Error(), persistedRawPathSentinel) {
+				t.Fatalf("save error exposed raw path: %v", err)
+			}
+			assertNoSnapshotRows(t, s)
+			assertSQLiteFilesExclude(t, s.Path(), persistedRawPathSentinel)
+		})
+	}
+}
+
+func TestLatestSnapshotRejectsManuallyCorruptedRawAbsolutePersistedPathFields(t *testing.T) {
+	for _, testCase := range persistedRawPathCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan, inventory := persistenceSafePathFixture()
+			if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(&scan, &inventory, persistedRawPathSentinel)
+			corruptPersistedPathCase(t, s, testCase.storage, scan, inventory)
+
+			_, ok, err := s.LatestSnapshot(context.Background())
+			if err == nil || ok {
+				t.Fatalf("ok=%v error=%v", ok, err)
+			}
+			if strings.Contains(err.Error(), persistedRawPathSentinel) {
+				t.Fatalf("load error exposed raw path: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *testing.T) {
+	digestRef := "external-ide/path-sha256:" + strings.Repeat("a", 64)
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*model.ScanResult, *model.Inventory)
+	}{
+		{name: "home project root", mutate: func(scan *model.ScanResult, _ *model.Inventory) { scan.Scope.ProjectRoots[0] = "$HOME/Projects" }},
+		{name: "generic external project root", mutate: func(scan *model.ScanResult, _ *model.Inventory) { scan.Scope.ProjectRoots[0] = "external-root-1" }},
+		{name: "home location reference", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].LocationRef = "$HOME/.tool"
+		}},
+		{name: "hashed location reference", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].LocationRef = digestRef
+		}},
+		{name: "generic probe reference", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].LocationRef = "probe-target:packages.pip"
+		}},
+		{name: "relative manifest path", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["manifest_path"] = "extension/package.json"
+		}},
+		{name: "relative entrypoint", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "dist/extension.js"
+		}},
+		{name: "URL entrypoint", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "https://example.test/Volumes/extension.js;mode=/Volumes/safe"
+		}},
+		{name: "PURL metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0"
+		}},
+		{name: "command basename", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["command"] = "python3"
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			scan, inventory := persistenceSafePathFixture()
+			testCase.mutate(&scan, &inventory)
+			if err := validateSnapshot(scan, inventory); err != nil {
+				t.Fatalf("safe reference rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestLatestInventoryRejectsDeletedSnapshotRows(t *testing.T) {
 	deletions := []struct {
 		name       string
@@ -1228,4 +1330,138 @@ func testScan(id string, finishedAt time.Time) model.ScanResult {
 
 func errorsIsContext(err error) bool {
 	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+const persistedRawPathSentinel = "/Volumes/ssc-init-final-review-private-marker"
+
+type persistedPathCase struct {
+	name    string
+	storage string
+	mutate  func(*model.ScanResult, *model.Inventory, string)
+}
+
+func persistedRawPathCases() []persistedPathCase {
+	return []persistedPathCase{
+		{name: "scope project root", storage: "scope", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Scope.ProjectRoots[0] = raw }},
+		{name: "inventory asset path", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) { inventory.Assets[0].Path = raw }},
+		{name: "inventory asset manifest metadata", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Assets[0].Metadata["manifest_path"] = raw
+		}},
+		{name: "inventory asset entrypoint metadata", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Assets[0].Metadata["entry_point"] = raw
+		}},
+		{name: "inventory observation location", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].LocationRef = raw
+		}},
+		{name: "inventory observation root metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["root_ref"] = raw
+		}},
+		{name: "inventory observation cwd metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["cwd_ref"] = raw
+		}},
+		{name: "inventory observation symlink metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["symlink_chain"] = "$HOME/bin/tool\x1f" + raw
+		}},
+		{name: "inventory observation command metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["command"] = "runner " + raw
+		}},
+		{name: "inventory observation args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = "--root=" + raw
+		}},
+		{name: "inventory error path", storage: "inventory-error", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) { inventory.Errors[0].Path = raw }},
+		{name: "coverage asset path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Coverage[0].Assets[0].Path = raw }},
+		{name: "coverage asset metadata", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Assets[0].Metadata["manifest_path"] = raw
+		}},
+		{name: "coverage observation location", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Observations[0].LocationRef = raw
+		}},
+		{name: "coverage observation metadata", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Observations[0].Metadata["cwd_ref"] = raw
+		}},
+		{name: "coverage result error path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Coverage[0].Errors[0].Path = raw }},
+		{name: "coverage target instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = raw
+		}},
+		{name: "coverage target error path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].Errors[0].Path = raw
+		}},
+	}
+}
+
+func persistenceSafePathFixture() (model.ScanResult, model.Inventory) {
+	scan := testScan("path-validation", time.Unix(2, 0).UTC())
+	scan.Scope = model.ScanScope{
+		Platform: "darwin", CatalogVersion: "ssc-init.catalog.v1", ProjectRoots: []string{"$HOME/Projects"},
+	}
+	scan.Coverage = []model.CollectorResult{{
+		Collector: "packages", Status: model.CoverageComplete,
+		Assets: []model.Asset{{ID: "coverage-asset", Type: model.AssetTool, Name: "coverage", Metadata: map[string]string{"manifest_path": "bin/tool"}}},
+		Observations: []model.Observation{{
+			ID: "coverage-observation", AssetID: "coverage-asset", Collector: "packages",
+			Scope: model.ScopeToolEnvironment, LocationRef: "$HOME/bin/coverage", Metadata: map[string]string{"cwd_ref": "config-relative/work"},
+		}},
+		Errors: []model.CoverageError{{Code: "coverage-warning", Message: "coverage warning", Path: "relative/evidence"}},
+		Targets: []model.TargetCoverage{{
+			TargetID: "packages.pip", InstanceRef: "probe-target:packages.pip", Status: model.TargetPartial,
+			Assets: 1, Observations: 1, Errors: []model.CoverageError{{Code: "target-warning", Message: "target warning", Path: "$HOME/bin/python3"}},
+		}},
+	}}
+	inventory := model.Inventory{
+		Assets: []model.Asset{{ID: "inventory-asset", Type: model.AssetTool, Name: "inventory", Metadata: map[string]string{"manifest_path": "bin/tool"}}},
+		Observations: []model.Observation{{
+			ID: "inventory-observation", AssetID: "inventory-asset", Collector: "packages",
+			Scope: model.ScopeToolEnvironment, LocationRef: "$HOME/bin/inventory", Metadata: map[string]string{"cwd_ref": "config-relative/work"},
+		}},
+		Errors: []model.CoverageError{{Code: "inventory-warning", Message: "inventory warning", Path: "relative/evidence"}},
+	}
+	return scan, inventory
+}
+
+func corruptPersistedPathCase(t *testing.T, s *Store, storage string, scan model.ScanResult, inventory model.Inventory) {
+	t.Helper()
+	var statement string
+	var encoded []byte
+	var err error
+	switch storage {
+	case "scope":
+		statement = `UPDATE scans SET scope_json = ? WHERE id = ?`
+		encoded, err = json.Marshal(scan.Scope)
+	case "inventory-asset":
+		statement = `UPDATE assets SET asset_json = ? WHERE scan_id = ?`
+		encoded, err = json.Marshal(inventory.Assets[0])
+	case "inventory-observation":
+		statement = `UPDATE observations SET observation_json = ? WHERE scan_id = ?`
+		encoded, err = json.Marshal(inventory.Observations[0])
+	case "inventory-error":
+		statement = `UPDATE inventory_errors SET error_json = ? WHERE scan_id = ?`
+		encoded, err = json.Marshal(inventory.Errors[0])
+	case "coverage":
+		statement = `UPDATE coverage SET result_json = ? WHERE scan_id = ?`
+		encoded, err = encodeCoverage(scan.Coverage[0])
+	default:
+		t.Fatalf("unknown storage %q", storage)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(statement, encoded, scan.ScanID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSQLiteFilesExclude(t *testing.T, databasePath, forbidden string) {
+	t.Helper()
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm"} {
+		contents, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(contents, []byte(forbidden)) {
+			t.Fatalf("raw path persisted in %s", filepath.Base(path))
+		}
+	}
 }

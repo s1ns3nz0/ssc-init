@@ -821,16 +821,40 @@ func TestPackageParsersReportLossInsteadOfSilentlyDroppingRecords(t *testing.T) 
 	}
 }
 
-func TestSuccessfulEmptyDiscoveryOutputsAreParserLoss(t *testing.T) {
+func TestPipAndPipxAcceptPresentEmptyContainers(t *testing.T) {
 	env := testutil.Environment(t, t.TempDir())
 	for _, testCase := range []struct {
 		name, stdout string
 		parse        func(context.Context, collector.Environment, string) ([]model.Asset, error)
 	}{
-		{name: "npm", stdout: " \n", parse: parseNPM},
 		{name: "pip", stdout: `[]`, parse: parsePip},
 		{name: "pipx", stdout: `{"venvs":{}}`, parse: parsePipx},
-		{name: "go", stdout: " \n", parse: parseGoPath},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assets, err := testCase.parse(context.Background(), env, testCase.stdout)
+			if len(assets) != 0 || err != nil {
+				t.Fatalf("assets=%+v error=%v", assets, err)
+			}
+		})
+	}
+}
+
+func TestShapeLessEmptyDiscoveryOutputsAreParserLoss(t *testing.T) {
+	env := testutil.Environment(t, t.TempDir())
+	for _, testCase := range []struct {
+		name, stdout string
+		parse        func(context.Context, collector.Environment, string) ([]model.Asset, error)
+	}{
+		{name: "npm empty bytes", stdout: " \n", parse: parseNPM},
+		{name: "pip empty bytes", stdout: " \n", parse: parsePip},
+		{name: "pip null", stdout: `null`, parse: parsePip},
+		{name: "pip wrong container", stdout: `{}`, parse: parsePip},
+		{name: "pipx empty bytes", stdout: " \n", parse: parsePipx},
+		{name: "pipx null", stdout: `null`, parse: parsePipx},
+		{name: "pipx missing container", stdout: `{}`, parse: parsePipx},
+		{name: "pipx null container", stdout: `{"venvs":null}`, parse: parsePipx},
+		{name: "pipx wrong container", stdout: `{"venvs":[]}`, parse: parsePipx},
+		{name: "go empty bytes", stdout: " \n", parse: parseGoPath},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			assets, err := testCase.parse(context.Background(), env, testCase.stdout)
@@ -838,6 +862,65 @@ func TestSuccessfulEmptyDiscoveryOutputsAreParserLoss(t *testing.T) {
 				t.Fatalf("assets=%+v error=%v", assets, err)
 			}
 		})
+	}
+}
+
+func TestEmptyPipAndPipxTargetsRemainCompleteWithOnlyExecutableEvidence(t *testing.T) {
+	home := t.TempDir()
+	pythonPath := filepath.Join(home, "bin", "python3")
+	pipxPath := filepath.Join(home, "bin", "pipx")
+	events := []string{}
+	inspector := &fakeInspector{
+		events: &events,
+		evidence: map[string]platform.ExecutableEvidence{
+			"python3": {Command: "python3", Path: pythonPath, LocationRef: "$HOME/bin/python3", SHA256: strings.Repeat("4", 64), Mode: 0o755},
+			"pipx":    {Command: "pipx", Path: pipxPath, LocationRef: "$HOME/bin/pipx", SHA256: strings.Repeat("5", 64), Mode: 0o755},
+		},
+		errors: missingInspectorErrors("python3", "pipx"),
+	}
+	runner := &recordingRunner{events: &events, results: map[string]platform.CommandResult{
+		commandKey(pythonPath, "-m", "pip", "list", "--format=json"): {Stdout: `[]`},
+		commandKey(pipxPath, "list", "--json"):                       {Stdout: `{"venvs":{}}`},
+	}}
+	env := testutil.Environment(t, home)
+	env.Scope.ExternalProbes = true
+	env.Inspector = inspector
+	env.Runner = runner
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, targetID := range []string{"packages.pip", "packages.pipx"} {
+		var target model.TargetCoverage
+		for _, candidate := range got.Targets {
+			if candidate.TargetID == targetID {
+				target = candidate
+				break
+			}
+		}
+		if target.TargetID == "" {
+			t.Fatalf("missing target %s", targetID)
+		}
+		if target.Status != model.TargetComplete || target.Assets != 1 || target.Observations != 1 || len(target.Errors) != 0 {
+			t.Fatalf("target %s=%+v", targetID, target)
+		}
+	}
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors=%+v", got.Errors)
+	}
+	for _, asset := range got.Assets {
+		if asset.Type == model.AssetPackage {
+			t.Fatalf("empty target emitted package asset: %+v", asset)
+		}
+	}
+	wantEvents := []string{
+		"inspect:npm",
+		"inspect:python3", "run:" + commandKey(pythonPath, "-m", "pip", "list", "--format=json"), "verify:python3",
+		"inspect:pipx", "run:" + commandKey(pipxPath, "list", "--json"), "verify:pipx",
+	}
+	if len(events) < len(wantEvents) || !reflect.DeepEqual(events[:len(wantEvents)], wantEvents) {
+		t.Fatalf("events=%q wantPrefix=%q", events, wantEvents)
 	}
 }
 

@@ -561,9 +561,9 @@ func parsePip(ctx context.Context, _ collector.Environment, stdout string) ([]mo
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &packages); err != nil {
-		return nil, err
+		return nil, errParserLoss
 	}
-	if len(packages) == 0 {
+	if packages == nil {
 		return nil, errParserLoss
 	}
 	assets := make([]model.Asset, 0, len(packages))
@@ -604,9 +604,9 @@ func parsePipx(ctx context.Context, _ collector.Environment, stdout string) ([]m
 		} `json:"venvs"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &listing); err != nil {
-		return nil, err
+		return nil, errParserLoss
 	}
-	if len(listing.Venvs) == 0 {
+	if listing.Venvs == nil {
 		return nil, errParserLoss
 	}
 	var assets []model.Asset

@@ -274,6 +274,7 @@ func TestScopedCollectorsUseOnlyTheInjectedFilesystemForHostReads(t *testing.T) 
 		"internal/collector/agents",
 		"internal/collector/ide",
 		"internal/collector/mcp",
+		"internal/collector/packages",
 		"internal/collector/projects",
 	} {
 		directory := filepath.Join(repositoryRoot, relativeDirectory)
@@ -306,6 +307,7 @@ func TestDirectHostFilesystemReferenceAudit(t *testing.T) {
 		{name: "deny os Lstat", source: "package fixture\nimport \"os\"\nvar denied = os.Lstat", want: []string{"os.Lstat"}},
 		{name: "deny os Stat", source: "package fixture\nimport \"os\"\nvar denied = os.Stat", want: []string{"os.Stat"}},
 		{name: "deny filepath Glob", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.Glob", want: []string{"path/filepath.Glob"}},
+		{name: "deny filepath EvalSymlinks", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.EvalSymlinks", want: []string{"path/filepath.EvalSymlinks"}},
 		{name: "deny filepath Walk", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.Walk", want: []string{"path/filepath.Walk"}},
 		{name: "deny filepath WalkDir", source: "package fixture\nimport \"path/filepath\"\nvar denied = filepath.WalkDir", want: []string{"path/filepath.WalkDir"}},
 		{
@@ -370,6 +372,14 @@ import "path/filepath"
 func harmless() {
   filepath := struct{ WalkDir func() }{}
   _ = filepath.WalkDir
+}`,
+		},
+		{
+			name: "local filepath EvalSymlinks field", source: `package fixture
+import "path/filepath"
+func harmless() {
+  filepath := struct{ EvalSymlinks func() }{}
+  _ = filepath.EvalSymlinks
 }`,
 		},
 	} {
@@ -1121,7 +1131,7 @@ func directHostFilesystemReferences(filename string, source []byte) ([]string, e
 			"DirFS": true, "Open": true, "OpenFile": true, "OpenRoot": true,
 			"ReadDir": true, "ReadFile": true, "Readlink": true, "Lstat": true, "Stat": true,
 		},
-		"path/filepath": {"Glob": true, "Walk": true, "WalkDir": true},
+		"path/filepath": {"EvalSymlinks": true, "Glob": true, "Walk": true, "WalkDir": true},
 	}
 	ast.Inspect(parsed, func(node ast.Node) bool {
 		selector, ok := node.(*ast.SelectorExpr)
