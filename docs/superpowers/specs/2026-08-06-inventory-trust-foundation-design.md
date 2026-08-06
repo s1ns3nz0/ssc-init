@@ -163,6 +163,7 @@ New scan output uses `ssc-init.scan.v2`, and status output containing the new in
 
 SQLite migration 4 adds:
 
+- `scope_json` to `scans` so safe scan scope and catalog version round-trip;
 - `observations` keyed by `(scan_id, observation_id)`;
 - `observation_state` preserving deterministic order plus nil metadata and consumers shape;
 - `observation_count` and `observations_nil` to `inventory_state`;
