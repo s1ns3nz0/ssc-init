@@ -6,11 +6,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +28,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
 	"github.com/ssc-init/ssc-init/internal/collector/packages"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/report"
@@ -58,6 +63,104 @@ type isolatedBaseline struct {
 	Inspector    *matrixInspector
 }
 
+type approvedCatalogTarget struct {
+	Spec        model.TargetSpec
+	Implemented bool
+	InstanceRef string
+	Status      model.TargetStatus
+}
+
+var approvedHappyCatalog = [...]approvedCatalogTarget{
+	{Spec: model.TargetSpec{ID: "agents.claude.plugins", Collector: "agents", Host: "claude", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "agents.claude.skills", Collector: "agents", Host: "claude", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "agents.codex.plugins", Collector: "agents", Host: "codex", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "agents.codex.skills", Collector: "agents", Host: "codex", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "agents.cursor.plugins", Collector: "agents", Host: "cursor", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "agents.cursor.skills", Collector: "agents", Host: "cursor", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "agents.custom-roots", Collector: "agents", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "agents.dynamic-api", Collector: "agents", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDynamicAPI}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "agents.environment-relocated", Collector: "agents", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "agents.remote-host", Collector: "agents", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "agents.windsurf.plugins", Collector: "agents", Host: "windsurf", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+
+	{Spec: model.TargetSpec{ID: "ide.cursor.extensions", Collector: "ide", Host: "cursor", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "json", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "ide.custom-roots", Collector: "ide", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.dev-container", Collector: "ide", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.environment-relocated", Collector: "ide", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.jetbrains.plugins", Collector: "ide", Host: "jetbrains", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "xml", Method: model.TargetDirectory}, Implemented: true, InstanceRef: "Idea", Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "ide.remote-ssh", Collector: "ide", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.remote-wsl", Collector: "ide", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetDirectory}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.service-api", Collector: "ide", Scope: model.ScopeSystem, Platform: "darwin", Method: model.TargetServiceAPI}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "ide.vscode-insiders.extensions", Collector: "ide", Host: "vscode-insiders", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "json", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "ide.vscode-oss.extensions", Collector: "ide", Host: "vscode-oss", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "json", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "ide.vscode.extensions", Collector: "ide", Host: "vscode", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "json", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "ide.windsurf.extensions", Collector: "ide", Host: "windsurf", Scope: model.ScopeIDEProfile, Platform: "darwin", Format: "json", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
+
+	{Spec: model.TargetSpec{ID: "mcp.claude-code.legacy-user", Collector: "mcp", Host: "claude-code", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.claude-code.user", Collector: "mcp", Host: "claude-code", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.claude-desktop.user", Collector: "mcp", Host: "claude-desktop", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.codex.project", Collector: "mcp", Host: "codex", Scope: model.ScopeProject, Platform: "darwin", Format: "toml", Method: model.TargetFile}, Implemented: true, InstanceRef: "$HOME/Projects/sample/.codex/config.toml", Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.codex.user", Collector: "mcp", Host: "codex", Scope: model.ScopeUser, Platform: "darwin", Format: "toml", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.cursor.project", Collector: "mcp", Host: "cursor", Scope: model.ScopeProject, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, InstanceRef: "$HOME/Projects/sample/.cursor/mcp.json", Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.cursor.user", Collector: "mcp", Host: "cursor", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.dev-container", Collector: "mcp", Scope: model.ScopeProject, Platform: "darwin", Method: model.TargetFile}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.dynamic-api", Collector: "mcp", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDynamicAPI}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.environment-relocated", Collector: "mcp", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetFile}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.github-copilot.user", Collector: "mcp", Host: "github-copilot", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.profile-specific", Collector: "mcp", Scope: model.ScopeIDEProfile, Platform: "darwin", Method: model.TargetFile}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.remote-user", Collector: "mcp", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetFile}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.service-managed", Collector: "mcp", Scope: model.ScopeSystem, Platform: "darwin", Method: model.TargetServiceAPI}, Status: model.TargetUnsupported},
+	{Spec: model.TargetSpec{ID: "mcp.shared.project", Collector: "mcp", Host: "shared", Scope: model.ScopeProject, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, InstanceRef: "$HOME/Projects/sample/.mcp.json", Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.vscode-insiders.user", Collector: "mcp", Host: "vscode-insiders", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.vscode.project", Collector: "mcp", Host: "vscode", Scope: model.ScopeProject, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, InstanceRef: "$HOME/Projects/sample/.vscode/mcp.json", Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.vscode.user", Collector: "mcp", Host: "vscode", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.windsurf.legacy-user", Collector: "mcp", Host: "windsurf", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+	{Spec: model.TargetSpec{ID: "mcp.windsurf.user", Collector: "mcp", Host: "windsurf", Scope: model.ScopeUser, Platform: "darwin", Format: "json", Method: model.TargetFile}, Implemented: true, Status: model.TargetComplete},
+
+	{Spec: model.TargetSpec{ID: "packages.cargo", Collector: "packages", Host: "cargo", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.docker", Collector: "packages", Host: "docker", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "ndjson", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.go", Collector: "packages", Host: "go", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.homebrew", Collector: "packages", Host: "homebrew", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.npm", Collector: "packages", Host: "npm", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.pip", Collector: "packages", Host: "pip", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "json", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.pipx", Collector: "packages", Host: "pipx", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "json", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "packages.uv", Collector: "packages", Host: "uv", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+
+	{Spec: model.TargetSpec{ID: "projects.root", Collector: "projects", Scope: model.ScopeProject, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, InstanceRef: "$HOME/Projects", Status: model.TargetComplete},
+}
+
+func TestApprovedCatalogOracleIsExact(t *testing.T) {
+	if len(approvedHappyCatalog) != 52 {
+		t.Fatalf("approved happy catalog instances=%d want=52", len(approvedHappyCatalog))
+	}
+	statusCounts := map[model.TargetStatus]int{}
+	seenSpecs := map[string]struct{}{}
+	seenInstances := map[string]struct{}{}
+	for _, target := range approvedHappyCatalog {
+		statusCounts[target.Status]++
+		if target.Implemented == (target.Status == model.TargetUnsupported) {
+			t.Fatalf("target %q implemented=%v status=%q", target.Spec.ID, target.Implemented, target.Status)
+		}
+		specKey := target.Spec.Collector + "\x00" + target.Spec.ID
+		if _, duplicate := seenSpecs[specKey]; duplicate {
+			t.Fatalf("approved catalog contains duplicate spec %q", specKey)
+		}
+		seenSpecs[specKey] = struct{}{}
+		instanceKey := specKey + "\x00" + target.InstanceRef
+		if _, duplicate := seenInstances[instanceKey]; duplicate {
+			t.Fatalf("approved catalog contains duplicate instance %q", instanceKey)
+		}
+		seenInstances[instanceKey] = struct{}{}
+	}
+	wantCounts := map[model.TargetStatus]int{
+		model.TargetComplete: 18, model.TargetNotPresent: 8,
+		model.TargetUnsupported: 18, model.TargetSkipped: 8,
+	}
+	if !reflect.DeepEqual(statusCounts, wantCounts) {
+		t.Fatalf("approved status counts=%v want=%v", statusCounts, wantCounts)
+	}
+}
+
 func TestOfficialCatalogMatrixIsTruthful(t *testing.T) {
 	unconfiguredHome := t.TempDir()
 	writeMatrixFile(t, filepath.Join(unconfiguredHome, ".claude.json"), `{"mcpServers":{"`+unconfiguredHomeSentinel+`":{"url":"https://unconfigured.invalid/mcp"}}}`)
@@ -67,11 +170,29 @@ func TestOfficialCatalogMatrixIsTruthful(t *testing.T) {
 	assertImplementedFixtureTargetsComplete(t, result)
 	assertUnsupportedDynamicTargetsVisible(t, result)
 	assertNoContainerAsset(t, result.Inventory, "cache")
-	assertNoRawFixtureRoot(t, result)
-	assertNoSecretFixtureValue(t, result)
+	assertPrivacyBoundary(t, result, unconfiguredHomeSentinel, unconfiguredHome)
 	assertRunnerAndInspectorUnused(t, result)
-	if bytes.Contains(encodeMatrixResult(t, result), []byte(unconfiguredHomeSentinel)) {
-		t.Fatal("scan read the process HOME instead of the configured isolated home")
+}
+
+func TestScopedCollectorsUseOnlyTheInjectedFilesystemForHostReads(t *testing.T) {
+	repositoryRoot := matrixRepositoryRoot(t)
+	for _, relativeDirectory := range []string{
+		"internal/collector/agents",
+		"internal/collector/ide",
+		"internal/collector/mcp",
+		"internal/collector/projects",
+	} {
+		directory := filepath.Join(repositoryRoot, relativeDirectory)
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
+			assertSourceHasNoDirectHostFilesystemCalls(t, filepath.Join(directory, entry.Name()))
+		}
 	}
 }
 
@@ -113,7 +234,7 @@ func TestOfficialMCPFixturesCoverBothContainersAndCodexTransports(t *testing.T) 
 			t.Fatalf("source %q transports=%v want=%v", source, gotTransports, expected.transports)
 		}
 	}
-	assertNoSecretFixtureValue(t, result)
+	assertPrivacyBoundary(t, result)
 }
 
 func TestMissingExpansionRootsRemainExplicit(t *testing.T) {
@@ -212,11 +333,18 @@ func TestSameIDEExtensionInTwoLocationsRetainsBothObservations(t *testing.T) {
 	result := runIsolatedBaseline(t, baselineOptions{home: home, externalProbes: false})
 
 	const assetID = "ide-extension:vscode:acme.same@1.0.0"
+	wantAsset := model.Asset{
+		ID: assetID, Type: model.AssetIDEExtension, Name: "same", Version: "1.0.0", Source: "vscode",
+		Metadata: map[string]string{"publisher": "acme"},
+	}
 	assetCount := 0
 	var observations []model.Observation
 	for _, asset := range result.Inventory.Assets {
 		if asset.ID == assetID {
 			assetCount++
+			if !reflect.DeepEqual(asset, wantAsset) {
+				t.Fatalf("same-extension asset=%+v want=%+v", asset, wantAsset)
+			}
 		}
 	}
 	for _, observation := range result.Inventory.Observations {
@@ -224,8 +352,23 @@ func TestSameIDEExtensionInTwoLocationsRetainsBothObservations(t *testing.T) {
 			observations = append(observations, observation)
 		}
 	}
-	if assetCount != 1 || len(observations) != 2 || observations[0].ID == observations[1].ID {
+	if assetCount != 1 || len(observations) != 2 {
 		t.Fatalf("same-extension assets=%d observations=%+v", assetCount, observations)
+	}
+	sort.Slice(observations, func(i, j int) bool { return observations[i].LocationRef < observations[j].LocationRef })
+	wantObservations := make([]model.Observation, 0, 2)
+	for _, installation := range []string{"acme.same-1.0.0", "acme.same-copy-1.0.0"} {
+		wantObservations = append(wantObservations, finalizeMatrixObservation(t, model.Observation{
+			AssetID: assetID, Collector: "ide", Host: "vscode", Consumers: []string{"vscode"},
+			Scope: model.ScopeIDEProfile, LocationRef: "$HOME/.vscode/extensions/" + installation,
+			Source: "ide.vscode.extensions", Metadata: map[string]string{
+				"entry_point": "dist/extension.js", "manifest_path": installation + "/package.json",
+				"source_target": "ide.vscode.extensions",
+			},
+		}))
+	}
+	if !reflect.DeepEqual(observations, wantObservations) {
+		t.Fatalf("same-extension observations=\n%+v\nwant=\n%+v", observations, wantObservations)
 	}
 	target := requireMatrixTarget(t, result.Scan.Coverage, "ide", "ide.vscode.extensions", "")
 	if target.Status != model.TargetComplete || target.Assets != 2 || target.Observations != 2 {
@@ -237,7 +380,9 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 	home := t.TempDir()
 	pythonPath := filepath.Join(home, "fake-bin", "python3")
 	uvPath := filepath.Join(home, "fake-bin", "uv")
+	events := &matrixEventLog{}
 	inspector := &matrixInspector{
+		events: events,
 		evidence: map[string]platform.ExecutableEvidence{
 			"python3": {
 				Command: "python3", Path: pythonPath, LocationRef: "$HOME/fake-bin/python3",
@@ -255,7 +400,7 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 			inspector.errors[capability.Executable] = exec.ErrNotFound
 		}
 	}
-	runner := &matrixRunner{results: map[string]platform.CommandResult{
+	runner := &matrixRunner{events: events, results: map[string]platform.CommandResult{
 		matrixCommandKey(pythonPath, "-m", "pip", "list", "--format=json"): {
 			Stdout: `[{"name":"shared-fixture","version":"1.0.0"}]`,
 		},
@@ -266,22 +411,39 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 	})
 
 	const assetID = "pkg:pypi/shared-fixture@1.0.0"
-	assetCount := 0
-	var managers []string
-	for _, asset := range result.Inventory.Assets {
-		if asset.ID == assetID {
-			assetCount++
+	wantPackageAsset := model.Asset{ID: assetID, Type: model.AssetPackage, Name: "shared-fixture", Version: "1.0.0"}
+	wantTools := map[string]model.Asset{
+		"pip": {ID: "tool-executable:sha256:" + strings.Repeat("a", 64), Type: model.AssetTool, Name: "executable", SHA256: strings.Repeat("a", 64)},
+		"uv":  {ID: "tool-executable:sha256:" + strings.Repeat("b", 64), Type: model.AssetTool, Name: "executable", SHA256: strings.Repeat("b", 64)},
+	}
+	wantExecutableObservations := map[string]model.Observation{
+		"pip": finalizeMatrixObservation(t, model.Observation{
+			AssetID: wantTools["pip"].ID, Collector: "packages", Host: "pip", Consumers: []string{"pip"}, Scope: model.ScopeToolEnvironment,
+			LocationRef: "$HOME/fake-bin/python3", Source: "packages.pip",
+			Metadata: map[string]string{"command_basename": "python3", "mode": "755", "probe_target_id": "packages.pip"},
+		}),
+		"uv": finalizeMatrixObservation(t, model.Observation{
+			AssetID: wantTools["uv"].ID, Collector: "packages", Host: "uv", Consumers: []string{"uv"}, Scope: model.ScopeToolEnvironment,
+			LocationRef: "$HOME/fake-bin/uv", Source: "packages.uv",
+			Metadata: map[string]string{"command_basename": "uv", "mode": "755", "probe_target_id": "packages.uv"},
+		}),
+	}
+	wantPackageObservations := map[string]model.Observation{}
+	for _, manager := range []string{"pip", "uv"} {
+		probeSource := manager
+		if manager == "pip" {
+			probeSource = "python3"
 		}
+		wantPackageObservations[manager] = finalizeMatrixObservation(t, model.Observation{
+			AssetID: assetID, Collector: "packages", Host: manager, Consumers: []string{manager}, Scope: model.ScopeToolEnvironment,
+			LocationRef: "probe-target:packages." + manager, Source: "packages." + manager,
+			Metadata: map[string]string{
+				"manager": manager, "probe_source": probeSource, "probe_target_id": "packages." + manager,
+				"executable_observation_id": wantExecutableObservations[manager].ID,
+			},
+		})
 	}
-	for _, observation := range result.Inventory.Observations {
-		if observation.AssetID == assetID {
-			managers = append(managers, observation.Metadata["manager"])
-		}
-	}
-	sort.Strings(managers)
-	if assetCount != 1 || strings.Join(managers, ",") != "pip,uv" {
-		t.Fatalf("same-package assets=%d managers=%v", assetCount, managers)
-	}
+	assertExactPackageCollisionEvidence(t, result.Inventory, wantPackageAsset, wantTools, wantExecutableObservations, wantPackageObservations)
 	for _, targetID := range []string{"packages.pip", "packages.uv"} {
 		target := requireMatrixTarget(t, result.Scan.Coverage, "packages", targetID, "")
 		if target.Status != model.TargetComplete || target.Assets != 2 || target.Observations != 2 {
@@ -294,7 +456,17 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 	if inspect, verify := inspector.callCounts(); inspect != len(packages.Capabilities()) || verify != 2 {
 		t.Fatalf("enabled package inspector calls inspect=%d verify=%d", inspect, verify)
 	}
-	assertNoRawFixtureRoot(t, result)
+	wantEvents := []string{
+		"inspect:npm",
+		"inspect:python3", "run:" + matrixCommandKey(pythonPath, "-m", "pip", "list", "--format=json"), "verify:python3",
+		"inspect:pipx",
+		"inspect:uv", "run:" + matrixCommandKey(uvPath, "tool", "list"), "verify:uv",
+		"inspect:cargo", "inspect:go", "inspect:brew", "inspect:docker",
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, wantEvents) {
+		t.Fatalf("package probe event order=\n%q\nwant=\n%q", got, wantEvents)
+	}
+	assertPrivacyBoundary(t, result)
 }
 
 func TestHostileMalformedAndSymlinkSiblingsRemainPartialWithoutLosingSafeInventory(t *testing.T) {
@@ -324,6 +496,45 @@ func TestHostileMalformedAndSymlinkSiblingsRemainPartialWithoutLosingSafeInvento
 			t.Fatalf("hostile sibling target errors=%+v missing %q", target.Errors, code)
 		}
 	}
+	implementedTargets := map[string]bool{}
+	for _, approved := range approvedHappyCatalog {
+		implementedTargets[approved.Spec.Collector+"\x00"+approved.Spec.ID] = approved.Implemented
+	}
+	supportedCount := 0
+	partialSupported := []string{}
+	hostileCodes := map[string]bool{"identity_rejected": true, "manifest_invalid": true, "symlink_rejected": true}
+	for _, collectorResult := range result.Scan.Coverage {
+		for _, covered := range collectorResult.Targets {
+			key := collectorResult.Collector + "\x00" + covered.TargetID
+			if !implementedTargets[key] {
+				continue
+			}
+			supportedCount++
+			wantStatus := model.TargetNotPresent
+			switch {
+			case covered.TargetID == "agents.codex.plugins":
+				wantStatus = model.TargetPartial
+				partialSupported = append(partialSupported, key)
+			case covered.TargetID == "mcp.claude-code.user":
+				wantStatus = model.TargetComplete
+			case collectorResult.Collector == "packages":
+				wantStatus = model.TargetSkipped
+			}
+			if covered.Status != wantStatus {
+				t.Fatalf("hostile fixture changed unrelated supported target %q/%q: status=%q want=%q", covered.TargetID, covered.InstanceRef, covered.Status, wantStatus)
+			}
+			if covered.TargetID != "agents.codex.plugins" {
+				for _, issue := range covered.Errors {
+					if hostileCodes[issue.Code] {
+						t.Fatalf("hostile error %q contaminated unrelated target %q/%q", issue.Code, covered.TargetID, covered.InstanceRef)
+					}
+				}
+			}
+		}
+	}
+	if supportedCount != 34 || !reflect.DeepEqual(partialSupported, []string{"agents\x00agents.codex.plugins"}) {
+		t.Fatalf("hostile supported targets=%d partial=%q", supportedCount, partialSupported)
+	}
 	wantAssets := map[string]bool{
 		"agent-plugin:codex:safe-fixture@1.0.0": false,
 		"mcp:claude-code:safe-sibling":          false,
@@ -341,17 +552,7 @@ func TestHostileMalformedAndSymlinkSiblingsRemainPartialWithoutLosingSafeInvento
 			t.Fatalf("safe sibling %q did not persist", assetID)
 		}
 	}
-	encoded := encodeMatrixResult(t, result)
-	if bytes.Contains(encoded, []byte(hostileIdentity)) {
-		t.Fatal("hostile identity survived in report or snapshot")
-	}
-	database, err := os.ReadFile(result.DatabasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(database, []byte(hostileIdentity)) {
-		t.Fatal("hostile identity survived in SQLite")
-	}
+	assertPrivacyBoundary(t, result, hostileIdentity, outside, "outside-fixture")
 }
 
 func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV2(t *testing.T) {
@@ -362,21 +563,54 @@ func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV2(t *testing.T) {
 	}
 	defer snapshots.Close()
 
+	snapshot, initialized, err := snapshots.LatestSnapshot(context.Background())
+	if err != nil || !initialized {
+		t.Fatalf("load migrated legacy snapshot initialized=%v err=%v", initialized, err)
+	}
+	wantInventory := migrationThreeLegacyInventory()
+	wantCoverage := migrationThreeLegacyCoverage()
+	if !reflect.DeepEqual(snapshot.Inventory, wantInventory) {
+		t.Fatalf("migrated legacy inventory=\n%#v\nwant=\n%#v", snapshot.Inventory, wantInventory)
+	}
+	if !reflect.DeepEqual(snapshot.Scan.Coverage, wantCoverage) {
+		t.Fatalf("migrated legacy coverage=\n%#v\nwant=\n%#v", snapshot.Scan.Coverage, wantCoverage)
+	}
+	if !reflect.DeepEqual(snapshot.Scan.Scope, model.ScanScope{}) || snapshot.Inventory.Observations != nil {
+		t.Fatalf("legacy snapshot gained v2-only state: scope=%+v observations=%+v", snapshot.Scan.Scope, snapshot.Inventory.Observations)
+	}
+
 	status := readMatrixStatusFromReader(t, snapshots)
 	if status.SchemaVersion != "ssc-init.status.v2" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
 		t.Fatalf("legacy status=%+v", status)
 	}
-	if status.Scope != nil || len(status.Coverage) != 0 || status.Inventory == nil {
+	if status.Scope != nil || status.Coverage != nil || status.Inventory == nil {
 		t.Fatalf("legacy status exposed v2 provenance: %+v", status)
 	}
-	if len(status.Inventory.Assets) != 0 || len(status.Inventory.Observations) != 0 || len(status.Inventory.Relationships) != 0 {
-		t.Fatalf("legacy inventory=%+v", status.Inventory)
+	if !reflect.DeepEqual(*status.Inventory, wantInventory) || status.Inventory.Observations != nil {
+		t.Fatalf("legacy status inventory=\n%#v\nwant=\n%#v", *status.Inventory, wantInventory)
 	}
 }
 
 func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
 	home := copyOfficialFixtureHome(t)
 	databasePath := filepath.Join(privateMatrixTempDir(t), "state.db")
+	const extensionAssetID = "ide-extension:vscode:acme.safe@1.2.3"
+	preObservation := finalizeMatrixObservation(t, model.Observation{
+		AssetID: extensionAssetID, Collector: "ide", Host: "vscode", Consumers: []string{"vscode"}, Scope: model.ScopeIDEProfile,
+		LocationRef: "$HOME/.vscode/extensions/acme.safe-1.2.3", Source: "ide.vscode.extensions",
+		Metadata: map[string]string{
+			"entry_point": "dist/extension.js", "activation_events": "onCommand:acme.safe.run", "capabilities": "commands",
+			"manifest_path": "acme.safe-1.2.3/package.json", "source_target": "ide.vscode.extensions",
+		},
+	})
+	postObservation := finalizeMatrixObservation(t, model.Observation{
+		AssetID: extensionAssetID, Collector: "ide", Host: "vscode", Consumers: []string{"vscode"}, Scope: model.ScopeIDEProfile,
+		LocationRef: "$HOME/.vscode/extensions/acme.safe-relocated-1.2.3", Source: "ide.vscode.extensions",
+		Metadata: map[string]string{
+			"entry_point": "dist/extension.js", "activation_events": "onCommand:acme.safe.run", "capabilities": "commands",
+			"manifest_path": "acme.safe-relocated-1.2.3/package.json", "source_target": "ide.vscode.extensions",
+		},
+	})
 	first := runIsolatedBaseline(t, baselineOptions{
 		home: home, databasePath: databasePath,
 		scanID: "00000000-0000-4000-8000-000000000013",
@@ -387,6 +621,9 @@ func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
 	}
 	if status.Scope == nil || !reflect.DeepEqual(*status.Scope, first.Scan.Scope) || !reflect.DeepEqual(status.Coverage, first.Scan.Coverage) || status.Inventory == nil || !reflect.DeepEqual(*status.Inventory, first.Inventory) {
 		t.Fatalf("reopened v2 status did not preserve the full snapshot: %+v", status)
+	}
+	if got := matrixObservationsForAsset(first.Inventory, extensionAssetID); !reflect.DeepEqual(got, []model.Observation{preObservation}) {
+		t.Fatalf("pre-move extension observation=\n%+v\nwant=\n%+v", got, preObservation)
 	}
 
 	second := runIsolatedBaseline(t, baselineOptions{
@@ -406,19 +643,16 @@ func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
 		home: home, databasePath: databasePath,
 		scanID: "00000000-0000-4000-8000-000000000015",
 	})
-	if len(third.Delta.Changes) != 2 {
-		t.Fatalf("observed-location delta=%+v want one removal and one addition", third.Delta)
+	if got := matrixObservationsForAsset(third.Inventory, extensionAssetID); !reflect.DeepEqual(got, []model.Observation{postObservation}) {
+		t.Fatalf("post-move extension observation=\n%+v\nwant=\n%+v", got, postObservation)
 	}
-	kinds := make([]string, 0, 2)
-	for _, change := range third.Delta.Changes {
-		if change.Entity != model.ChangeEntityObservation {
-			t.Fatalf("observed-location mutation changed a canonical asset: %+v", change)
-		}
-		kinds = append(kinds, string(change.Kind))
+	wantChanges := []model.Change{
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityObservation, EntityID: preObservation.ID},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityObservation, EntityID: postObservation.ID},
 	}
-	sort.Strings(kinds)
-	if strings.Join(kinds, ",") != "added,removed" {
-		t.Fatalf("observed-location change kinds=%v", kinds)
+	sort.Slice(wantChanges, func(i, j int) bool { return wantChanges[i].EntityID < wantChanges[j].EntityID })
+	if !reflect.DeepEqual(third.Delta.Changes, wantChanges) {
+		t.Fatalf("observed-location delta=\n%+v\nwant exactly=\n%+v", third.Delta.Changes, wantChanges)
 	}
 	latestStatus := readMatrixStatusFromPath(t, databasePath)
 	if latestStatus.Inventory == nil || !reflect.DeepEqual(*latestStatus.Inventory, third.Inventory) || latestStatus.Scope == nil || !reflect.DeepEqual(*latestStatus.Scope, third.Scan.Scope) || !reflect.DeepEqual(latestStatus.Coverage, third.Scan.Coverage) {
@@ -541,62 +775,41 @@ func runIsolatedBaseline(t *testing.T, options baselineOptions) isolatedBaseline
 
 func assertEveryApplicableTargetInstanceReportedOnce(t *testing.T, result isolatedBaseline) {
 	t.Helper()
-	coverage := make(map[string]model.CollectorResult, len(result.Scan.Coverage))
+	wantCatalog := map[string][]model.TargetSpec{}
+	type coverageIdentity struct {
+		collector   string
+		targetID    string
+		instanceRef string
+	}
+	wantCoverage := make(map[coverageIdentity]model.TargetStatus, len(approvedHappyCatalog))
+	for _, approved := range approvedHappyCatalog {
+		wantCatalog[approved.Spec.Collector] = append(wantCatalog[approved.Spec.Collector], approved.Spec)
+		wantCoverage[coverageIdentity{approved.Spec.Collector, approved.Spec.ID, approved.InstanceRef}] = approved.Status
+	}
+	if !reflect.DeepEqual(result.Catalog, wantCatalog) {
+		t.Fatalf("production catalog drifted from the approved literal oracle:\n got: %#v\nwant: %#v", result.Catalog, wantCatalog)
+	}
+
+	gotCoverage := make(map[coverageIdentity]model.TargetStatus, len(approvedHappyCatalog))
+	seenCollectors := make(map[string]struct{}, len(result.Scan.Coverage))
 	for _, collectorResult := range result.Scan.Coverage {
-		if _, duplicate := coverage[collectorResult.Collector]; duplicate {
+		if _, duplicate := seenCollectors[collectorResult.Collector]; duplicate {
 			t.Fatalf("collector %q reported more than once", collectorResult.Collector)
 		}
-		coverage[collectorResult.Collector] = collectorResult
+		seenCollectors[collectorResult.Collector] = struct{}{}
 		if collectorResult.LocalTargets != nil {
 			t.Fatalf("collector %q retained raw local targets", collectorResult.Collector)
 		}
-	}
-	if len(coverage) != len(result.Catalog) {
-		t.Fatalf("coverage collectors=%v catalog collectors=%v", sortedMapKeys(coverage), sortedMapKeys(result.Catalog))
-	}
-
-	wantExpanded := map[string][]string{
-		"ide.jetbrains.plugins": {"Idea"},
-		"mcp.codex.project":     {"$HOME/Projects/sample/.codex/config.toml"},
-		"mcp.cursor.project":    {"$HOME/Projects/sample/.cursor/mcp.json"},
-		"mcp.shared.project":    {"$HOME/Projects/sample/.mcp.json"},
-		"mcp.vscode.project":    {"$HOME/Projects/sample/.vscode/mcp.json"},
-		"projects.root":         {"$HOME/Projects"},
-	}
-	for collectorName, specs := range result.Catalog {
-		collectorResult, ok := coverage[collectorName]
-		if !ok {
-			t.Fatalf("missing collector coverage %q", collectorName)
-		}
-		byTarget := make(map[string][]model.TargetCoverage)
-		seenPairs := make(map[string]struct{})
 		for _, target := range collectorResult.Targets {
-			pair := target.TargetID + "\x00" + target.InstanceRef
-			if _, duplicate := seenPairs[pair]; duplicate {
-				t.Fatalf("duplicate target instance %q/%q", target.TargetID, target.InstanceRef)
+			identity := coverageIdentity{collectorResult.Collector, target.TargetID, target.InstanceRef}
+			if _, duplicate := gotCoverage[identity]; duplicate {
+				t.Fatalf("duplicate target instance %+v", identity)
 			}
-			seenPairs[pair] = struct{}{}
-			byTarget[target.TargetID] = append(byTarget[target.TargetID], target)
+			gotCoverage[identity] = target.Status
 		}
-		for _, spec := range specs {
-			instances := byTarget[spec.ID]
-			wantRefs, expanded := wantExpanded[spec.ID]
-			if !expanded {
-				wantRefs = []string{""}
-			}
-			if len(instances) != len(wantRefs) {
-				t.Fatalf("target %q instances=%+v want refs=%v", spec.ID, instances, wantRefs)
-			}
-			gotRefs := make([]string, len(instances))
-			for index := range instances {
-				gotRefs[index] = instances[index].InstanceRef
-			}
-			sort.Strings(gotRefs)
-			sort.Strings(wantRefs)
-			if strings.Join(gotRefs, "\x00") != strings.Join(wantRefs, "\x00") {
-				t.Fatalf("target %q refs=%v want=%v", spec.ID, gotRefs, wantRefs)
-			}
-		}
+	}
+	if !reflect.DeepEqual(gotCoverage, wantCoverage) {
+		t.Fatalf("happy-path target coverage drifted from the approved literal oracle:\n got: %#v\nwant: %#v", gotCoverage, wantCoverage)
 	}
 }
 
@@ -667,30 +880,98 @@ func assertNoContainerAsset(t *testing.T, inventory model.Inventory, name string
 	}
 }
 
-func assertNoRawFixtureRoot(t *testing.T, result isolatedBaseline) {
+func assertPrivacyBoundary(t *testing.T, result isolatedBaseline, additionalForbidden ...string) {
 	t.Helper()
-	encoded := encodeMatrixResult(t, result)
-	if bytes.Contains(encoded, []byte(result.Home)) {
-		t.Fatalf("raw fixture home leaked into persisted or reported output: %q", result.Home)
+	forbidden := append([]string{
+		fixtureSecretSentinel,
+		"placeholder-value",
+		result.Home,
+	}, additionalForbidden...)
+	serialized := encodeMatrixResult(t, result)
+	for _, value := range forbidden {
+		if value != "" && bytes.Contains(serialized, []byte(value)) {
+			t.Fatalf("forbidden raw value leaked into serialized report or snapshot: %q", value)
+		}
+	}
+	for _, databasePath := range []string{result.DatabasePath, result.DatabasePath + "-wal", result.DatabasePath + "-shm"} {
+		database, err := os.ReadFile(databasePath)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, value := range forbidden {
+			if value != "" && bytes.Contains(database, []byte(value)) {
+				t.Fatalf("forbidden raw value %q persisted in %s", value, filepath.Base(databasePath))
+			}
+		}
 	}
 	if denied := result.FileSystem.deniedPaths(); len(denied) != 0 {
 		t.Fatalf("collector attempted unconfigured filesystem paths: %v", denied)
 	}
 }
 
-func assertNoSecretFixtureValue(t *testing.T, result isolatedBaseline) {
+func matrixRepositoryRoot(t *testing.T) string {
 	t.Helper()
-	encoded := encodeMatrixResult(t, result)
-	if bytes.Contains(encoded, []byte(fixtureSecretSentinel)) {
-		t.Fatalf("fixture secret survived normalization: %s", encoded)
+	_, sourcePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve acceptance source path")
 	}
-	database, err := os.ReadFile(result.DatabasePath)
+	return filepath.Clean(filepath.Join(filepath.Dir(sourcePath), "..", ".."))
+}
+
+func assertSourceHasNoDirectHostFilesystemCalls(t *testing.T, sourcePath string) {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), sourcePath, nil, parser.ImportsOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(database, []byte(fixtureSecretSentinel)) {
-		t.Fatal("fixture secret was persisted in SQLite")
+	importPaths := map[string]string{}
+	for _, imported := range parsed.Imports {
+		path := strings.Trim(imported.Path.Value, `"`)
+		if path != "os" && path != "path/filepath" {
+			continue
+		}
+		name := filepath.Base(path)
+		if imported.Name != nil {
+			name = imported.Name.Name
+		}
+		if name == "." {
+			t.Fatalf("%s dot-imports %q, bypassing the injected filesystem audit", sourcePath, path)
+		}
+		importPaths[name] = path
 	}
+	parsed, err = parser.ParseFile(token.NewFileSet(), sourcePath, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostReadCalls := map[string]map[string]bool{
+		"os": {
+			"Open": true, "OpenFile": true, "ReadDir": true, "ReadFile": true,
+			"Readlink": true, "Lstat": true, "Stat": true,
+		},
+		"path/filepath": {"Glob": true, "Walk": true, "WalkDir": true},
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		packageName, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		importPath := importPaths[packageName.Name]
+		if hostReadCalls[importPath][selector.Sel.Name] {
+			t.Errorf("%s directly calls %s.%s; scoped collection must use Environment.FS", sourcePath, packageName.Name, selector.Sel.Name)
+		}
+		return true
+	})
 }
 
 func assertRunnerAndInspectorUnused(t *testing.T, result isolatedBaseline) {
@@ -722,10 +1003,89 @@ func requireMatrixTarget(t *testing.T, coverage []model.CollectorResult, collect
 	return model.TargetCoverage{}
 }
 
+func finalizeMatrixObservation(t *testing.T, observation model.Observation) model.Observation {
+	t.Helper()
+	finalized, err := identity.FinalizeObservation(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return finalized
+}
+
+func assertExactPackageCollisionEvidence(
+	t *testing.T,
+	inventory model.Inventory,
+	wantPackageAsset model.Asset,
+	wantTools map[string]model.Asset,
+	wantExecutableObservations map[string]model.Observation,
+	wantPackageObservations map[string]model.Observation,
+) {
+	t.Helper()
+	packageAssets := 0
+	toolAssetCount := 0
+	executableObservationCount := 0
+	packageObservationCount := 0
+	toolAssets := map[string]model.Asset{}
+	executableObservations := map[string]model.Observation{}
+	packageObservations := map[string]model.Observation{}
+	for _, asset := range inventory.Assets {
+		if asset.Type == model.AssetTool {
+			toolAssetCount++
+		}
+		if asset.ID == wantPackageAsset.ID {
+			packageAssets++
+			if !reflect.DeepEqual(asset, wantPackageAsset) {
+				t.Fatalf("same-package asset=%+v want=%+v", asset, wantPackageAsset)
+			}
+		}
+		for manager, want := range wantTools {
+			if asset.ID == want.ID {
+				toolAssets[manager] = asset
+			}
+		}
+	}
+	for _, observation := range inventory.Observations {
+		if observation.AssetID == wantTools["pip"].ID || observation.AssetID == wantTools["uv"].ID {
+			executableObservationCount++
+		}
+		for manager, want := range wantExecutableObservations {
+			if observation.ID == want.ID {
+				executableObservations[manager] = observation
+			}
+		}
+		if observation.AssetID == wantPackageAsset.ID {
+			packageObservationCount++
+			packageObservations[observation.Host] = observation
+		}
+	}
+	if packageAssets != 1 || toolAssetCount != 2 || !reflect.DeepEqual(toolAssets, wantTools) {
+		t.Fatalf("same-package asset count=%d tool count=%d tools=%+v want tools=%+v", packageAssets, toolAssetCount, toolAssets, wantTools)
+	}
+	if executableObservationCount != 2 || !reflect.DeepEqual(executableObservations, wantExecutableObservations) {
+		t.Fatalf("executable observations=\n%+v\nwant=\n%+v", executableObservations, wantExecutableObservations)
+	}
+	if packageObservationCount != 2 || !reflect.DeepEqual(packageObservations, wantPackageObservations) {
+		t.Fatalf("package observations=\n%+v\nwant=\n%+v", packageObservations, wantPackageObservations)
+	}
+	if packageObservations["pip"].Metadata["executable_observation_id"] == packageObservations["uv"].Metadata["executable_observation_id"] {
+		t.Fatal("pip and uv package observations cross-linked to the same executable observation")
+	}
+}
+
 func matrixObservationsForSource(inventory model.Inventory, source string) []model.Observation {
 	var observations []model.Observation
 	for _, observation := range inventory.Observations {
 		if observation.Collector == "mcp" && observation.Source == source {
+			observations = append(observations, observation)
+		}
+	}
+	return observations
+}
+
+func matrixObservationsForAsset(inventory model.Inventory, assetID string) []model.Observation {
+	var observations []model.Observation
+	for _, observation := range inventory.Observations {
+		if observation.AssetID == assetID {
 			observations = append(observations, observation)
 		}
 	}
@@ -852,14 +1212,100 @@ func createMigrationThreeLegacyDatabase(t *testing.T) string {
 		_ = database.Close()
 		t.Fatal(err)
 	}
-	if _, err := database.Exec(`INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count) VALUES (?, 1, 1, 1, 0, 0, 0)`, "legacy-migration-three"); err != nil {
+	wantInventory := migrationThreeLegacyInventory()
+	if _, err := database.Exec(`INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count) VALUES (?, 0, 0, 0, ?, ?, ?)`,
+		"legacy-migration-three", len(wantInventory.Assets), len(wantInventory.Relationships), len(wantInventory.Errors)); err != nil {
 		_ = database.Close()
 		t.Fatal(err)
+	}
+	for index := len(wantInventory.Assets) - 1; index >= 0; index-- {
+		asset := wantInventory.Assets[index]
+		encoded, err := json.Marshal(asset)
+		if err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT INTO assets(scan_id, asset_id, asset_json) VALUES (?, ?, ?)`, "legacy-migration-three", asset.ID, encoded); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		metadataNil := 0
+		if asset.Metadata == nil {
+			metadataNil = 1
+		}
+		if _, err := database.Exec(`INSERT INTO asset_state(scan_id, asset_id, asset_index, metadata_nil) VALUES (?, ?, ?, ?)`, "legacy-migration-three", asset.ID, index, metadataNil); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+	}
+	for index, relationship := range wantInventory.Relationships {
+		if _, err := database.Exec(`INSERT INTO relationships(scan_id, from_id, kind, to_id) VALUES (?, ?, ?, ?)`, "legacy-migration-three", relationship.From, relationship.Kind, relationship.To); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT INTO relationship_state(scan_id, from_id, kind, to_id, relationship_index) VALUES (?, ?, ?, ?, ?)`, "legacy-migration-three", relationship.From, relationship.Kind, relationship.To, index); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+	}
+	for index, inventoryError := range wantInventory.Errors {
+		encoded, err := json.Marshal(inventoryError)
+		if err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT INTO inventory_errors(scan_id, error_index, error_json) VALUES (?, ?, ?)`, "legacy-migration-three", index, encoded); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+	}
+	wantCoverage := migrationThreeLegacyCoverage()
+	for index := len(wantCoverage) - 1; index >= 0; index-- {
+		collectorResult := wantCoverage[index]
+		encoded, err := json.Marshal(collectorResult)
+		if err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT INTO coverage(scan_id, collector, result_json) VALUES (?, ?, ?)`, "legacy-migration-three", collectorResult.Collector, encoded); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
 	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func migrationThreeLegacyInventory() model.Inventory {
+	return model.Inventory{
+		Assets: []model.Asset{
+			{ID: "agent-plugin:codex:legacy-plugin@1.0.0", Type: model.AssetAgentPlugin, Name: "legacy-plugin", Version: "1.0.0", Source: "codex", Metadata: map[string]string{"channel": "stable"}},
+			{ID: "mcp:shared:legacy-server", Type: model.AssetMCP, Name: "legacy-server", Source: "shared"},
+		},
+		Relationships: []model.Relationship{{From: "agent-plugin:codex:legacy-plugin@1.0.0", To: "mcp:shared:legacy-server", Kind: "configures"}},
+		Errors: []model.CoverageError{
+			{Code: "legacy_manifest_partial", Message: "legacy plugin evidence was incomplete", Path: "$HOME/.codex/plugins/legacy-plugin"},
+			{Code: "legacy_transport_unknown", Message: "legacy MCP transport was unknown"},
+		},
+	}
+}
+
+func migrationThreeLegacyCoverage() []model.CollectorResult {
+	inventory := migrationThreeLegacyInventory()
+	return []model.CollectorResult{
+		{
+			Collector: "agents", Status: model.CoveragePartial,
+			Assets: []model.Asset{inventory.Assets[0]}, Errors: []model.CoverageError{inventory.Errors[0]},
+			Targets: []model.TargetCoverage{{TargetID: "agents.codex.plugins", Status: model.TargetPartial, Assets: 1, Errors: []model.CoverageError{inventory.Errors[0]}}},
+		},
+		{
+			Collector: "mcp", Status: model.CoveragePartial,
+			Assets: []model.Asset{inventory.Assets[1]}, Errors: []model.CoverageError{inventory.Errors[1]},
+			Targets: []model.TargetCoverage{{TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/legacy/.mcp.json", Status: model.TargetPartial, Assets: 1, Errors: []model.CoverageError{inventory.Errors[1]}}},
+		},
+	}
 }
 
 const legacyMigrationThreeSchema = `
@@ -1012,6 +1458,7 @@ type matrixRunner struct {
 	mu         sync.Mutex
 	failOnCall bool
 	calls      int
+	events     *matrixEventLog
 	results    map[string]platform.CommandResult
 	errors     map[string]error
 }
@@ -1024,6 +1471,9 @@ func (r *matrixRunner) Run(_ context.Context, command string, args ...string) (p
 		return platform.CommandResult{}, errors.New("matrix runner must not be called")
 	}
 	key := strings.Join(append([]string{command}, args...), "\x1f")
+	if r.events != nil {
+		r.events.add("run:" + key)
+	}
 	return r.results[key], r.errors[key]
 }
 
@@ -1038,6 +1488,7 @@ type matrixInspector struct {
 	failOnCall  bool
 	inspectCall int
 	verifyCall  int
+	events      *matrixEventLog
 	evidence    map[string]platform.ExecutableEvidence
 	errors      map[string]error
 }
@@ -1049,15 +1500,21 @@ func (i *matrixInspector) Inspect(_ context.Context, _ string, command string) (
 	if i.failOnCall {
 		return platform.ExecutableEvidence{}, errors.New("matrix inspector must not be called")
 	}
+	if i.events != nil {
+		i.events.add("inspect:" + command)
+	}
 	return i.evidence[command], i.errors[command]
 }
 
-func (i *matrixInspector) Verify(platform.ExecutableEvidence) error {
+func (i *matrixInspector) Verify(evidence platform.ExecutableEvidence) error {
 	i.mu.Lock()
 	i.verifyCall++
 	i.mu.Unlock()
 	if i.failOnCall {
 		return errors.New("matrix inspector must not be called")
+	}
+	if i.events != nil {
+		i.events.add("verify:" + evidence.Command)
 	}
 	return nil
 }
@@ -1066,4 +1523,21 @@ func (i *matrixInspector) callCounts() (int, int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.inspectCall, i.verifyCall
+}
+
+type matrixEventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *matrixEventLog) add(event string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, event)
+}
+
+func (l *matrixEventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
 }

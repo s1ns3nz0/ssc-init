@@ -229,7 +229,7 @@ The inventory trust foundation was revalidated after the implementation range `8
 Exact acceptance and release commands:
 
 ```sh
-go test ./internal/acceptance -run 'TestOfficialCatalogMatrix|TestV2BaselineReopenStatus' -count=1
+go test ./internal/acceptance -count=1
 gofmt -w cmd internal
 go test -race -count=1 ./...
 go vet ./...
@@ -244,6 +244,17 @@ shasum -a 256 -c dist/checksums.txt
 ./dist/ssc-init-darwin-$(go env GOARCH) version --json
 git status --short
 ```
+
+### Independent-review evidence
+
+The Task 13 review round strengthens the acceptance evidence without broadening the product catalog or public claim:
+
+- A literal, production-independent oracle fixes the approved Darwin catalog at 52 target instances and checks every `TargetSpec` field, implemented/unsupported semantic, instance reference, and happy-path status (`18 complete`, `8 not_present`, `18 unsupported`, `8 skipped`).
+- One privacy boundary checks the serialized report and snapshot plus SQLite, WAL, and shared-memory files for raw fixture roots, unconfigured process-home values, hostile outside paths, and every fixture credential/header sentinel. A repository-rooted source audit rejects direct host filesystem read/traversal calls from scoped collectors.
+- Collision scenarios now recompute and compare finalized observation IDs, exact location/metadata evidence, executable-to-package linkage, and fixed probe execution order. The hostile fixture proves that only its Codex plugin target becomes partial, and the observed-location scenario requires the exact ordered removal/addition delta with no extra entity changes.
+- The migration-3 fixture contains ordered legacy assets, a relationship, inventory errors, and coverage rows. Reopening under schema 4 preserves those rows exactly while status v2 deliberately hides v2-only scope and coverage provenance for the v1 snapshot.
+
+The source audit initially failed because project walking called host `os` APIs directly, outside `Environment.FS`. The approved narrow exception is commit `790c551` (`fix: route project walks through injected filesystem`): it routes project root stat/open/traversal through the existing `platform.RootedFileSystem` and `RootedDirectory` interfaces. An injected virtual-root fake proves there is no host-path fallback while the existing symlink rejection, descriptor identity checks, budgets, cancellation, deterministic ordering, statuses, and catalog remain unchanged. No new platform interface, scan scope, catalog, identity, or model behavior was added.
 
 ### Closed gaps
 
