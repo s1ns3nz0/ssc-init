@@ -25,6 +25,17 @@ func TestOSFileSystemProvidesRootedReadBoundary(t *testing.T) {
 	if !ok {
 		t.Fatal("OSFileSystem does not provide rooted reads")
 	}
+	noFollow, ok := any(OSFileSystem{}).(NoFollowFileSystem)
+	if !ok {
+		t.Fatal("OSFileSystem does not provide no-follow observations")
+	}
+	linkedFromHost, err := noFollow.Lstat(filepath.Join(home, "linked"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkedFromHost.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("host no-follow mode=%v", linkedFromHost.Mode())
+	}
 	root, err := filesystem.OpenRoot(home)
 	if err != nil {
 		t.Fatal(err)

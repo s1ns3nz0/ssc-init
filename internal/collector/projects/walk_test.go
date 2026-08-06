@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -71,19 +72,31 @@ func TestResolveRootsDefaultsSortsAndRejectsUnsafeValues(t *testing.T) {
 }
 
 func TestConfiguredRootSymlinkIsRejected(t *testing.T) {
-	home := t.TempDir()
-	realRoot := filepath.Join(home, "real")
-	if err := os.MkdirAll(realRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	linkedRoot := filepath.Join(home, "linked")
-	if err := os.Symlink(realRoot, linkedRoot); err != nil {
-		t.Fatal(err)
-	}
-	got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: linkedRoot, Ref: "$HOME/linked"}}, limits: defaultWalkLimits()})
-	assertTargetIssue(t, got, "$HOME/linked", model.TargetPartial, "symlink_rejected")
-	if len(got.Assets) != 0 || len(got.LocalTargets) != 0 {
-		t.Fatalf("result=%+v", got)
+	for _, variant := range []string{"directory", "file", "dangling"} {
+		t.Run(variant, func(t *testing.T) {
+			home := t.TempDir()
+			target := filepath.Join(home, "target")
+			switch variant {
+			case "directory":
+				if err := os.MkdirAll(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				writeWalkFile(t, target, "fixture")
+			}
+			linkedRoot := filepath.Join(home, "linked")
+			if err := os.Symlink(target, linkedRoot); err != nil {
+				t.Fatal(err)
+			}
+			got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: linkedRoot, Ref: "$HOME/linked"}}, limits: defaultWalkLimits()})
+			assertExactProjectTarget(t, got, model.TargetCoverage{
+				TargetID: projectRootTargetID, InstanceRef: "$HOME/linked", Status: model.TargetPartial,
+				Errors: []model.CoverageError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}},
+			})
+			if len(got.Assets) != 0 || len(got.LocalTargets) != 0 {
+				t.Fatalf("result=%+v", got)
+			}
+		})
 	}
 }
 
@@ -136,6 +149,145 @@ func TestWalkerDetectsDirectoryIdentitySwapAndKeepsSafeSibling(t *testing.T) {
 	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != filepath.Join(root, "safe", ".mcp.json") {
 		t.Fatalf("localTargets=%+v", got.LocalTargets)
 	}
+}
+
+func TestWalkerRejectsConfiguredRootSwapBetweenNoFollowObservationAndOpen(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeWalkFile(t, filepath.Join(root, "original", ".mcp.json"), `{}`)
+	replacement := filepath.Join(home, "replacement")
+	writeWalkFile(t, filepath.Join(replacement, "replacement", ".mcp.json"), `{}`)
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := &rootSwapFileSystem{root: root, replacement: replacement}
+	environment := testutil.Environment(t, home)
+	environment.FS = injected
+
+	got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTargetIssue(t, got, "$HOME/Projects", model.TargetPartial, "identity_changed")
+	if injected.lstatCalls != 1 || injected.openRootCalls != 1 {
+		t.Fatalf("injected calls lstat=%d openRoot=%d want=1 each", injected.lstatCalls, injected.openRootCalls)
+	}
+	if len(got.Assets) != 0 || len(got.LocalTargets) != 0 {
+		t.Fatalf("swapped root produced evidence: %+v", got)
+	}
+}
+
+func TestWalkerFailsClosedWithoutRootedOrNoFollowCapability(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeWalkFile(t, filepath.Join(root, "sample", ".mcp.json"), `{}`)
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	osFileSystem := platform.OSFileSystem{}
+	for _, testCase := range []struct {
+		name       string
+		fileSystem platform.FileSystem
+	}{
+		{name: "missing no-follow", fileSystem: rootedOnlyFileSystem{FileSystem: osFileSystem, rooted: osFileSystem}},
+		{name: "missing rooted", fileSystem: noFollowOnlyFileSystem{FileSystem: osFileSystem, noFollow: osFileSystem}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := testutil.Environment(t, home)
+			environment.FS = testCase.fileSystem
+			got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(context.Background(), environment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertExactProjectTarget(t, got, model.TargetCoverage{
+				TargetID: projectRootTargetID, InstanceRef: "$HOME/Projects", Status: model.TargetUnavailable,
+				Errors: []model.CoverageError{{Code: "root_unavailable", Message: "configured project root is unavailable"}},
+			})
+			if len(got.Assets) != 0 || len(got.LocalTargets) != 0 {
+				t.Fatalf("capability failure produced evidence: %+v", got)
+			}
+		})
+	}
+}
+
+func TestWalkerReportsInjectedNoFollowFailureUnavailable(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := testutil.Environment(t, home)
+	environment.FS = noFollowErrorFileSystem{OSFileSystem: platform.OSFileSystem{}, err: fs.ErrPermission}
+	got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertExactProjectTarget(t, got, model.TargetCoverage{
+		TargetID: projectRootTargetID, InstanceRef: "$HOME/Projects", Status: model.TargetUnavailable,
+		Errors: []model.CoverageError{{Code: "root_unavailable", Message: "configured project root is unavailable"}},
+	})
+}
+
+type rootedOnlyFileSystem struct {
+	platform.FileSystem
+	rooted platform.RootedFileSystem
+}
+
+func (f rootedOnlyFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	return f.rooted.OpenRoot(name)
+}
+
+type noFollowOnlyFileSystem struct {
+	platform.FileSystem
+	noFollow platform.NoFollowFileSystem
+}
+
+func (f noFollowOnlyFileSystem) Lstat(name string) (os.FileInfo, error) {
+	return f.noFollow.Lstat(name)
+}
+
+type noFollowErrorFileSystem struct {
+	platform.OSFileSystem
+	err error
+}
+
+func (f noFollowErrorFileSystem) Lstat(string) (os.FileInfo, error) {
+	return nil, f.err
+}
+
+type rootSwapFileSystem struct {
+	platform.OSFileSystem
+	root          string
+	replacement   string
+	lstatCalls    int
+	openRootCalls int
+}
+
+func (f *rootSwapFileSystem) Lstat(name string) (os.FileInfo, error) {
+	f.lstatCalls++
+	expected, err := os.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	moved := f.root + "-moved"
+	if err := os.Rename(f.root, moved); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(f.replacement, f.root); err != nil {
+		return nil, err
+	}
+	return expected, nil
+}
+
+func (f *rootSwapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	f.openRootCalls++
+	return f.OSFileSystem.OpenRoot(name)
 }
 
 func TestWalkerReturnsBoundedPartialCoverageAndKeepsSafeRoots(t *testing.T) {
@@ -237,8 +389,8 @@ func TestWalkerUsesInjectedRootedFilesystemWithoutHostPathFallback(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if injected.statCalls != 1 || injected.openRootCalls != 1 {
-		t.Fatalf("injected calls stat=%d openRoot=%d want=1 each", injected.statCalls, injected.openRootCalls)
+	if injected.lstatCalls != 1 || injected.openRootCalls != 1 {
+		t.Fatalf("injected calls lstat=%d openRoot=%d want=1 each", injected.lstatCalls, injected.openRootCalls)
 	}
 	if len(got.Targets) != 1 || got.Targets[0].Status != model.TargetComplete {
 		t.Fatalf("targets=%+v", got.Targets)
@@ -253,16 +405,16 @@ type redirectedRootedFileSystem struct {
 	platform.OSFileSystem
 	virtualRoot   string
 	realRoot      string
-	statCalls     int
+	lstatCalls    int
 	openRootCalls int
 }
 
-func (f *redirectedRootedFileSystem) Stat(name string) (os.FileInfo, error) {
-	f.statCalls++
+func (f *redirectedRootedFileSystem) Lstat(name string) (os.FileInfo, error) {
+	f.lstatCalls++
 	if name != f.virtualRoot {
 		return nil, os.ErrNotExist
 	}
-	return f.OSFileSystem.Stat(f.realRoot)
+	return f.OSFileSystem.Lstat(f.realRoot)
 }
 
 func (f *redirectedRootedFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
@@ -321,6 +473,19 @@ func assertTargetIssue(t *testing.T, result model.CollectorResult, instanceRef s
 		t.Fatalf("target=%+v missing issue %q", target, code)
 	}
 	t.Fatalf("targets=%+v missing instance %q", result.Targets, instanceRef)
+}
+
+func assertExactProjectTarget(t *testing.T, result model.CollectorResult, want model.TargetCoverage) {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.TargetID == want.TargetID && target.InstanceRef == want.InstanceRef {
+			if !reflect.DeepEqual(target, want) {
+				t.Fatalf("target=%+v want=%+v", target, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("targets=%+v missing %q/%q", result.Targets, want.TargetID, want.InstanceRef)
 }
 
 func assertLocalPath(t *testing.T, targets []model.LocalTarget, path string) {

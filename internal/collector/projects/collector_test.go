@@ -224,12 +224,15 @@ func TestProjectCollectorDistinguishesMissingAndUnavailableRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statuses := make(map[string]model.TargetStatus)
-	for _, target := range got.Targets {
-		statuses[target.InstanceRef] = target.Status
+	wantTargets := []model.TargetCoverage{
+		{TargetID: "projects.root", InstanceRef: "$HOME/missing", Status: model.TargetNotPresent},
+		{
+			TargetID: "projects.root", InstanceRef: "$HOME/not-a-directory", Status: model.TargetUnavailable,
+			Errors: []model.CoverageError{{Code: "root_unavailable", Message: "configured project root is unavailable"}},
+		},
 	}
-	if statuses["$HOME/missing"] != model.TargetNotPresent || statuses["$HOME/not-a-directory"] != model.TargetUnavailable {
-		t.Fatalf("targets=%+v", got.Targets)
+	if !reflect.DeepEqual(got.Targets, wantTargets) {
+		t.Fatalf("targets=%+v want=%+v", got.Targets, wantTargets)
 	}
 	if got.Status != model.CoveragePartial {
 		t.Fatalf("status=%q", got.Status)
@@ -250,7 +253,8 @@ func TestProjectCollectorReportsSafelyEmptyRootComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.CoverageComplete || len(got.Targets) != 1 || got.Targets[0].Status != model.TargetComplete {
+	wantTarget := model.TargetCoverage{TargetID: "projects.root", InstanceRef: "$HOME/empty", Status: model.TargetComplete}
+	if got.Status != model.CoverageComplete || !reflect.DeepEqual(got.Targets, []model.TargetCoverage{wantTarget}) {
 		t.Fatalf("result=%+v", got)
 	}
 	if len(got.Assets) != 0 || len(got.Observations) != 0 || len(got.LocalTargets) != 0 {

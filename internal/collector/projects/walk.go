@@ -81,33 +81,37 @@ func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, con
 	if err := ctx.Err(); err != nil {
 		return rootWalk{}, err
 	}
-	expected, err := fileSystem.Stat(configured.Path)
+	noFollowFileSystem, hasNoFollow := fileSystem.(platform.NoFollowFileSystem)
+	rootedFileSystem, hasRooted := fileSystem.(platform.RootedFileSystem)
+	if !hasNoFollow || !hasRooted {
+		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
+	}
+	expected, err := noFollowFileSystem.Lstat(configured.Path)
 	if err != nil {
 		status := classifyRootError(err)
 		if status == model.TargetNotPresent {
 			return rootWalk{status: status}, nil
 		}
 		return rootWalk{status: status, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
+	}
+	if expected != nil && expected.Mode()&fs.ModeSymlink != 0 {
+		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("symlink_rejected", "symbolic link was not followed")}}, nil
 	}
 	if expected == nil || !expected.IsDir() {
 		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
 	}
-	rootedFileSystem, ok := fileSystem.(platform.RootedFileSystem)
-	if !ok {
-		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
-	}
 	root, err := rootedFileSystem.OpenRoot(configured.Path)
 	if err != nil {
-		status := classifyRootError(err)
-		if status == model.TargetNotPresent {
-			return rootWalk{status: status}, nil
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, platform.ErrUnsafeRootedPath) {
+			return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("identity_changed", "project directory identity changed")}}, nil
 		}
-		if errors.Is(err, platform.ErrUnsafeRootedPath) {
-			return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("symlink_rejected", "symbolic link was not followed")}}, nil
-		}
-		return rootWalk{status: status, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
+		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
 	}
 	defer root.Close()
+	rootIdentity, err := root.Lstat(".")
+	if err != nil || rootIdentity == nil || !rootIdentity.IsDir() || !os.SameFile(expected, rootIdentity) {
+		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("identity_changed", "project directory identity changed")}}, nil
+	}
 	directory, err := platform.OpenVerifiedDirectory(root)
 	if err != nil {
 		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError(identityErrorCode(err), "project directory identity changed")}}, nil

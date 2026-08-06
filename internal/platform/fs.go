@@ -18,6 +18,12 @@ type FileSystem interface {
 	WalkDir(root string, fn fs.WalkDirFunc) error
 }
 
+// NoFollowFileSystem is an optional read boundary for observing a host path
+// without following its final symbolic link.
+type NoFollowFileSystem interface {
+	Lstat(name string) (os.FileInfo, error)
+}
+
 // RootedFileSystem is an optional read boundary for collectors that must keep
 // traversal anchored to an already-open directory.
 type RootedFileSystem interface {
@@ -97,6 +103,10 @@ func (OSFileSystem) ReadDir(name string) ([]os.DirEntry, error) {
 
 func (OSFileSystem) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
+}
+
+func (OSFileSystem) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(name)
 }
 
 func (OSFileSystem) WalkDir(root string, fn fs.WalkDirFunc) error {
