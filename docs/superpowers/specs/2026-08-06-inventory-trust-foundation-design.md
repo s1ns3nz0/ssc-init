@@ -1,7 +1,7 @@
 # SSC Init Inventory Trust Foundation Design
 
 Date: 2026-08-06  
-Status: approved direction; written-spec review pending  
+Status: approved  
 Parent design: `docs/superpowers/specs/2026-08-05-ssc-init-design.md`  
 Validation evidence: `docs/testing/2026-08-06-use-case-validation.md`
 
