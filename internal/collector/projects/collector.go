@@ -174,7 +174,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		walked, err := walkConfiguredRoot(ctx, root, limits, c.beforeOpen)
+		walked, err := walkConfiguredRoot(ctx, env.FS, root, limits, c.beforeOpen)
 		if err != nil {
 			return result, err
 		}

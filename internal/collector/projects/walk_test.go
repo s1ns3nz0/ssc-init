@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
 
@@ -214,6 +215,62 @@ func TestWalkerEmitsDeterministicConfigOrder(t *testing.T) {
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths=%q want=%q", paths, want)
 	}
+}
+
+func TestWalkerUsesInjectedRootedFilesystemWithoutHostPathFallback(t *testing.T) {
+	home := t.TempDir()
+	realRoot := filepath.Join(t.TempDir(), "backing-root")
+	writeWalkFile(t, filepath.Join(realRoot, "sample", ".mcp.json"), `{}`)
+	virtualRoot := filepath.Join(t.TempDir(), "not-present-on-host", "Projects")
+	if _, err := os.Lstat(virtualRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("virtual test root unexpectedly exists: %v", err)
+	}
+	roots, err := ResolveRoots(home, []string{virtualRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := &redirectedRootedFileSystem{virtualRoot: virtualRoot, realRoot: realRoot}
+	environment := testutil.Environment(t, home)
+	environment.FS = injected
+
+	got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if injected.statCalls != 1 || injected.openRootCalls != 1 {
+		t.Fatalf("injected calls stat=%d openRoot=%d want=1 each", injected.statCalls, injected.openRootCalls)
+	}
+	if len(got.Targets) != 1 || got.Targets[0].Status != model.TargetComplete {
+		t.Fatalf("targets=%+v", got.Targets)
+	}
+	wantLocalPath := filepath.Join(virtualRoot, "sample", ".mcp.json")
+	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != wantLocalPath {
+		t.Fatalf("localTargets=%+v want path=%q", got.LocalTargets, wantLocalPath)
+	}
+}
+
+type redirectedRootedFileSystem struct {
+	platform.OSFileSystem
+	virtualRoot   string
+	realRoot      string
+	statCalls     int
+	openRootCalls int
+}
+
+func (f *redirectedRootedFileSystem) Stat(name string) (os.FileInfo, error) {
+	f.statCalls++
+	if name != f.virtualRoot {
+		return nil, os.ErrNotExist
+	}
+	return f.OSFileSystem.Stat(f.realRoot)
+}
+
+func (f *redirectedRootedFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	f.openRootCalls++
+	if name != f.virtualRoot {
+		return nil, os.ErrNotExist
+	}
+	return f.OSFileSystem.OpenRoot(f.realRoot)
 }
 
 func collectProjectTest(t *testing.T, projectCollector *projectCollector) model.CollectorResult {

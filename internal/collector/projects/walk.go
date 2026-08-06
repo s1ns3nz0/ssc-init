@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/ssc-init/ssc-init/internal/model"
-	"golang.org/x/sys/unix"
+	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
 const (
@@ -77,11 +77,11 @@ type rootWalker struct {
 	errors     []model.CoverageError
 }
 
-func walkConfiguredRoot(ctx context.Context, configured Root, limits walkLimits, beforeOpen func(string)) (rootWalk, error) {
+func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, configured Root, limits walkLimits, beforeOpen func(string)) (rootWalk, error) {
 	if err := ctx.Err(); err != nil {
 		return rootWalk{}, err
 	}
-	expected, err := os.Lstat(configured.Path)
+	expected, err := fileSystem.Stat(configured.Path)
 	if err != nil {
 		status := classifyRootError(err)
 		if status == model.TargetNotPresent {
@@ -89,26 +89,28 @@ func walkConfiguredRoot(ctx context.Context, configured Root, limits walkLimits,
 		}
 		return rootWalk{status: status, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
 	}
-	if expected.Mode()&fs.ModeSymlink != 0 {
-		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("symlink_rejected", "symbolic link was not followed")}}, nil
-	}
-	if !expected.IsDir() {
+	if expected == nil || !expected.IsDir() {
 		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
 	}
-
-	root, err := os.OpenRoot(configured.Path)
+	rootedFileSystem, ok := fileSystem.(platform.RootedFileSystem)
+	if !ok {
+		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
+	}
+	root, err := rootedFileSystem.OpenRoot(configured.Path)
 	if err != nil {
-		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
+		status := classifyRootError(err)
+		if status == model.TargetNotPresent {
+			return rootWalk{status: status}, nil
+		}
+		if errors.Is(err, platform.ErrUnsafeRootedPath) {
+			return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("symlink_rejected", "symbolic link was not followed")}}, nil
+		}
+		return rootWalk{status: status, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
 	}
 	defer root.Close()
-	directory, err := root.Open(".")
+	directory, err := platform.OpenVerifiedDirectory(root)
 	if err != nil {
-		return rootWalk{status: model.TargetUnavailable, errors: []model.CoverageError{targetError("root_unavailable", "configured project root is unavailable")}}, nil
-	}
-	opened, statErr := directory.Stat()
-	if statErr != nil || opened == nil || !os.SameFile(expected, opened) {
-		_ = directory.Close()
-		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("identity_changed", "project directory identity changed")}}, nil
+		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError(identityErrorCode(err), "project directory identity changed")}}, nil
 	}
 
 	walker := &rootWalker{ctx: ctx, limits: limits, beforeOpen: beforeOpen}
@@ -128,7 +130,7 @@ func walkConfiguredRoot(ctx context.Context, configured Root, limits walkLimits,
 	return rootWalk{status: status, configs: walker.configs, errors: walker.errors}, nil
 }
 
-func (walker *rootWalker) walkDirectory(root *os.Root, directory *os.File, relative string, depth int) (bool, error) {
+func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory platform.RootedFile, relative string, depth int) (bool, error) {
 	if err := walker.ctx.Err(); err != nil {
 		return true, err
 	}
@@ -154,17 +156,20 @@ func (walker *rootWalker) walkDirectory(root *os.Root, directory *os.File, relat
 		if relative != "." {
 			entryRelative = filepath.Join(relative, name)
 		}
-		var expected unix.Stat_t
-		if err := unix.Fstatat(int(directory.Fd()), name, &expected, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		expected, err := root.Lstat(name)
+		if err != nil {
 			walker.addError("path_unavailable", "project entry is unavailable")
 			continue
 		}
-		modeType := expected.Mode & unix.S_IFMT
-		if modeType == unix.S_IFLNK {
+		if expected == nil {
+			walker.addError("path_unavailable", "project entry is unavailable")
+			continue
+		}
+		if expected.Mode()&fs.ModeSymlink != 0 {
 			walker.addError("symlink_rejected", "symbolic link was not followed")
 			continue
 		}
-		if modeType == unix.S_IFDIR {
+		if expected.IsDir() {
 			if excludedDirectory(entryRelative) {
 				continue
 			}
@@ -192,11 +197,11 @@ func (walker *rootWalker) walkDirectory(root *os.Root, directory *os.File, relat
 		if !recognized {
 			continue
 		}
-		if modeType != unix.S_IFREG {
+		if !expected.Mode().IsRegular() {
 			walker.addError("path_unavailable", "project configuration is unavailable")
 			continue
 		}
-		if int64(expected.Size) < 0 || int64(expected.Size) > walker.limits.maxConfigBytes {
+		if expected.Size() < 0 || expected.Size() > walker.limits.maxConfigBytes {
 			walker.addError("config_size_limit", "project configuration exceeds the size limit")
 			continue
 		}
@@ -213,7 +218,7 @@ func (walker *rootWalker) walkDirectory(root *os.Root, directory *os.File, relat
 			continue
 		}
 		_ = file.Close()
-		if int64(opened.Size) < 0 || int64(opened.Size) > walker.limits.maxConfigBytes {
+		if opened.Size() < 0 || opened.Size() > walker.limits.maxConfigBytes {
 			walker.addError("config_size_limit", "project configuration exceeds the size limit")
 			continue
 		}
@@ -224,7 +229,7 @@ func (walker *rootWalker) walkDirectory(root *os.Root, directory *os.File, relat
 	return false, nil
 }
 
-func readBoundedDirectory(directory *os.File, remaining int) ([]os.DirEntry, bool, error) {
+func readBoundedDirectory(directory platform.RootedFile, remaining int) ([]os.DirEntry, bool, error) {
 	if remaining < 0 {
 		return nil, true, nil
 	}
@@ -248,7 +253,7 @@ func readBoundedDirectory(directory *os.File, remaining int) ([]os.DirEntry, boo
 	}
 }
 
-func openVerifiedDirectory(parent *os.Root, name string, expected unix.Stat_t) (*os.Root, *os.File, error) {
+func openVerifiedDirectory(parent platform.RootedDirectory, name string, expected os.FileInfo) (platform.RootedDirectory, platform.RootedFile, error) {
 	child, err := parent.OpenRoot(name)
 	if err != nil {
 		return nil, nil, err
@@ -258,8 +263,8 @@ func openVerifiedDirectory(parent *os.Root, name string, expected unix.Stat_t) (
 		_ = child.Close()
 		return nil, nil, err
 	}
-	var opened unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &opened); err != nil || !sameFileIdentity(expected, opened) || opened.Mode&unix.S_IFMT != unix.S_IFDIR {
+	opened, err := directory.Stat()
+	if err != nil || opened == nil || !opened.IsDir() || !os.SameFile(expected, opened) {
 		_ = directory.Close()
 		_ = child.Close()
 		return nil, nil, errIdentityChanged
@@ -267,27 +272,23 @@ func openVerifiedDirectory(parent *os.Root, name string, expected unix.Stat_t) (
 	return child, directory, nil
 }
 
-func openVerifiedFile(parent *os.Root, name string, expected unix.Stat_t) (*os.File, unix.Stat_t, error) {
-	file, err := parent.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+func openVerifiedFile(parent platform.RootedDirectory, name string, expected os.FileInfo) (platform.RootedFile, os.FileInfo, error) {
+	file, err := parent.Open(name)
 	if err != nil {
-		return nil, unix.Stat_t{}, err
+		return nil, nil, err
 	}
-	var opened unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &opened); err != nil || !sameFileIdentity(expected, opened) || opened.Mode&unix.S_IFMT != unix.S_IFREG {
+	opened, err := file.Stat()
+	if err != nil || opened == nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
 		_ = file.Close()
-		return nil, unix.Stat_t{}, errIdentityChanged
+		return nil, nil, errIdentityChanged
 	}
 	return file, opened, nil
 }
 
 var errIdentityChanged = errors.New("filesystem identity changed")
 
-func sameFileIdentity(expected, opened unix.Stat_t) bool {
-	return expected.Dev == opened.Dev && expected.Ino == opened.Ino && expected.Mode&unix.S_IFMT == opened.Mode&unix.S_IFMT
-}
-
 func identityErrorCode(err error) string {
-	if errors.Is(err, errIdentityChanged) {
+	if errors.Is(err, errIdentityChanged) || errors.Is(err, platform.ErrUnsafeRootedPath) {
 		return "identity_changed"
 	}
 	return "path_unavailable"
