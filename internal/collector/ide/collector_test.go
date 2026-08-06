@@ -15,10 +15,185 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/store"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
+
+func TestIDECatalogReportsMissingEmptyAndUnsupportedTargets(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".vscode", "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]model.TargetStatus{
+		"ide.cursor.extensions":          model.TargetNotPresent,
+		"ide.custom-roots":               model.TargetUnsupported,
+		"ide.dev-container":              model.TargetUnsupported,
+		"ide.environment-relocated":      model.TargetUnsupported,
+		"ide.jetbrains.plugins":          model.TargetNotPresent,
+		"ide.remote-ssh":                 model.TargetUnsupported,
+		"ide.remote-wsl":                 model.TargetUnsupported,
+		"ide.service-api":                model.TargetUnsupported,
+		"ide.vscode-insiders.extensions": model.TargetNotPresent,
+		"ide.vscode-oss.extensions":      model.TargetNotPresent,
+		"ide.vscode.extensions":          model.TargetComplete,
+		"ide.windsurf.extensions":        model.TargetNotPresent,
+	}
+	assertIDECoverage(t, got, want)
+	if got.Status != model.CoveragePartial {
+		t.Fatalf("status=%q targets=%+v", got.Status, got.Targets)
+	}
+}
+
+func TestIDECatalogJetBrainsRootWithOnlyNonProductEntriesIsComplete(t *testing.T) {
+	home := t.TempDir()
+	writeIDEFile(t, filepath.Join(home, "Library", "Application Support", "JetBrains", ".DS_Store"), "ignored")
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "", model.TargetComplete, 0, 0)
+}
+
+func TestSameVSCodeExtensionAtTwoLocationsPreservesBothObservations(t *testing.T) {
+	home := t.TempDir()
+	writeVSCodeManifest(t, home, ".vscode/extensions/demo-a/package.json", "pub", "demo", "1.0.0")
+	writeVSCodeManifest(t, home, ".vscode/extensions/demo-b/package.json", "pub", "demo", "1.0.0")
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetID := "ide-extension:vscode:pub.demo@1.0.0"
+	if countIDEAssets(got.Assets, assetID) != 2 {
+		t.Fatalf("assets=%+v", got.Assets)
+	}
+	if countIDEObservations(got.Observations, assetID) != 2 {
+		t.Fatalf("observations=%+v", got.Observations)
+	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetComplete, 2, 2)
+	for _, asset := range got.Assets {
+		if asset.ID == assetID && (asset.Path != "" || asset.Source != "vscode" || !reflect.DeepEqual(asset.Metadata, map[string]string{"publisher": "pub"})) {
+			t.Fatalf("canonical asset retained observed fields: %+v", asset)
+		}
+	}
+
+	normalized := inventory.Build([]model.CollectorResult{got})
+	if countIDEAssets(normalized.Assets, assetID) != 1 || countIDEObservations(normalized.Observations, assetID) != 2 {
+		t.Fatalf("inventory=%+v", normalized)
+	}
+	assertIDECountsMatchEmitted(t, got)
+}
+
+func TestSameVSCodeExtensionAcrossRootsAndVersionsPreservesEveryOccurrence(t *testing.T) {
+	home := t.TempDir()
+	writeVSCodeManifest(t, home, ".vscode/extensions/stable/package.json", "pub", "demo", "1.0.0")
+	writeVSCodeManifest(t, home, ".vscode/extensions/next/package.json", "pub", "demo", "2.0.0")
+	writeVSCodeManifest(t, home, ".cursor/extensions/stable/package.json", "pub", "demo", "1.0.0")
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{
+		"ide-extension:vscode:pub.demo@1.0.0": 1,
+		"ide-extension:vscode:pub.demo@2.0.0": 1,
+		"ide-extension:cursor:pub.demo@1.0.0": 1,
+	} {
+		if countIDEAssets(got.Assets, id) != want || countIDEObservations(got.Observations, id) != want {
+			t.Fatalf("id=%q assets=%+v observations=%+v", id, got.Assets, got.Observations)
+		}
+	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetComplete, 2, 2)
+	assertIDETarget(t, got, "ide.cursor.extensions", "", model.TargetComplete, 1, 1)
+	assertIDECountsMatchEmitted(t, got)
+}
+
+func TestIDEJetBrainsProductInstancesPreserveSamePluginObservations(t *testing.T) {
+	home := t.TempDir()
+	for _, product := range []string{"IdeaIC2025.1", "PyCharm2025.1"} {
+		writeIDEFile(t, filepath.Join(home, "Library", "Application Support", "JetBrains", product, "plugins", "demo", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.demo</id><name>Demo</name><version>1.0.0</version></idea-plugin>`)
+	}
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetID := "ide-extension:jetbrains:org.example.demo@1.0.0"
+	if countIDEAssets(got.Assets, assetID) != 2 || countIDEObservations(got.Observations, assetID) != 2 {
+		t.Fatalf("assets=%+v observations=%+v", got.Assets, got.Observations)
+	}
+	for _, product := range []string{"IdeaIC2025.1", "PyCharm2025.1"} {
+		assertIDETarget(t, got, "ide.jetbrains.plugins", product, model.TargetComplete, 1, 1)
+		observation := observationForIDEProduct(t, got.Observations, assetID, product)
+		wantLocation := "$HOME/Library/Application Support/JetBrains/" + product + "/plugins/demo"
+		if observation.LocationRef != wantLocation || observation.Source != "ide.jetbrains.plugins" || observation.Metadata["manifest_path"] != "demo/META-INF/plugin.xml" || observation.Metadata["source_target"] != "ide.jetbrains.plugins" {
+			t.Fatalf("observation=%+v", observation)
+		}
+	}
+	normalized := inventory.Build([]model.CollectorResult{got})
+	if countIDEAssets(normalized.Assets, assetID) != 1 || countIDEObservations(normalized.Observations, assetID) != 2 {
+		t.Fatalf("inventory=%+v", normalized)
+	}
+	assertIDECountsMatchEmitted(t, got)
+}
+
+func TestIDEJetBrainsMalformedSiblingIsLocalizedToProductInstance(t *testing.T) {
+	home := t.TempDir()
+	writeIDEFile(t, filepath.Join(home, "Library", "Application Support", "JetBrains", "Alpha", "plugins", "bad", "META-INF", "plugin.xml"), `<idea-plugin><id>broken`)
+	writeIDEFile(t, filepath.Join(home, "Library", "Application Support", "JetBrains", "Zulu", "plugins", "good", "META-INF", "plugin.xml"), `<idea-plugin><id>org.example.good</id><name>Good</name><version>1.0.0</version></idea-plugin>`)
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Alpha", model.TargetPartial, 0, 0)
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Zulu", model.TargetComplete, 1, 1)
+	testutil.AssertAsset(t, got.Assets, "ide-extension:jetbrains:org.example.good@1.0.0")
+	assertIDECountsMatchEmitted(t, got)
+}
+
+func TestIDEIdentityQuarantinesCredentialShapedPublisherAndName(t *testing.T) {
+	home := t.TempDir()
+	publisherSecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	nameSecret := "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"
+	writeVSCodeManifest(t, home, ".vscode/extensions/good/package.json", "acme", "good", "1.0.0")
+	writeVSCodeManifest(t, home, ".vscode/extensions/bad-publisher/package.json", publisherSecret, "bad", "1.0.0")
+	writeVSCodeManifest(t, home, ".vscode/extensions/bad-name/package.json", "acme", nameSecret, "1.0.0")
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.good@1.0.0")
+	target := assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
+	if len(target.Errors) != 2 {
+		t.Fatalf("target=%+v", target)
+	}
+	for _, issue := range target.Errors {
+		if issue.Code != "identity_rejected" || issue.Path != "" {
+			t.Fatalf("issue=%+v", issue)
+		}
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{publisherSecret, nameSecret, home} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("rejected identity leaked: %s", encoded)
+		}
+	}
+}
 
 func TestCollectorFindsVSCodeAndJetBrainsExtensions(t *testing.T) {
 	got, err := New().Collect(context.Background(), testutil.Environment(t, "../../../testdata/home"))
@@ -27,12 +202,15 @@ func TestCollectorFindsVSCodeAndJetBrainsExtensions(t *testing.T) {
 	}
 
 	vscode := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.safe@1.2.3")
-	if vscode.Metadata["publisher"] != "acme" || vscode.Metadata["entry_point"] != "dist/extension.js" ||
-		vscode.Metadata["activation_events"] != "onCommand:acme.safe.run" || vscode.Metadata["capabilities"] != "commands" {
-		t.Fatalf("vscode metadata=%v", vscode.Metadata)
+	if vscode.Path != "" || vscode.Source != "vscode" || !reflect.DeepEqual(vscode.Metadata, map[string]string{"publisher": "acme"}) {
+		t.Fatalf("vscode asset=%+v", vscode)
+	}
+	vscodeObservation := observationForIDEAsset(t, got.Observations, vscode.ID)
+	if vscodeObservation.Metadata["entry_point"] != "dist/extension.js" || vscodeObservation.Metadata["activation_events"] != "onCommand:acme.safe.run" || vscodeObservation.Metadata["capabilities"] != "commands" {
+		t.Fatalf("vscode observation=%+v", vscodeObservation)
 	}
 	jetbrains := testutil.AssertAsset(t, got.Assets, "ide-extension:jetbrains:org.example.sample@1.0.0")
-	if jetbrains.Name != "Sample Plugin" {
+	if jetbrains.Name != "Sample Plugin" || jetbrains.Path != "" || jetbrains.Source != "jetbrains" || !reflect.DeepEqual(jetbrains.Metadata, map[string]string{"plugin_id": "org.example.sample", "publisher": "org.example"}) {
 		t.Fatalf("jetbrains asset=%+v", jetbrains)
 	}
 }
@@ -59,6 +237,7 @@ func TestCollectorRejectsDuplicateManifestIdentityKeysAndKeepsValidSibling(t *te
 	if got.Status != model.CoveragePartial || len(got.Assets) != 1 || strings.Contains(string(encoded), marker) {
 		t.Fatalf("result=%s", encoded)
 	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
 }
 
 func TestCollectorKeepsValidSiblingWhenManifestsAreMalformedOrOversized(t *testing.T) {
@@ -90,6 +269,7 @@ func TestCollectorKeepsValidSiblingWhenManifestsAreMalformedOrOversized(t *testi
 			t.Fatalf("sensitive detail persisted: %s", encoded)
 		}
 	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
 }
 
 func TestCollectorScansOnlyDirectChildrenOfFixedVSCodeRoots(t *testing.T) {
@@ -120,6 +300,10 @@ func TestCollectorScansOnlyDirectChildrenOfFixedVSCodeRoots(t *testing.T) {
 	for _, host := range []string{"vscode", "vscode-insiders", "cursor", "windsurf", "vscode-oss"} {
 		testutil.AssertAsset(t, got.Assets, "ide-extension:"+host+":acme.safe@1.0.0")
 	}
+	for _, targetID := range []string{"ide.vscode-insiders.extensions", "ide.cursor.extensions", "ide.windsurf.extensions", "ide.vscode-oss.extensions"} {
+		assertIDETarget(t, got, targetID, "", model.TargetComplete, 1, 1)
+	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
 	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
@@ -152,6 +336,9 @@ func TestCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
 	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || len(got.Errors) != 1 || strings.Contains(string(encoded), marker) || strings.Contains(string(encoded), home) {
 		t.Fatalf("result=%s", encoded)
 	}
+	for _, targetID := range []string{"ide.vscode.extensions", "ide.vscode-insiders.extensions", "ide.cursor.extensions", "ide.windsurf.extensions", "ide.vscode-oss.extensions", "ide.jetbrains.plugins"} {
+		assertIDETarget(t, got, targetID, "", model.TargetUnavailable, 0, 0)
+	}
 }
 
 func TestCollectorRejectsSymlinkedRootsAndEntries(t *testing.T) {
@@ -182,6 +369,8 @@ func TestCollectorRejectsSymlinkedRootsAndEntries(t *testing.T) {
 	if got.Status != model.CoveragePartial || len(got.Assets) != 1 || len(got.Errors) != 2 || strings.Contains(string(encoded), marker) || strings.Contains(string(encoded), outside) {
 		t.Fatalf("result=%s", encoded)
 	}
+	assertIDETarget(t, got, "ide.cursor.extensions", "", model.TargetPartial, 0, 0)
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
 }
 
 func TestCollectorRejectsManifestIdentitySwap(t *testing.T) {
@@ -205,6 +394,44 @@ func TestCollectorRejectsManifestIdentitySwap(t *testing.T) {
 	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || len(got.Errors) != 1 || strings.Contains(string(encoded), marker) {
 		t.Fatalf("result=%s", encoded)
 	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 0, 0)
+}
+
+func TestIDEIdentityRejectsExtensionDirectorySwapAfterEnumeration(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, ".vscode", "extensions", "swapped")
+	writeIDEFile(t, filepath.Join(target, "package.json"), `{"name":"expected","publisher":"acme","version":"1.0.0"}`)
+	marker := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	replacement := filepath.Join(home, "replacement-extension")
+	writeIDEFile(t, filepath.Join(replacement, "package.json"), `{"name":"replacement","publisher":"`+marker+`","version":"9.9.9"}`)
+
+	ideCollector := New().(*ideCollector)
+	swapped := false
+	ideCollector.beforeOpen = func(targetID, relative string) {
+		if swapped || targetID != "ide.vscode.extensions" || relative != "swapped" {
+			return
+		}
+		swapped = true
+		if err := os.Rename(target, target+"-old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ideCollector.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 0, 0)
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(marker)) {
+		t.Fatalf("replacement leaked: %s", encoded)
+	}
 }
 
 func TestCollectorRedactsHomeAndDoesNotPersistUnselectedManifestData(t *testing.T) {
@@ -224,8 +451,9 @@ func TestCollectorRedactsHomeAndDoesNotPersistUnselectedManifestData(t *testing.
 		t.Fatal(err)
 	}
 	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.safe@1.0.0")
-	if asset.Metadata["entry_point"] != "$HOME/extension.js" || asset.Metadata["capabilities"] != "commands\x1fvirtualWorkspaces" {
-		t.Fatalf("asset=%+v", asset)
+	observation := observationForIDEAsset(t, got.Observations, asset.ID)
+	if observation.Metadata["entry_point"] != "$HOME/extension.js" || observation.Metadata["capabilities"] != "commands\x1fvirtualWorkspaces" {
+		t.Fatalf("observation=%+v", observation)
 	}
 	encoded, err := json.Marshal(got)
 	if err != nil {
@@ -259,18 +487,20 @@ func TestCollectorSanitizesSelectedVSCodeManifestMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.main@1.0.0")
+	mainAsset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.main@1.0.0")
+	main := observationForIDEAsset(t, got.Observations, mainAsset.ID)
 	if !strings.Contains(main.Metadata["entry_point"], "https://example.test/extension.js") || !strings.Contains(main.Metadata["entry_point"], "mode=safe") || !strings.Contains(main.Metadata["entry_point"], "redacted") ||
 		!strings.Contains(main.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(main.Metadata["activation_events"], "redacted") ||
 		!strings.Contains(main.Metadata["capabilities"], "commands") || !strings.Contains(main.Metadata["capabilities"], "redacted") {
 		t.Fatalf("main metadata=%v", main.Metadata)
 	}
-	browser := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser@1.0.0")
+	browserAsset := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser@1.0.0")
+	browser := observationForIDEAsset(t, got.Observations, browserAsset.ID)
 	if !strings.Contains(browser.Metadata["entry_point"], "https://example.test/browser.js") || !strings.Contains(browser.Metadata["entry_point"], "mode=safe") || !strings.Contains(browser.Metadata["entry_point"], "redacted") ||
 		browser.Metadata["activation_events"] != "onStartupFinished" || browser.Metadata["capabilities"] != "virtualWorkspaces" {
 		t.Fatalf("browser metadata=%v", browser.Metadata)
 	}
-	encoded, err := json.Marshal(got.Assets)
+	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,15 +541,17 @@ func TestCollectorRedactsStandaloneHighConfidenceCredentialFormats(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.tokens@1.0.0")
+	mainAsset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.tokens@1.0.0")
+	main := observationForIDEAsset(t, got.Observations, mainAsset.ID)
 	if main.Metadata["entry_point"] != redactedMetadata || !strings.Contains(main.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(main.Metadata["activation_events"], "event:ghp_short") || !strings.Contains(main.Metadata["activation_events"], "hash:0123456789abcdef0123456789abcdef") || !strings.Contains(main.Metadata["activation_events"], redactedMetadata) || !strings.Contains(main.Metadata["capabilities"], "commands") {
 		t.Fatalf("main metadata=%v", main.Metadata)
 	}
-	browser := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser-token@1.0.0")
-	if browser.Metadata["entry_point"] != redactedMetadata || browser.Metadata["activation_events"] != redactedMetadata || browser.Metadata["capabilities"] != "virtualWorkspaces" {
+	browserAsset := testutil.AssertAsset(t, got.Assets, "ide-extension:cursor:acme.browser-token@1.0.0")
+	browser := observationForIDEAsset(t, got.Observations, browserAsset.ID)
+	if !strings.Contains(browser.Metadata["entry_point"], "artifact=%5Bredacted%5D") || browser.Metadata["activation_events"] != redactedMetadata || browser.Metadata["capabilities"] != "virtualWorkspaces" {
 		t.Fatalf("browser metadata=%v", browser.Metadata)
 	}
-	encoded, err := json.Marshal(got.Assets)
+	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,10 +575,11 @@ func TestCollectorRedactsPercentEncodedCredentialInBenignQueryValue(t *testing.T
 		t.Fatal(err)
 	}
 	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.encoded@1.0.0")
-	if !strings.Contains(asset.Metadata["entry_point"], "artifact=%5Bredacted%5D") || !strings.Contains(asset.Metadata["entry_point"], "mode=safe") {
-		t.Fatalf("metadata=%v", asset.Metadata)
+	observation := observationForIDEAsset(t, got.Observations, asset.ID)
+	if !strings.Contains(observation.Metadata["entry_point"], "artifact=%5Bredacted%5D") || !strings.Contains(observation.Metadata["entry_point"], "mode=safe") {
+		t.Fatalf("metadata=%v", observation.Metadata)
 	}
-	encoded, err := json.Marshal(asset)
+	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +590,7 @@ func TestCollectorRedactsPercentEncodedCredentialInBenignQueryValue(t *testing.T
 	}
 }
 
-func TestCollectorKeepsNormalSKDashedPathAndRedactsExplicitSecretFamilies(t *testing.T) {
+func TestCollectorRetainsSafeReferenceForSKDashedPathAndRedactsExplicitSecretFamilies(t *testing.T) {
 	home := t.TempDir()
 	legacy := "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
 	project := "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
@@ -373,10 +606,11 @@ func TestCollectorKeepsNormalSKDashedPathAndRedactsExplicitSecretFamilies(t *tes
 		t.Fatal(err)
 	}
 	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.sk-shapes@1.0.0")
-	if asset.Metadata["entry_point"] != "dist/sk-language-server-extension.js" || !strings.Contains(asset.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(asset.Metadata["activation_events"], redactedMetadata) {
-		t.Fatalf("metadata=%v", asset.Metadata)
+	observation := observationForIDEAsset(t, got.Observations, asset.ID)
+	if !strings.HasPrefix(observation.Metadata["entry_point"], "extension-relative/path-sha256:") || !strings.Contains(observation.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(observation.Metadata["activation_events"], redactedMetadata) {
+		t.Fatalf("metadata=%v", observation.Metadata)
 	}
-	encoded, err := json.Marshal(asset)
+	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,6 +618,41 @@ func TestCollectorKeepsNormalSKDashedPathAndRedactsExplicitSecretFamilies(t *tes
 		if strings.Contains(string(encoded), token) {
 			t.Fatalf("secret family persisted: %s", encoded)
 		}
+	}
+}
+
+func TestIDEObservationMetadataPassesPersistencePrivacyBackstop(t *testing.T) {
+	home := t.TempDir()
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "safe", "package.json"), `{
+		"name":"safe","publisher":"acme","version":"1.0.0",
+		"main":"dist/sk-language-server-extension.js",
+		"activationEvents":["onCommand:acme.safe"]
+	}`)
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	databaseDirectory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(databaseDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Open(filepath.Join(databaseDirectory, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	scan := model.ScanResult{
+		SchemaVersion: "ssc-init.scan.v2", ScanID: "ide-privacy-backstop", Status: "partial",
+		StartedAt: time.Unix(1, 0).UTC(), FinishedAt: time.Unix(2, 0).UTC(),
+		Coverage: []model.CollectorResult{got},
+		Scope:    model.ScanScope{Platform: "darwin", CatalogVersion: collector.CatalogVersion},
+	}
+	if err := state.SaveScan(context.Background(), scan, inventory.Build(scan.Coverage)); err != nil {
+		t.Fatalf("persist IDE observation metadata: %v", err)
 	}
 }
 
@@ -407,12 +676,13 @@ func TestCollectorRedactsAllGitHubClassicTokenPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.github-prefixes@1.0.0")
+	observation := observationForIDEAsset(t, got.Observations, asset.ID)
 	for _, safe := range []string{"event:ghp_short", "event:gho_short", "event:ghu_short", "event:ghs_short", "event:ghr_short"} {
-		if !strings.Contains(asset.Metadata["activation_events"], safe) {
-			t.Fatalf("safe lookalike %q missing: %v", safe, asset.Metadata)
+		if !strings.Contains(observation.Metadata["activation_events"], safe) {
+			t.Fatalf("safe lookalike %q missing: %v", safe, observation.Metadata)
 		}
 	}
-	encoded, err := json.Marshal(asset)
+	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,6 +723,7 @@ func TestCollectorUsesOnlyTheBoundedJetBrainsManifestPattern(t *testing.T) {
 	if got.Status != model.CoveragePartial || len(got.Assets) != 1 || strings.Contains(string(encoded), marker) || strings.Contains(string(encoded), "org.example.outside") {
 		t.Fatalf("result=%s", encoded)
 	}
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Idea", model.TargetPartial, 1, 1)
 }
 
 func TestCollectorContinuesAfterOneJetBrainsProductCannotBeRead(t *testing.T) {
@@ -477,6 +748,8 @@ func TestCollectorContinuesAfterOneJetBrainsProductCannotBeRead(t *testing.T) {
 	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Path != "$HOME/Library/Application Support/JetBrains/Alpha/plugins" || strings.Contains(string(encoded), home) || strings.Contains(string(encoded), "permission denied") {
 		t.Fatalf("result=%s", encoded)
 	}
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Alpha", model.TargetUnavailable, 0, 0)
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Zulu", model.TargetComplete, 1, 1)
 }
 
 func TestCollectorRejectsRepeatedDirectJetBrainsIdentityElements(t *testing.T) {
@@ -505,6 +778,7 @@ func TestCollectorRejectsRepeatedDirectJetBrainsIdentityElements(t *testing.T) {
 			t.Fatalf("error=%+v", coverageErr)
 		}
 	}
+	assertIDETarget(t, got, "ide.jetbrains.plugins", "Idea", model.TargetPartial, 1, 1)
 }
 
 func TestJetBrainsDirectoryReadStopsAtEntryLimit(t *testing.T) {
@@ -583,6 +857,7 @@ func TestCollectorMarksVSCodeRootPartialAndProcessesPrefixAtEntryLimit(t *testin
 	if got.Status != model.CoveragePartial || len(got.Errors) != 1 || got.Errors[0].Code != "entry_limit" || got.Errors[0].Path != "$HOME/.vscode/extensions" {
 		t.Fatalf("result=%+v", got)
 	}
+	assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
 }
 
 func TestJetBrainsEntryBudgetChargesEachEnumeratedEntryOnce(t *testing.T) {
@@ -654,6 +929,115 @@ func writeIDEBytes(t *testing.T, path string, contents []byte) {
 	}
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeVSCodeManifest(t *testing.T, home, relative, publisher, name, version string) {
+	t.Helper()
+	contents, err := json.Marshal(map[string]string{
+		"name": name, "publisher": publisher, "version": version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeIDEBytes(t, filepath.Join(home, filepath.FromSlash(relative)), contents)
+}
+
+func countIDEAssets(assets []model.Asset, id string) int {
+	count := 0
+	for _, asset := range assets {
+		if asset.ID == id {
+			count++
+		}
+	}
+	return count
+}
+
+func countIDEObservations(observations []model.Observation, assetID string) int {
+	count := 0
+	for _, observation := range observations {
+		if observation.AssetID == assetID {
+			count++
+		}
+	}
+	return count
+}
+
+func observationForIDEAsset(t *testing.T, observations []model.Observation, assetID string) model.Observation {
+	t.Helper()
+	for _, observation := range observations {
+		if observation.AssetID == assetID {
+			return observation
+		}
+	}
+	t.Fatalf("missing observation for %q: %+v", assetID, observations)
+	return model.Observation{}
+}
+
+func observationForIDEProduct(t *testing.T, observations []model.Observation, assetID, product string) model.Observation {
+	t.Helper()
+	for _, observation := range observations {
+		if observation.AssetID == assetID && observation.Metadata["product_instance"] == product {
+			return observation
+		}
+	}
+	t.Fatalf("missing observation for %q product %q: %+v", assetID, product, observations)
+	return model.Observation{}
+}
+
+func assertIDECountsMatchEmitted(t *testing.T, result model.CollectorResult) {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.Status == model.TargetUnsupported {
+			continue
+		}
+		observations := 0
+		for _, observation := range result.Observations {
+			if observation.Source != target.TargetID {
+				continue
+			}
+			if target.InstanceRef != "" && observation.Metadata["product_instance"] != target.InstanceRef {
+				continue
+			}
+			if target.InstanceRef == "" && observation.Metadata["product_instance"] != "" {
+				continue
+			}
+			if observation.ID == "" {
+				t.Fatalf("unfinalized observation=%+v", observation)
+			}
+			observations++
+		}
+		if target.Assets != observations || target.Observations != observations {
+			t.Fatalf("target counts do not match emitted evidence: target=%+v observations=%+v", target, result.Observations)
+		}
+	}
+}
+
+func assertIDETarget(t *testing.T, result model.CollectorResult, id, instance string, status model.TargetStatus, assets, observations int) model.TargetCoverage {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.TargetID != id || target.InstanceRef != instance {
+			continue
+		}
+		if target.Status != status || target.Assets != assets || target.Observations != observations {
+			t.Fatalf("target=%+v", target)
+		}
+		return target
+	}
+	t.Fatalf("missing target %q instance %q: %+v", id, instance, result.Targets)
+	return model.TargetCoverage{}
+}
+
+func assertIDECoverage(t *testing.T, result model.CollectorResult, want map[string]model.TargetStatus) {
+	t.Helper()
+	if len(result.Targets) != len(want) {
+		t.Fatalf("targets=%+v want=%+v", result.Targets, want)
+	}
+	for _, target := range result.Targets {
+		status, ok := want[target.TargetID]
+		if !ok || target.InstanceRef != "" || target.Status != status {
+			t.Fatalf("target=%+v want=%+v", target, want)
+		}
 	}
 }
 

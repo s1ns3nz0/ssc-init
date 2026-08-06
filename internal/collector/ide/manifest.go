@@ -2,9 +2,11 @@ package ide
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"path/filepath"
@@ -12,20 +14,25 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/privacy"
 )
 
 const (
 	maxIdentityLength   = 512
 	maxMetadataLength   = 4096
 	maxMetadataItems    = 1024
+	maxManifestDepth    = 64
+	maxManifestTokens   = maxManifestBytes
 	metadataListDivider = "\x1f"
 	redactedMetadata    = "[redacted]"
 )
 
 var errInvalidManifest = errors.New("invalid IDE extension manifest")
+var errRejectedIDEIdentity = errors.New("IDE extension identity rejected")
 
 var highConfidenceCredentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(^|[^A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)`),
@@ -55,22 +62,30 @@ type jetBrainsManifest struct {
 	Version string `xml:"version"`
 }
 
-func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset, error) {
+type manifestEvidence struct {
+	asset    model.Asset
+	metadata map[string]string
+}
+
+func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, error) {
+	if !utf8.Valid(contents) {
+		return manifestEvidence{}, errInvalidManifest
+	}
 	var manifest vscodeManifest
 	if err := decodeJSON(contents, &manifest); err != nil {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
 	name, ok := normalizeIdentity(manifest.Name)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
 	publisher, ok := normalizeIdentity(manifest.Publisher)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
 	version, ok := normalizeIdentity(manifest.Version)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
 	entryPoint := strings.TrimSpace(manifest.Main)
 	if entryPoint == "" {
@@ -78,12 +93,12 @@ func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset,
 	}
 	entryPoint, ok = sanitizeSelectedMetadata(home, entryPoint, false)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
 
 	activationEvents, ok := sanitizeMetadataList(home, manifest.ActivationEvents, false)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
 	capabilityNames := make([]string, 0, len(manifest.Capabilities)+len(manifest.Contributes))
 	for capability := range manifest.Capabilities {
@@ -94,64 +109,65 @@ func parseVSCodeManifest(contents []byte, host, home, path string) (model.Asset,
 	}
 	capabilities, ok := sanitizeMetadataList(home, capabilityNames, true)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
-
-	return model.Asset{
-		ID:      "ide-extension:" + host + ":" + publisher + "." + name + "@" + version,
-		Type:    model.AssetIDEExtension,
-		Name:    name,
-		Version: version,
-		Path:    redactPath(home, path),
-		Source:  host,
-		Metadata: map[string]string{
-			"publisher":         publisher,
-			"entry_point":       entryPoint,
-			"activation_events": strings.Join(activationEvents, metadataListDivider),
-			"capabilities":      strings.Join(capabilities, metadataListDivider),
+	metadata := make(map[string]string, 3)
+	if entryPoint != "" {
+		metadata["entry_point"] = entryPoint
+	}
+	if len(activationEvents) > 0 {
+		metadata["activation_events"] = strings.Join(activationEvents, metadataListDivider)
+	}
+	if len(capabilities) > 0 {
+		metadata["capabilities"] = strings.Join(capabilities, metadataListDivider)
+	}
+	return manifestEvidence{
+		asset: model.Asset{
+			ID:   "ide-extension:" + host + ":" + publisher + "." + name + "@" + version,
+			Type: model.AssetIDEExtension, Name: name, Version: version, Source: host,
+			Metadata: map[string]string{"publisher": publisher},
 		},
+		metadata: metadata,
 	}, nil
 }
 
-func parseJetBrainsManifest(contents []byte, home, path string) (model.Asset, error) {
+func parseJetBrainsManifest(contents []byte) (manifestEvidence, error) {
+	if !utf8.Valid(contents) {
+		return manifestEvidence{}, errInvalidManifest
+	}
 	if err := validateJetBrainsIdentityElements(contents); err != nil {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
 	var manifest jetBrainsManifest
 	if err := decodeXML(contents, &manifest); err != nil {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errInvalidManifest
 	}
 	id, ok := normalizeIdentity(manifest.ID)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
 	version, ok := normalizeIdentity(manifest.Version)
 	if !ok {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
-	name, ok := normalizeMetadata(manifest.Name)
+	name, ok := normalizeCanonicalMetadata(manifest.Name)
 	if !ok || name == "" {
-		return model.Asset{}, errInvalidManifest
+		return manifestEvidence{}, errRejectedIDEIdentity
 	}
 	publisher := id
 	if index := strings.LastIndexByte(id, '.'); index > 0 {
 		publisher = id[:index]
 	}
+	publisher, ok = normalizeCanonicalMetadata(publisher)
+	if !ok || publisher == "" {
+		return manifestEvidence{}, errRejectedIDEIdentity
+	}
 
-	return model.Asset{
-		ID:      "ide-extension:jetbrains:" + id + "@" + version,
-		Type:    model.AssetIDEExtension,
-		Name:    name,
-		Version: version,
-		Path:    redactPath(home, path),
-		Source:  "jetbrains",
-		Metadata: map[string]string{
-			"publisher":         publisher,
-			"entry_point":       "",
-			"activation_events": "",
-			"capabilities":      "",
-		},
-	}, nil
+	return manifestEvidence{asset: model.Asset{
+		ID:   "ide-extension:jetbrains:" + id + "@" + version,
+		Type: model.AssetIDEExtension, Name: name, Version: version, Source: "jetbrains",
+		Metadata: map[string]string{"plugin_id": id, "publisher": publisher},
+	}}, nil
 }
 
 func validateJetBrainsIdentityElements(contents []byte) error {
@@ -161,6 +177,8 @@ func validateJetBrainsIdentityElements(contents []byte) error {
 	rootSeen := false
 	rootClosed := false
 	seenIdentity := make(map[string]struct{}, 3)
+	identityDepth := 0
+	tokens := 0
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
@@ -171,6 +189,10 @@ func validateJetBrainsIdentityElements(contents []byte) error {
 		}
 		if err != nil {
 			return err
+		}
+		tokens++
+		if tokens > maxManifestTokens {
+			return errInvalidManifest
 		}
 		switch value := token.(type) {
 		case xml.StartElement:
@@ -185,16 +207,26 @@ func validateJetBrainsIdentityElements(contents []byte) error {
 			if rootClosed {
 				return errInvalidManifest
 			}
+			if identityDepth > 0 {
+				return errInvalidManifest
+			}
 			if depth == 1 && (value.Name.Local == "id" || value.Name.Local == "name" || value.Name.Local == "version") {
 				if _, duplicate := seenIdentity[value.Name.Local]; duplicate {
 					return errInvalidManifest
 				}
 				seenIdentity[value.Name.Local] = struct{}{}
+				identityDepth = depth + 1
 			}
 			depth++
+			if depth > maxManifestDepth {
+				return errInvalidManifest
+			}
 		case xml.EndElement:
 			if !rootSeen || depth == 0 {
 				return errInvalidManifest
+			}
+			if identityDepth == depth {
+				identityDepth = 0
 			}
 			depth--
 			if depth == 0 {
@@ -224,7 +256,9 @@ func decodeJSON(contents []byte, destination any) error {
 
 func validateUniqueJSONKeys(contents []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
-	if err := readJSONValue(decoder); err != nil {
+	decoder.UseNumber()
+	tokens := 0
+	if err := readJSONValue(decoder, 0, &tokens); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -233,11 +267,15 @@ func validateUniqueJSONKeys(contents []byte) error {
 	return nil
 }
 
-func readJSONValue(decoder *json.Decoder) error {
+func readJSONValue(decoder *json.Decoder, depth int, tokens *int) error {
+	if depth > maxManifestDepth || *tokens > maxManifestTokens {
+		return errInvalidManifest
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
+	*tokens++
 	delimiter, ok := token.(json.Delim)
 	if !ok {
 		return nil
@@ -258,7 +296,7 @@ func readJSONValue(decoder *json.Decoder) error {
 				return errInvalidManifest
 			}
 			seen[key] = struct{}{}
-			if err := readJSONValue(decoder); err != nil {
+			if err := readJSONValue(decoder, depth+1, tokens); err != nil {
 				return err
 			}
 		}
@@ -268,7 +306,7 @@ func readJSONValue(decoder *json.Decoder) error {
 		}
 	case '[':
 		for decoder.More() {
-			if err := readJSONValue(decoder); err != nil {
+			if err := readJSONValue(decoder, depth+1, tokens); err != nil {
 				return err
 			}
 		}
@@ -305,13 +343,21 @@ func decodeXML(contents []byte, destination any) error {
 
 func normalizeIdentity(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > maxIdentityLength {
+	if value == "" || len(value) > maxIdentityLength || !utf8.ValidString(value) || privacy.ContainsSensitiveValue(value) {
 		return "", false
 	}
 	for _, character := range value {
 		if unicode.IsControl(character) || unicode.IsSpace(character) || strings.ContainsRune(":@/\\", character) {
 			return "", false
 		}
+	}
+	return value, true
+}
+
+func normalizeCanonicalMetadata(value string) (string, bool) {
+	value, ok := normalizeMetadata(value)
+	if !ok || privacy.ContainsSensitiveValue(value) {
+		return "", false
 	}
 	return value, true
 }
@@ -361,17 +407,24 @@ func sanitizeSelectedMetadata(home, value string, redactSensitiveName bool) (str
 	if normalized == "" {
 		return "", true
 	}
-	normalized = redactHomeText(home, normalized)
-	if containsHighConfidenceCredential(normalized) {
-		return redactedMetadata, true
+	if filepath.IsAbs(normalized) {
+		normalized = identity.SafeLocationRef(home, normalized, "external-ide-entry")
 	}
+	normalized = redactHomeText(home, normalized)
 	if sanitized, found := sanitizeEmbeddedMetadataURL(home, normalized); found {
 		if len(sanitized) > maxMetadataLength {
 			return redactedMetadata, true
 		}
+		if sensitiveIDEMetadata(sanitized) {
+			return redactedMetadata, true
+		}
 		return sanitized, true
 	}
-	if structuredSensitiveMetadata(normalized) || redactSensitiveName && hasSensitiveMetadataComponent(normalized) {
+	if privacy.ContainsSensitiveValue(normalized) && safeRelativeIDEEntryPoint(normalized) && !containsHighConfidenceCredential(normalized) {
+		digest := sha256.Sum256([]byte(normalized))
+		return fmt.Sprintf("extension-relative/path-sha256:%x", digest), true
+	}
+	if sensitiveIDEMetadata(normalized) || structuredSensitiveMetadata(normalized) || redactSensitiveName && hasSensitiveMetadataComponent(normalized) {
 		return redactedMetadata, true
 	}
 	return normalized, true
@@ -384,6 +437,21 @@ func containsHighConfidenceCredential(value string) bool {
 		}
 	}
 	return false
+}
+
+func sensitiveIDEMetadata(value string) bool {
+	if containsHighConfidenceCredential(value) {
+		return true
+	}
+	return privacy.ContainsSensitiveValue(value)
+}
+
+func safeRelativeIDEEntryPoint(value string) bool {
+	if value == "" || filepath.IsAbs(value) || strings.ContainsAny(value, "\\:\x00") {
+		return false
+	}
+	clean := filepath.Clean(value)
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
 func sanitizeEmbeddedMetadataURL(home, value string) (string, bool) {
@@ -491,8 +559,4 @@ func redactHomeText(home, value string) string {
 		return value
 	}
 	return strings.ReplaceAll(value, filepath.Clean(home), "$HOME")
-}
-
-func redactPath(home, path string) string {
-	return filepath.ToSlash(platform.RedactHome(filepath.Clean(home), filepath.Clean(path)))
 }

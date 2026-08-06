@@ -10,25 +10,29 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/ssc-init/ssc-init/internal/privacy"
 )
 
 const (
 	maxManifestBytes    = 4 << 20
 	maxVSCodeEntries    = 10_000
 	maxJetBrainsEntries = 10_000
+	maxIDEErrors        = 128
+	jetBrainsRootPath   = "Library/Application Support/JetBrains"
 )
 
 var errDirectoryEntryLimit = errors.New("directory entry limit reached")
 
-type ideCollector struct{}
-
-type vscodeRoot struct {
-	host       string
-	components []string
+type ideCollector struct {
+	beforeOpen func(targetID, relative string)
 }
 
 type entryBudget struct {
@@ -55,277 +59,499 @@ func (b *entryBudget) readDirectory(ctx context.Context, root platform.RootedDir
 	return entries, err
 }
 
-// New returns a collector restricted to built-in VS Code-family and JetBrains
-// extension manifest locations.
-func New() collector.Collector { return &ideCollector{} }
+// New returns a targeted collector restricted to the immutable local IDE
+// extension catalog.
+func New() collector.TargetedCollector { return &ideCollector{} }
 
 func (*ideCollector) Name() string { return "ide" }
 
+func (*ideCollector) Targets() []model.TargetSpec { return catalogSpecs() }
+
 func (c *ideCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
-	result := model.CollectorResult{Collector: c.Name(), Status: model.CoverageComplete}
+	result := model.CollectorResult{Collector: c.Name()}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	declarations := catalogDeclarations()
 	rootedFilesystem, ok := env.FS.(platform.RootedFileSystem)
 	if !ok {
-		result.Status = model.CoveragePartial
-		result.Errors = append(result.Errors, coverageError("rooted_access_unavailable", "rooted IDE access is unavailable", env.Home, env.Home))
+		c.appendUnavailableCatalog(&result, declarations)
+		result.Errors = append(result.Errors, ideCoverageError("rooted_access_unavailable", "rooted IDE access is unavailable", ""))
+		sortIDEResult(&result)
+		result.Status = collector.AggregateTargetStatus(result.Targets)
 		return result, nil
 	}
 	homeRoot, err := rootedFilesystem.OpenRoot(env.Home)
 	if err != nil {
-		result.Status = model.CoveragePartial
-		result.Errors = append(result.Errors, coverageError("rooted_access_unavailable", "rooted IDE access is unavailable", env.Home, env.Home))
+		c.appendUnavailableCatalog(&result, declarations)
+		result.Errors = append(result.Errors, ideCoverageError("rooted_access_unavailable", "rooted IDE access is unavailable", ""))
+		sortIDEResult(&result)
+		result.Status = collector.AggregateTargetStatus(result.Targets)
 		return result, nil
 	}
 	defer homeRoot.Close()
 
-	assetsByID := make(map[string]model.Asset)
-	roots := []vscodeRoot{
-		{host: "vscode", components: []string{".vscode", "extensions"}},
-		{host: "vscode-insiders", components: []string{".vscode-insiders", "extensions"}},
-		{host: "cursor", components: []string{".cursor", "extensions"}},
-		{host: "windsurf", components: []string{".windsurf", "extensions"}},
-		{host: "vscode-oss", components: []string{".vscode-oss", "extensions"}},
-	}
-	for _, root := range roots {
-		if err := c.collectVSCodeRoot(ctx, homeRoot, env.Home, root, assetsByID, &result); err != nil {
+	for _, declaration := range declarations {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if !declaration.supported {
+			result.Targets = append(result.Targets, unsupportedIDETarget(declaration.spec.ID))
+			continue
+		}
+		if declaration.expanded {
+			if err := c.collectJetBrains(ctx, homeRoot, env.Home, declaration, &result); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if err := c.collectVSCodeTarget(ctx, homeRoot, env.Home, declaration, &result); err != nil {
 			return result, err
 		}
 	}
-	if err := c.collectJetBrains(ctx, homeRoot, env.Home, assetsByID, &result); err != nil {
-		return result, err
-	}
 
-	result.Assets = make([]model.Asset, 0, len(assetsByID))
-	for _, asset := range assetsByID {
-		result.Assets = append(result.Assets, asset)
-	}
-	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
-	if len(result.Errors) > 0 {
-		result.Status = model.CoveragePartial
-	}
+	sortIDEResult(&result)
+	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
 }
 
-func (*ideCollector) collectVSCodeRoot(ctx context.Context, homeRoot platform.RootedDirectory, home string, root vscodeRoot, assets map[string]model.Asset, result *model.CollectorResult) error {
-	rootPath := filepath.Join(append([]string{home}, root.components...)...)
-	extensionsRoot, err := platform.OpenVerifiedRoot(ctx, homeRoot, root.components...)
+func (*ideCollector) appendUnavailableCatalog(result *model.CollectorResult, declarations []targetDeclaration) {
+	for _, declaration := range declarations {
+		if !declaration.supported {
+			result.Targets = append(result.Targets, unsupportedIDETarget(declaration.spec.ID))
+			continue
+		}
+		result.Targets = append(result.Targets, ideTargetWithIssue(
+			declaration.spec.ID, "", model.TargetUnavailable,
+			"rooted_access_unavailable", "rooted IDE access is unavailable", "",
+		))
+	}
+}
+
+func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platform.RootedDirectory, home string, declaration targetDeclaration, result *model.CollectorResult) error {
+	target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: model.TargetComplete}
+	components := splitRelativePath(declaration.relativePath)
+	rootPath := filepath.Join(home, filepath.FromSlash(declaration.relativePath))
+	extensionsRoot, err := platform.OpenVerifiedRoot(ctx, homeRoot, components...)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, rootPath))
+		status, code, message := classifyIDERootError(err, "IDE extension root")
+		target.Status = status
+		if status != model.TargetNotPresent {
+			c.addIssue(result, &target, status, code, message, redactPath(home, rootPath))
 		}
+		result.Targets = append(result.Targets, target)
 		return nil
 	}
 	defer extensionsRoot.Close()
 
-	entries, err := readDirectory(ctx, extensionsRoot, maxVSCodeEntries)
-	if err != nil {
+	entries, readErr := readDirectory(ctx, extensionsRoot, maxVSCodeEntries)
+	if readErr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if errors.Is(err, errDirectoryEntryLimit) {
-			result.Errors = append(result.Errors, coverageError("entry_limit", "IDE extension entry limit reached", home, rootPath))
-		} else {
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, rootPath))
+		status := model.TargetPartial
+		code, message := "path_unavailable", "IDE extension root is unavailable"
+		if errors.Is(readErr, errDirectoryEntryLimit) {
+			code, message = "entry_limit", "IDE extension entry limit reached"
+		} else if len(entries) == 0 {
+			status = model.TargetUnavailable
 		}
+		c.addIssue(result, &target, status, code, message, redactPath(home, rootPath))
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if !safeIDEComponent(entry.Name()) {
+			c.addIssue(result, &target, model.TargetPartial, "identity_rejected", "IDE installation identity was rejected", "")
+			continue
+		}
 		entryPath := filepath.Join(rootPath, entry.Name())
 		info, err := extensionsRoot.Lstat(entry.Name())
 		if err != nil {
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, entryPath))
+			c.addIssue(result, &target, model.TargetPartial, "path_unavailable", "IDE extension path is unavailable", redactPath(home, entryPath))
 			continue
 		}
 		if info.Mode()&fs.ModeSymlink != 0 {
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, entryPath))
+			c.addIssue(result, &target, model.TargetPartial, "symlink_rejected", "symbolic link was not followed", redactPath(home, entryPath))
 			continue
 		}
 		if !info.IsDir() {
 			continue
+		}
+		c.invokeBeforeOpen(declaration.spec.ID, entry.Name())
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		extensionRoot, err := platform.OpenVerifiedRoot(ctx, extensionsRoot, entry.Name())
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, entryPath))
+			c.addIssue(result, &target, model.TargetPartial, ideIdentityIssueCode(err), "IDE extension identity changed", redactPath(home, entryPath))
 			continue
 		}
-		contents, code := readManifest(ctx, extensionRoot, "package.json")
+		opened, statErr := extensionRoot.Lstat(".")
+		if statErr != nil || opened == nil || !os.SameFile(info, opened) {
+			_ = extensionRoot.Close()
+			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension identity changed", redactPath(home, entryPath))
+			continue
+		}
+		contents, code := readManifest(ctx, extensionRoot, declaration.manifestPath)
 		_ = extensionRoot.Close()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		manifestPath := filepath.Join(entryPath, "package.json")
+		manifestPath := filepath.Join(entryPath, declaration.manifestPath)
 		if code != "" {
-			result.Errors = append(result.Errors, manifestError(code, home, manifestPath))
+			issue := manifestError(code, redactPath(home, manifestPath))
+			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
 			continue
 		}
-		asset, err := parseVSCodeManifest(contents, root.host, home, entryPath)
+		evidence, err := parseVSCodeManifest(contents, declaration.spec.Host, home)
 		if err != nil {
-			result.Errors = append(result.Errors, manifestError("manifest_invalid", home, manifestPath))
+			code, message := "manifest_invalid", "IDE extension manifest is invalid"
+			if errors.Is(err, errRejectedIDEIdentity) {
+				code, message = "identity_rejected", "IDE extension identity was rejected"
+			}
+			c.addIssue(result, &target, model.TargetPartial, code, message, "")
 			continue
 		}
-		assets[asset.ID] = asset
+		manifestRelative := filepath.ToSlash(filepath.Join(entry.Name(), declaration.manifestPath))
+		if !c.appendEvidence(home, declaration, "", entryPath, manifestRelative, evidence, result, &target) {
+			continue
+		}
 	}
+	result.Targets = append(result.Targets, target)
 	return nil
 }
 
-func (*ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.RootedDirectory, home string, assets map[string]model.Asset, result *model.CollectorResult) error {
-	components := []string{"Library", "Application Support", "JetBrains"}
-	rootPath := filepath.Join(append([]string{home}, components...)...)
+func (c *ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.RootedDirectory, home string, declaration targetDeclaration, result *model.CollectorResult) error {
+	components := splitRelativePath(jetBrainsRootPath)
+	rootPath := filepath.Join(home, filepath.FromSlash(jetBrainsRootPath))
 	jetBrainsRoot, err := platform.OpenVerifiedRoot(ctx, homeRoot, components...)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			result.Errors = append(result.Errors, coverageError("path_unavailable", "JetBrains plugin path is unavailable", home, rootPath))
+		status, code, message := classifyIDERootError(err, "JetBrains product root")
+		target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: status}
+		if status != model.TargetNotPresent {
+			c.addIssue(result, &target, status, code, message, redactPath(home, rootPath))
 		}
+		result.Targets = append(result.Targets, target)
 		return nil
 	}
 	defer jetBrainsRoot.Close()
 
 	budget := newEntryBudget(maxJetBrainsEntries)
-	limitReported := false
-	reportEntryLimit := func() {
-		if limitReported {
-			return
+	products, readErr := budget.readDirectory(ctx, jetBrainsRoot)
+	var expansionTarget *model.TargetCoverage
+	ensureExpansionIssue := func(status model.TargetStatus, code, message, path string) {
+		if expansionTarget == nil {
+			target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: model.TargetComplete}
+			expansionTarget = &target
 		}
-		limitReported = true
-		result.Errors = append(result.Errors, coverageError("entry_limit", "JetBrains plugin entry limit reached", home, rootPath))
+		c.addIssue(result, expansionTarget, status, code, message, path)
 	}
-	products, err := budget.readDirectory(ctx, jetBrainsRoot)
-	if err != nil {
+	if readErr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if errors.Is(err, errDirectoryEntryLimit) {
-			reportEntryLimit()
-			return nil
+		status := model.TargetPartial
+		code, message := "path_unavailable", "JetBrains product root is unavailable"
+		if errors.Is(readErr, errDirectoryEntryLimit) {
+			code, message = "entry_limit", "JetBrains plugin entry limit reached"
+		} else if len(products) == 0 {
+			status = model.TargetUnavailable
 		}
-		appendJetBrainsTraversalError(err, home, rootPath, result)
+		ensureExpansionIssue(status, code, message, redactPath(home, rootPath))
 	}
+	if len(products) == 0 && expansionTarget == nil {
+		result.Targets = append(result.Targets, model.TargetCoverage{TargetID: declaration.spec.ID, Status: model.TargetComplete})
+		return nil
+	}
+
+	initialTargetCount := len(result.Targets)
 	for productIndex, product := range products {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if !safeIDEComponent(product.Name()) {
+			ensureExpansionIssue(model.TargetPartial, "identity_rejected", "JetBrains product identity was rejected", "")
+			continue
+		}
 		if budget.remaining == 0 {
-			reportEntryLimit()
-			return nil
-		}
-		productPath := filepath.Join(rootPath, product.Name())
-		productRoot, ok := openChildDirectory(ctx, jetBrainsRoot, product.Name(), home, productPath, result)
-		if !ok {
-			if err := ctx.Err(); err != nil {
-				return err
+			for _, remaining := range products[productIndex:] {
+				if safeIDEComponent(remaining.Name()) && remaining.IsDir() {
+					target := ideTargetWithIssue(declaration.spec.ID, remaining.Name(), model.TargetPartial, "entry_limit", "JetBrains plugin entry limit reached", "")
+					result.Targets = append(result.Targets, target)
+				}
 			}
+			ensureExpansionIssue(model.TargetPartial, "entry_limit", "JetBrains plugin entry limit reached", redactPath(home, rootPath))
+			break
+		}
+		info, statErr := jetBrainsRoot.Lstat(product.Name())
+		if statErr == nil && info != nil && !info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
 			continue
 		}
-		pluginsRoot, err := platform.OpenVerifiedRoot(ctx, productRoot, "plugins")
-		_ = productRoot.Close()
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				result.Errors = append(result.Errors, coverageError("path_unavailable", "JetBrains plugin path is unavailable", home, filepath.Join(productPath, "plugins")))
-			}
-			continue
+		if err := c.collectJetBrainsProduct(ctx, jetBrainsRoot, home, rootPath, product.Name(), declaration, budget, result); err != nil {
+			return err
 		}
-		plugins, readErr := budget.readDirectory(ctx, pluginsRoot)
-		stopAfterPlugins := false
-		if readErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				_ = pluginsRoot.Close()
-				return ctxErr
-			}
-			if errors.Is(readErr, errDirectoryEntryLimit) {
-				reportEntryLimit()
-				stopAfterPlugins = true
-			} else {
-				appendJetBrainsTraversalError(readErr, home, filepath.Join(productPath, "plugins"), result)
-				_ = pluginsRoot.Close()
-				continue
-			}
-		}
-		for _, plugin := range plugins {
-			if err := ctx.Err(); err != nil {
-				_ = pluginsRoot.Close()
-				return err
-			}
-			pluginPath := filepath.Join(productPath, "plugins", plugin.Name())
-			pluginRoot, ok := openChildDirectory(ctx, pluginsRoot, plugin.Name(), home, pluginPath, result)
-			if !ok {
-				if err := ctx.Err(); err != nil {
-					_ = pluginsRoot.Close()
-					return err
-				}
-				continue
-			}
-			metaRoot, err := platform.OpenVerifiedRoot(ctx, pluginRoot, "META-INF")
-			_ = pluginRoot.Close()
-			if err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					_ = pluginsRoot.Close()
-					return ctxErr
-				}
-				result.Errors = append(result.Errors, coverageError("path_unavailable", "JetBrains plugin path is unavailable", home, filepath.Join(pluginPath, "META-INF")))
-				continue
-			}
-			contents, code := readManifest(ctx, metaRoot, "plugin.xml")
-			_ = metaRoot.Close()
-			if err := ctx.Err(); err != nil {
-				_ = pluginsRoot.Close()
-				return err
-			}
-			manifestPath := filepath.Join(pluginPath, "META-INF", "plugin.xml")
-			if code != "" {
-				result.Errors = append(result.Errors, manifestError(code, home, manifestPath))
-				continue
-			}
-			asset, err := parseJetBrainsManifest(contents, home, pluginPath)
-			if err != nil {
-				result.Errors = append(result.Errors, manifestError("manifest_invalid", home, manifestPath))
-				continue
-			}
-			assets[asset.ID] = asset
-		}
-		_ = pluginsRoot.Close()
-		if stopAfterPlugins || budget.remaining == 0 && productIndex < len(products)-1 {
-			reportEntryLimit()
-			return nil
-		}
+	}
+	if expansionTarget != nil {
+		result.Targets = append(result.Targets, *expansionTarget)
+	} else if len(result.Targets) == initialTargetCount {
+		result.Targets = append(result.Targets, model.TargetCoverage{TargetID: declaration.spec.ID, Status: model.TargetComplete})
 	}
 	return nil
 }
 
-func openChildDirectory(ctx context.Context, parent platform.RootedDirectory, name, home, path string, result *model.CollectorResult) (platform.RootedDirectory, bool) {
-	info, err := parent.Lstat(name)
+func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoot platform.RootedDirectory, home, rootPath, product string, declaration targetDeclaration, budget *entryBudget, result *model.CollectorResult) error {
+	target := model.TargetCoverage{TargetID: declaration.spec.ID, InstanceRef: product, Status: model.TargetComplete}
+	productPath := filepath.Join(rootPath, product)
+	info, err := jetBrainsRoot.Lstat(product)
 	if err != nil {
-		result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, path))
-		return nil, false
+		c.addIssue(result, &target, model.TargetUnavailable, "path_unavailable", "JetBrains product is unavailable", redactPath(home, productPath))
+		result.Targets = append(result.Targets, target)
+		return nil
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {
-		result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, path))
-		return nil, false
+		c.addIssue(result, &target, model.TargetPartial, "symlink_rejected", "symbolic link was not followed", redactPath(home, productPath))
+		result.Targets = append(result.Targets, target)
+		return nil
 	}
 	if !info.IsDir() {
-		return nil, false
+		return nil
 	}
-	child, err := platform.OpenVerifiedRoot(ctx, parent, name)
+	c.invokeBeforeOpen(declaration.spec.ID, product)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	productRoot, err := platform.OpenVerifiedRoot(ctx, jetBrainsRoot, product)
 	if err != nil {
-		result.Errors = append(result.Errors, coverageError("path_unavailable", "IDE extension path is unavailable", home, path))
-		return nil, false
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		status := model.TargetUnavailable
+		if errors.Is(err, platform.ErrUnsafeRootedPath) {
+			status = model.TargetPartial
+		}
+		c.addIssue(result, &target, status, ideIdentityIssueCode(err), "JetBrains product identity changed", redactPath(home, productPath))
+		result.Targets = append(result.Targets, target)
+		return nil
 	}
-	return child, true
+	openedProduct, statErr := productRoot.Lstat(".")
+	if statErr != nil || openedProduct == nil || !os.SameFile(info, openedProduct) {
+		_ = productRoot.Close()
+		c.addIssue(result, &target, model.TargetPartial, "identity_changed", "JetBrains product identity changed", redactPath(home, productPath))
+		result.Targets = append(result.Targets, target)
+		return nil
+	}
+	pluginsRoot, err := platform.OpenVerifiedRoot(ctx, productRoot, "plugins")
+	_ = productRoot.Close()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			target.Status = model.TargetNotPresent
+		case errors.Is(err, platform.ErrUnsafeRootedPath):
+			c.addIssue(result, &target, model.TargetPartial, "symlink_rejected", "symbolic link or changed plugin root was not followed", redactPath(home, filepath.Join(productPath, "plugins")))
+		default:
+			c.addIssue(result, &target, model.TargetUnavailable, "path_unavailable", "JetBrains plugin root is unavailable", redactPath(home, filepath.Join(productPath, "plugins")))
+		}
+		result.Targets = append(result.Targets, target)
+		return nil
+	}
+	defer pluginsRoot.Close()
+
+	plugins, readErr := budget.readDirectory(ctx, pluginsRoot)
+	if readErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		status := model.TargetPartial
+		code, message := "path_unavailable", "JetBrains plugin root is unavailable"
+		if errors.Is(readErr, errDirectoryEntryLimit) {
+			code, message = "entry_limit", "JetBrains plugin entry limit reached"
+		} else if len(plugins) == 0 {
+			status = model.TargetUnavailable
+		}
+		c.addIssue(result, &target, status, code, message, redactPath(home, filepath.Join(productPath, "plugins")))
+	}
+	for _, plugin := range plugins {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !safeIDEComponent(plugin.Name()) {
+			c.addIssue(result, &target, model.TargetPartial, "identity_rejected", "JetBrains plugin location was rejected", "")
+			continue
+		}
+		pluginPath := filepath.Join(productPath, "plugins", plugin.Name())
+		info, err := pluginsRoot.Lstat(plugin.Name())
+		if err != nil {
+			c.addIssue(result, &target, model.TargetPartial, "path_unavailable", "JetBrains plugin path is unavailable", redactPath(home, pluginPath))
+			continue
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			c.addIssue(result, &target, model.TargetPartial, "symlink_rejected", "symbolic link was not followed", redactPath(home, pluginPath))
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
+		c.invokeBeforeOpen(declaration.spec.ID, filepath.ToSlash(filepath.Join(product, "plugins", plugin.Name())))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pluginRoot, err := platform.OpenVerifiedRoot(ctx, pluginsRoot, plugin.Name())
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			c.addIssue(result, &target, model.TargetPartial, ideIdentityIssueCode(err), "JetBrains plugin identity changed", redactPath(home, pluginPath))
+			continue
+		}
+		openedPlugin, statErr := pluginRoot.Lstat(".")
+		if statErr != nil || openedPlugin == nil || !os.SameFile(info, openedPlugin) {
+			_ = pluginRoot.Close()
+			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "JetBrains plugin identity changed", redactPath(home, pluginPath))
+			continue
+		}
+		metaRoot, err := platform.OpenVerifiedRoot(ctx, pluginRoot, "META-INF")
+		_ = pluginRoot.Close()
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			c.addIssue(result, &target, model.TargetPartial, ideIdentityIssueCode(err), "JetBrains plugin manifest path is unavailable", redactPath(home, filepath.Join(pluginPath, "META-INF")))
+			continue
+		}
+		contents, code := readManifest(ctx, metaRoot, "plugin.xml")
+		_ = metaRoot.Close()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		manifestPath := filepath.Join(pluginPath, "META-INF", "plugin.xml")
+		if code != "" {
+			issue := manifestError(code, redactPath(home, manifestPath))
+			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
+			continue
+		}
+		evidence, err := parseJetBrainsManifest(contents)
+		if err != nil {
+			code, message := "manifest_invalid", "IDE extension manifest is invalid"
+			if errors.Is(err, errRejectedIDEIdentity) {
+				code, message = "identity_rejected", "IDE extension identity was rejected"
+			}
+			c.addIssue(result, &target, model.TargetPartial, code, message, "")
+			continue
+		}
+		manifestRelative := filepath.ToSlash(filepath.Join(plugin.Name(), "META-INF", "plugin.xml"))
+		c.appendEvidence(home, declaration, product, pluginPath, manifestRelative, evidence, result, &target)
+	}
+	result.Targets = append(result.Targets, target)
+	return nil
+}
+
+func (c *ideCollector) appendEvidence(home string, declaration targetDeclaration, product, locationPath, manifestRelative string, evidence manifestEvidence, result *model.CollectorResult, target *model.TargetCoverage) bool {
+	metadata := make(map[string]string, len(evidence.metadata)+3)
+	for key, value := range evidence.metadata {
+		if value != "" {
+			metadata[key] = value
+		}
+	}
+	metadata["manifest_path"] = filepath.ToSlash(manifestRelative)
+	metadata["source_target"] = declaration.spec.ID
+	if product != "" {
+		metadata["product_instance"] = product
+	}
+	locationRef := identity.SafeLocationRef(home, locationPath, "external-ide")
+	if !safeIDEMetadata(metadata) || !utf8.ValidString(locationRef) || privacy.ContainsSensitiveValue(locationRef) {
+		c.addIssue(result, target, model.TargetPartial, "identity_rejected", "IDE extension identity was rejected", "")
+		return false
+	}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: evidence.asset.ID, Collector: "ide", Host: declaration.spec.Host,
+		Consumers: []string{declaration.spec.Host}, Scope: model.ScopeIDEProfile,
+		LocationRef: locationRef, Source: declaration.spec.ID, Metadata: metadata,
+	})
+	if err != nil {
+		c.addIssue(result, target, model.TargetPartial, "identity_rejected", "IDE extension identity was rejected", "")
+		return false
+	}
+	result.Assets = append(result.Assets, evidence.asset)
+	result.Observations = append(result.Observations, observation)
+	target.Assets++
+	target.Observations++
+	return true
+}
+
+func (*ideCollector) addIssue(result *model.CollectorResult, target *model.TargetCoverage, status model.TargetStatus, code, message, path string) {
+	if target.Status == model.TargetComplete || target.Status == model.TargetNotPresent || status == model.TargetPartial {
+		target.Status = status
+	}
+	issue := ideCoverageError(code, message, path)
+	if len(target.Errors) < maxIDEErrors {
+		target.Errors = append(target.Errors, issue)
+	}
+	if len(result.Errors) < maxIDEErrors {
+		result.Errors = append(result.Errors, issue)
+	}
+}
+
+func classifyIDERootError(err error, subject string) (model.TargetStatus, string, string) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return model.TargetNotPresent, "", ""
+	case errors.Is(err, platform.ErrUnsafeRootedPath):
+		return model.TargetPartial, "symlink_rejected", "symbolic link or changed " + subject + " was not followed"
+	default:
+		return model.TargetUnavailable, "path_unavailable", subject + " is unavailable"
+	}
+}
+
+func ideIdentityIssueCode(err error) string {
+	if errors.Is(err, platform.ErrUnsafeRootedPath) {
+		return "identity_changed"
+	}
+	return "path_unavailable"
+}
+
+func (c *ideCollector) invokeBeforeOpen(targetID, relative string) {
+	if c.beforeOpen != nil {
+		c.beforeOpen(targetID, filepath.ToSlash(relative))
+	}
+}
+
+func safeIDEComponent(value string) bool {
+	if value == "" || value == "." || value == ".." || len(value) > maxIdentityLength || !utf8.ValidString(value) || strings.TrimSpace(value) != value || privacy.ContainsSensitiveValue(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || character == '/' || character == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func safeIDEMetadata(metadata map[string]string) bool {
+	for key, value := range metadata {
+		if key == "" || value == "" || !utf8.ValidString(key) || !utf8.ValidString(value) || privacy.ContainsSensitiveValue(key) || sensitiveIDEMetadata(value) || filepath.IsAbs(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func splitRelativePath(relative string) []string {
+	return strings.Split(filepath.FromSlash(relative), string(filepath.Separator))
 }
 
 func readDirectory(ctx context.Context, root platform.RootedDirectory, limit int) ([]os.DirEntry, error) {
@@ -398,15 +624,7 @@ func (r *contextReader) Read(buffer []byte) (int, error) {
 	return r.reader.Read(buffer)
 }
 
-func appendJetBrainsTraversalError(err error, home, path string, result *model.CollectorResult) {
-	if errors.Is(err, errDirectoryEntryLimit) {
-		result.Errors = append(result.Errors, coverageError("entry_limit", "JetBrains plugin entry limit reached", home, path))
-		return
-	}
-	result.Errors = append(result.Errors, coverageError("path_unavailable", "JetBrains plugin path is unavailable", home, path))
-}
-
-func manifestError(code, home, path string) model.CoverageError {
+func manifestError(code, path string) model.CoverageError {
 	message := "IDE extension manifest is unavailable"
 	if code == "manifest_invalid" {
 		message = "IDE extension manifest is invalid"
@@ -414,16 +632,38 @@ func manifestError(code, home, path string) model.CoverageError {
 	if code == "manifest_oversized" {
 		message = "IDE extension manifest exceeds the size limit"
 	}
-	return coverageError(code, message, home, path)
+	return ideCoverageError(code, message, path)
 }
 
-func coverageError(code, message, home, path string) model.CoverageError {
-	return model.CoverageError{Code: code, Message: message, Path: redactPath(home, path)}
+func unsupportedIDETarget(id string) model.TargetCoverage {
+	return ideTargetWithIssue(id, "", model.TargetUnsupported, "unsupported_target", "target is not supported", "")
 }
 
-// Keep the fixed catalog visibly independent from command execution.
-var _ collector.Collector = (*ideCollector)(nil)
+func ideTargetWithIssue(id, instance string, status model.TargetStatus, code, message, path string) model.TargetCoverage {
+	return model.TargetCoverage{
+		TargetID: id, InstanceRef: instance, Status: status,
+		Errors: []model.CoverageError{ideCoverageError(code, message, path)},
+	}
+}
 
-// Compile-time use prevents accidental replacement of the fd-rooted boundary
-// with a pathname-only filesystem.
+func ideCoverageError(code, message, path string) model.CoverageError {
+	return model.CoverageError{Code: code, Message: message, Path: path}
+}
+
+func sortIDEResult(result *model.CollectorResult) {
+	sort.SliceStable(result.Targets, func(i, j int) bool {
+		if result.Targets[i].TargetID == result.Targets[j].TargetID {
+			return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef
+		}
+		return result.Targets[i].TargetID < result.Targets[j].TargetID
+	})
+	sort.SliceStable(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
+	sort.SliceStable(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
+}
+
+func redactPath(home, path string) string {
+	return filepath.ToSlash(platform.RedactHome(filepath.Clean(home), filepath.Clean(path)))
+}
+
+var _ collector.TargetedCollector = (*ideCollector)(nil)
 var _ platform.RootedFileSystem = platform.OSFileSystem{}
