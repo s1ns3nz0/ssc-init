@@ -22,11 +22,14 @@ type CoverageError struct {
 
 // CollectorResult contains the discovery output for one collector.
 type CollectorResult struct {
-	Collector     string          `json:"collector"`
-	Status        CoverageStatus  `json:"status"`
-	Assets        []Asset         `json:"assets,omitempty"`
-	Relationships []Relationship  `json:"relationships,omitempty"`
-	Errors        []CoverageError `json:"errors,omitempty"`
+	Collector     string           `json:"collector"`
+	Status        CoverageStatus   `json:"status"`
+	Assets        []Asset          `json:"assets,omitempty"`
+	Relationships []Relationship   `json:"relationships,omitempty"`
+	Errors        []CoverageError  `json:"errors,omitempty"`
+	Targets       []TargetCoverage `json:"targets,omitempty"`
+	Observations  []Observation    `json:"observations,omitempty"`
+	LocalTargets  []LocalTarget    `json:"-"`
 }
 
 // Inventory is a normalized asset graph.
@@ -34,6 +37,7 @@ type Inventory struct {
 	Assets        []Asset         `json:"assets"`
 	Relationships []Relationship  `json:"relationships"`
 	Errors        []CoverageError `json:"errors,omitempty"`
+	Observations  []Observation   `json:"observations,omitempty"`
 }
 
 // ChangeKind identifies how an asset changed from the previous inventory.
@@ -45,10 +49,11 @@ const (
 	ChangeChanged ChangeKind = "changed"
 )
 
-// Change is one asset-level inventory change.
+// Change is one inventory entity change.
 type Change struct {
-	Kind    ChangeKind `json:"kind"`
-	AssetID string     `json:"assetId"`
+	Kind     ChangeKind   `json:"kind"`
+	Entity   ChangeEntity `json:"entity"`
+	EntityID string       `json:"entityId"`
 }
 
 // Delta contains deterministic asset-level inventory changes.
@@ -73,4 +78,5 @@ type ScanResult struct {
 	StartedAt     time.Time         `json:"startedAt"`
 	FinishedAt    time.Time         `json:"finishedAt"`
 	Coverage      []CollectorResult `json:"coverage"`
+	Scope         ScanScope         `json:"scope,omitempty,omitzero"`
 }

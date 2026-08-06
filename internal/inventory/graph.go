@@ -138,11 +138,11 @@ func Diff(previous, current model.Inventory) model.Delta {
 		after, existsNow := currentByID[id]
 		switch {
 		case !existedBefore:
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeAdded, AssetID: id})
+			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: id})
 		case !existsNow:
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeRemoved, AssetID: id})
+			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: id})
 		case !bytes.Equal(canonicalAssetForDiff(before), canonicalAssetForDiff(after)):
-			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeChanged, AssetID: id})
+			delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: id})
 		}
 	}
 	return delta

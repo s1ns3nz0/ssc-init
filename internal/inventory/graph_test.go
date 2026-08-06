@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,32 @@ import (
 
 	"github.com/ssc-init/ssc-init/internal/model"
 )
+
+func TestV2ModelJSONNamesAndAssetChangeEntity(t *testing.T) {
+	result := model.CollectorResult{
+		Collector: "mcp",
+		Status:    model.CoveragePartial,
+		Targets: []model.TargetCoverage{{
+			TargetID: "mcp.codex.user",
+			Status:   model.TargetUnsupported,
+		}},
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{`"targets"`, `"targetId"`, `"unsupported"`} {
+		if !bytes.Contains(encoded, []byte(marker)) {
+			t.Fatalf("missing %s in %s", marker, encoded)
+		}
+	}
+
+	delta := Diff(model.Inventory{}, model.Inventory{Assets: []model.Asset{{ID: "asset", Type: model.AssetTool, Name: "tool"}}})
+	want := []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "asset"}}
+	if !reflect.DeepEqual(delta.Changes, want) {
+		t.Fatalf("changes=%+v want=%+v", delta.Changes, want)
+	}
+}
 
 func TestBuildNormalizesDeterministicallyWithoutMutatingInput(t *testing.T) {
 	results := []model.CollectorResult{
@@ -136,9 +163,9 @@ func TestDiffIgnoresOnlyDefinedObservationTimesAndSortsByAssetID(t *testing.T) {
 	}}
 
 	want := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeChanged, AssetID: "b"},
-		{Kind: model.ChangeAdded, AssetID: "c"},
-		{Kind: model.ChangeRemoved, AssetID: "d"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: "b"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "c"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "d"},
 	}}
 	if got := Diff(previous, current); !reflect.DeepEqual(got, want) {
 		t.Fatalf("delta=%#v want=%#v", got, want)
@@ -149,7 +176,7 @@ func TestDiffTreatsOrdinaryMetadataAsSecurityRelevant(t *testing.T) {
 	previous := model.Inventory{Assets: []model.Asset{{ID: "a", Metadata: map[string]string{"risk": "low"}}}}
 	current := model.Inventory{Assets: []model.Asset{{ID: "a", Metadata: map[string]string{"risk": "high"}}}}
 
-	want := model.Delta{Changes: []model.Change{{Kind: model.ChangeChanged, AssetID: "a"}}}
+	want := model.Delta{Changes: []model.Change{{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: "a"}}}
 	if got := Diff(previous, current); !reflect.DeepEqual(got, want) {
 		t.Fatalf("delta=%#v want=%#v", got, want)
 	}

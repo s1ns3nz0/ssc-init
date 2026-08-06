@@ -76,7 +76,10 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 	if len(inventory.Assets) != 1 || inventory.Assets[0].ID != "tool:new" {
 		t.Fatalf("inventory=%+v", inventory)
 	}
-	want := []model.Change{{Kind: model.ChangeAdded, AssetID: "tool:new"}, {Kind: model.ChangeRemoved, AssetID: "tool:old"}}
+	want := []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "tool:new"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "tool:old"},
+	}
 	if len(delta.Changes) != len(want) {
 		t.Fatalf("delta=%+v", delta)
 	}
