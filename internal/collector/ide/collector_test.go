@@ -434,6 +434,81 @@ func TestIDEIdentityRejectsExtensionDirectorySwapAfterEnumeration(t *testing.T) 
 	}
 }
 
+func TestIDEManifestRejectsSameSizeMutationAfterReadAndKeepsSafeSibling(t *testing.T) {
+	original := `{"name":"bad1","publisher":"acme","version":"1.0.0"}`
+	replacement := `{"name":"evil","publisher":"acme","version":"1.0.0"}`
+	if len(original) != len(replacement) {
+		t.Fatal("same-size mutation fixture is not the same size")
+	}
+	assertIDEPostReadManifestMutation(t, original, "manifest_changed", func(t *testing.T, path string) {
+		if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		changed := time.Unix(200, 0)
+		if err := os.Chtimes(path, changed, changed); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestIDEManifestRejectsBoundedGrowthAfterReadAndKeepsSafeSibling(t *testing.T) {
+	original := `{"name":"bad","publisher":"acme","version":"1.0.0"}`
+	assertIDEPostReadManifestMutation(t, original, "manifest_changed", func(t *testing.T, path string) {
+		if err := os.WriteFile(path, append([]byte(original), ' '), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestIDEManifestRejectsOversizeGrowthAfterReadAndKeepsSafeSibling(t *testing.T) {
+	original := `{"name":"bad","publisher":"acme","version":"1.0.0"}`
+	assertIDEPostReadManifestMutation(t, original, "manifest_oversized", func(t *testing.T, path string) {
+		if err := os.Truncate(path, maxManifestBytes+1); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func assertIDEPostReadManifestMutation(t *testing.T, original, wantCode string, mutate func(*testing.T, string)) {
+	t.Helper()
+	home := t.TempDir()
+	badPath := filepath.Join(home, ".vscode", "extensions", "bad", "package.json")
+	writeIDEFile(t, badPath, original)
+	stable := time.Unix(100, 0)
+	if err := os.Chtimes(badPath, stable, stable); err != nil {
+		t.Fatal(err)
+	}
+	writeVSCodeManifest(t, home, ".vscode/extensions/zz-safe/package.json", "acme", "safe", "1.0.0")
+
+	ideCollector := New().(*ideCollector)
+	mutated := false
+	ideCollector.afterManifestRead = func(targetID, relative string) {
+		if mutated || targetID != "ide.vscode.extensions" || relative != "bad/package.json" {
+			return
+		}
+		mutated = true
+		mutate(t, badPath)
+	}
+	got, err := ideCollector.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutated {
+		t.Fatal("post-read mutation seam was not reached")
+	}
+	testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.safe@1.0.0")
+	if len(got.Assets) != 1 || len(got.Observations) != 1 {
+		t.Fatalf("mutated manifest escaped quarantine: assets=%+v observations=%+v", got.Assets, got.Observations)
+	}
+	target := assertIDETarget(t, got, "ide.vscode.extensions", "", model.TargetPartial, 1, 1)
+	for _, issue := range target.Errors {
+		if issue.Code == wantCode {
+			return
+		}
+	}
+	t.Fatalf("missing issue %q: %+v", wantCode, target.Errors)
+}
+
 func TestCollectorRedactsHomeAndDoesNotPersistUnselectedManifestData(t *testing.T) {
 	home := t.TempDir()
 	marker := "credential-value-marker"
@@ -590,7 +665,7 @@ func TestCollectorRedactsPercentEncodedCredentialInBenignQueryValue(t *testing.T
 	}
 }
 
-func TestCollectorRetainsSafeReferenceForSKDashedPathAndRedactsExplicitSecretFamilies(t *testing.T) {
+func TestCollectorRedactsSharedPrivacySKDashedPathAndExplicitSecretFamilies(t *testing.T) {
 	home := t.TempDir()
 	legacy := "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
 	project := "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijkl"
@@ -607,7 +682,7 @@ func TestCollectorRetainsSafeReferenceForSKDashedPathAndRedactsExplicitSecretFam
 	}
 	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.sk-shapes@1.0.0")
 	observation := observationForIDEAsset(t, got.Observations, asset.ID)
-	if !strings.HasPrefix(observation.Metadata["entry_point"], "extension-relative/path-sha256:") || !strings.Contains(observation.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(observation.Metadata["activation_events"], redactedMetadata) {
+	if observation.Metadata["entry_point"] != redactedMetadata || !strings.Contains(observation.Metadata["activation_events"], "onCommand:acme.safe") || !strings.Contains(observation.Metadata["activation_events"], redactedMetadata) {
 		t.Fatalf("metadata=%v", observation.Metadata)
 	}
 	encoded, err := json.Marshal(observation)
@@ -621,6 +696,38 @@ func TestCollectorRetainsSafeReferenceForSKDashedPathAndRedactsExplicitSecretFam
 	}
 }
 
+func TestIDEPrivacySharedClassificationAlwaysWinsForSKTokenPath(t *testing.T) {
+	home := t.TempDir()
+	token := "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "direct", "package.json"), fmt.Sprintf(`{
+		"name":"direct","publisher":"acme","version":"1.0.0","main":%q
+	}`, token))
+	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "segment", "package.json"), fmt.Sprintf(`{
+		"name":"segment","publisher":"acme","version":"1.0.0","main":%q
+	}`, "dist/"+token+"/extension.js"))
+
+	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, assetID := range []string{
+		"ide-extension:vscode:acme.direct@1.0.0",
+		"ide-extension:vscode:acme.segment@1.0.0",
+	} {
+		observation := observationForIDEAsset(t, got.Observations, assetID)
+		if observation.Metadata["entry_point"] != redactedMetadata || strings.HasPrefix(observation.Metadata["entry_point"], "extension-relative/path-sha256:") {
+			t.Fatalf("shared privacy classification was downgraded: %+v", observation)
+		}
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(token)) {
+		t.Fatalf("shared privacy token leaked: %s", encoded)
+	}
+}
+
 func TestIDEObservationMetadataPassesPersistencePrivacyBackstop(t *testing.T) {
 	home := t.TempDir()
 	writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "safe", "package.json"), `{
@@ -631,6 +738,10 @@ func TestIDEObservationMetadataPassesPersistencePrivacyBackstop(t *testing.T) {
 	got, err := New().Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "ide-extension:vscode:acme.safe@1.0.0")
+	if observation := observationForIDEAsset(t, got.Observations, asset.ID); observation.Metadata["entry_point"] != redactedMetadata {
+		t.Fatalf("entry point was not privacy-safe: %+v", observation)
 	}
 
 	databaseDirectory, err := filepath.EvalSymlinks(t.TempDir())

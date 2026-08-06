@@ -32,7 +32,8 @@ const (
 var errDirectoryEntryLimit = errors.New("directory entry limit reached")
 
 type ideCollector struct {
-	beforeOpen func(targetID, relative string)
+	beforeOpen        func(targetID, relative string)
+	afterManifestRead func(targetID, relative string)
 }
 
 type entryBudget struct {
@@ -200,7 +201,10 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension identity changed", redactPath(home, entryPath))
 			continue
 		}
-		contents, code := readManifest(ctx, extensionRoot, declaration.manifestPath)
+		manifestRelative := filepath.ToSlash(filepath.Join(entry.Name(), declaration.manifestPath))
+		contents, code := readManifest(ctx, extensionRoot, declaration.manifestPath, func() {
+			c.invokeAfterManifestRead(declaration.spec.ID, manifestRelative)
+		})
 		_ = extensionRoot.Close()
 		if err := ctx.Err(); err != nil {
 			return err
@@ -220,7 +224,6 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 			c.addIssue(result, &target, model.TargetPartial, code, message, "")
 			continue
 		}
-		manifestRelative := filepath.ToSlash(filepath.Join(entry.Name(), declaration.manifestPath))
 		if !c.appendEvidence(home, declaration, "", entryPath, manifestRelative, evidence, result, &target) {
 			continue
 		}
@@ -432,7 +435,10 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			c.addIssue(result, &target, model.TargetPartial, ideIdentityIssueCode(err), "JetBrains plugin manifest path is unavailable", redactPath(home, filepath.Join(pluginPath, "META-INF")))
 			continue
 		}
-		contents, code := readManifest(ctx, metaRoot, "plugin.xml")
+		manifestRelative := filepath.ToSlash(filepath.Join(plugin.Name(), "META-INF", "plugin.xml"))
+		contents, code := readManifest(ctx, metaRoot, "plugin.xml", func() {
+			c.invokeAfterManifestRead(declaration.spec.ID, filepath.ToSlash(filepath.Join(product, "plugins", manifestRelative)))
+		})
 		_ = metaRoot.Close()
 		if err := ctx.Err(); err != nil {
 			return err
@@ -452,7 +458,6 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			c.addIssue(result, &target, model.TargetPartial, code, message, "")
 			continue
 		}
-		manifestRelative := filepath.ToSlash(filepath.Join(plugin.Name(), "META-INF", "plugin.xml"))
 		c.appendEvidence(home, declaration, product, pluginPath, manifestRelative, evidence, result, &target)
 	}
 	result.Targets = append(result.Targets, target)
@@ -529,6 +534,12 @@ func (c *ideCollector) invokeBeforeOpen(targetID, relative string) {
 	}
 }
 
+func (c *ideCollector) invokeAfterManifestRead(targetID, relative string) {
+	if c.afterManifestRead != nil {
+		c.afterManifestRead(targetID, filepath.ToSlash(relative))
+	}
+}
+
 func safeIDEComponent(value string) bool {
 	if value == "" || value == "." || value == ".." || len(value) > maxIdentityLength || !utf8.ValidString(value) || strings.TrimSpace(value) != value || privacy.ContainsSensitiveValue(value) {
 		return false
@@ -590,7 +601,7 @@ func readDirectory(ctx context.Context, root platform.RootedDirectory, limit int
 	return entries, nil
 }
 
-func readManifest(ctx context.Context, root platform.RootedDirectory, name string) ([]byte, string) {
+func readManifest(ctx context.Context, root platform.RootedDirectory, name string, afterRead func()) ([]byte, string) {
 	if err := ctx.Err(); err != nil {
 		return nil, "manifest_unavailable"
 	}
@@ -602,14 +613,32 @@ func readManifest(ctx context.Context, root platform.RootedDirectory, name strin
 	if beforeOpen.Size() < 0 || beforeOpen.Size() > maxManifestBytes || opened.Size() < 0 || opened.Size() > maxManifestBytes {
 		return nil, "manifest_oversized"
 	}
+	if !sameManifestSnapshot(beforeOpen, opened) {
+		return nil, "manifest_changed"
+	}
 	contents, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, reader: file}, maxManifestBytes+1))
+	if afterRead != nil {
+		afterRead()
+	}
 	if err != nil {
 		return nil, "manifest_unavailable"
 	}
-	if len(contents) > maxManifestBytes {
+	postRead, statErr := file.Stat()
+	if statErr != nil || postRead == nil {
+		return nil, "manifest_unavailable"
+	}
+	if postRead.Size() < 0 || postRead.Size() > maxManifestBytes || len(contents) > maxManifestBytes {
 		return nil, "manifest_oversized"
 	}
+	if !sameManifestSnapshot(opened, postRead) || int64(len(contents)) != opened.Size() || int64(len(contents)) != postRead.Size() {
+		return nil, "manifest_changed"
+	}
 	return contents, ""
+}
+
+func sameManifestSnapshot(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) &&
+		left.Size() == right.Size() && left.Mode() == right.Mode() && left.ModTime().Equal(right.ModTime())
 }
 
 type contextReader struct {
@@ -631,6 +660,9 @@ func manifestError(code, path string) model.CoverageError {
 	}
 	if code == "manifest_oversized" {
 		message = "IDE extension manifest exceeds the size limit"
+	}
+	if code == "manifest_changed" {
+		message = "IDE extension manifest changed while being read"
 	}
 	return ideCoverageError(code, message, path)
 }

@@ -2,11 +2,9 @@ package ide
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"path/filepath"
@@ -420,10 +418,6 @@ func sanitizeSelectedMetadata(home, value string, redactSensitiveName bool) (str
 		}
 		return sanitized, true
 	}
-	if privacy.ContainsSensitiveValue(normalized) && safeRelativeIDEEntryPoint(normalized) && !containsHighConfidenceCredential(normalized) {
-		digest := sha256.Sum256([]byte(normalized))
-		return fmt.Sprintf("extension-relative/path-sha256:%x", digest), true
-	}
 	if sensitiveIDEMetadata(normalized) || structuredSensitiveMetadata(normalized) || redactSensitiveName && hasSensitiveMetadataComponent(normalized) {
 		return redactedMetadata, true
 	}
@@ -444,14 +438,6 @@ func sensitiveIDEMetadata(value string) bool {
 		return true
 	}
 	return privacy.ContainsSensitiveValue(value)
-}
-
-func safeRelativeIDEEntryPoint(value string) bool {
-	if value == "" || filepath.IsAbs(value) || strings.ContainsAny(value, "\\:\x00") {
-		return false
-	}
-	clean := filepath.Clean(value)
-	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
 func sanitizeEmbeddedMetadataURL(home, value string) (string, bool) {
