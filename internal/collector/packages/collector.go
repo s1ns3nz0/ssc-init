@@ -175,7 +175,7 @@ func dockerDaemonUnavailable(result platform.CommandResult, runErr error) bool {
 		stderr = stderr[:maxDockerFailureClassifyBytes]
 	}
 	stderr = strings.ToLower(stderr)
-	if strings.Contains(stderr, "permission denied") && strings.Contains(stderr, "docker daemon") && strings.Contains(stderr, "socket") {
+	if strings.Contains(stderr, "permission denied while trying to connect to the docker daemon socket") {
 		return true
 	}
 	for _, marker := range []string{
@@ -714,12 +714,11 @@ func parseGoPathWithEntryLimit(ctx context.Context, env collector.Environment, s
 	loss := false
 	budget := newPackageEntryBudget(entryLimit)
 	usableRoots := 0
-	for _, goPath := range filepath.SplitList(strings.TrimSpace(stdout)) {
+	for _, goPath := range filepath.SplitList(strings.TrimRight(stdout, "\r\n")) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		goPath = strings.TrimSpace(goPath)
-		if goPath == "" {
+		if strings.TrimSpace(goPath) == "" {
 			continue
 		}
 		usableRoots++

@@ -579,6 +579,11 @@ func TestDockerFailureClassificationIsBoundedEphemeralAndAlwaysVerified(t *testi
 			runErr: errors.New("exit status 1"), wantStatus: model.TargetPartial,
 		},
 		{
+			name:   "loose permission daemon socket tokens",
+			result: platform.CommandResult{ExitCode: 1, Stderr: "permission denied reading Docker daemon configuration; unrelated socket-marker setup failed"},
+			runErr: errors.New("exit status 1"), wantStatus: model.TargetPartial,
+		},
+		{
 			name:   "timeout",
 			result: platform.CommandResult{ExitCode: -1, Stderr: "Cannot connect to the Docker daemon"},
 			runErr: &platform.TimeoutError{Command: "/private/docker"}, wantStatus: model.TargetPartial,
@@ -1003,6 +1008,20 @@ func TestGoPathIgnoresEmptyComponentsAroundValidMultipleRoots(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("assets=%q want=%q", got, want)
+	}
+}
+
+func TestGoPathPreservesTrailingWhitespaceInNonemptyComponent(t *testing.T) {
+	home := t.TempDir()
+	goPath := filepath.Join(home, "go ")
+	writeFile(t, filepath.Join(goPath, "bin", "space-tool"), "binary")
+
+	assets, err := parseGoPath(context.Background(), testutil.Environment(t, home), goPath+"\n")
+	if err != nil {
+		t.Fatalf("error=%v", err)
+	}
+	if len(assets) != 1 || assets[0].ID != "tool:go:space-tool" {
+		t.Fatalf("assets=%+v", assets)
 	}
 }
 
