@@ -3,39 +3,19 @@ package store
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/privacy"
 )
 
 // ErrSensitiveSnapshot is returned without field or value details when a
 // snapshot contains a high-confidence credential shape.
 var ErrSensitiveSnapshot = errors.New("snapshot contains sensitive data")
 
-var sensitiveValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`),
-	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-	regexp.MustCompile(`\bnpm_[A-Za-z0-9]{20,}\b`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
-	regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`),
-}
-
-var embeddedURIPattern = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
-var structuredSecretAssignment = regexp.MustCompile(`(?i)(?:^|[?&#;,\s])(?:access[_-]?token|refresh[_-]?token|authorization|bearer|token|password|passwd|secret|api[_-]?key|credential|env)\s*[:=]\s*([^?&#;,\s]+)`)
 var safeKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-var sensitiveAssignments = []*regexp.Regexp{
-	structuredSecretAssignment,
-	regexp.MustCompile(`(?i)\bBearer\s+(\S+)`),
-	regexp.MustCompile(`(?i)\b(?:authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*(\S+)`),
-	regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*\s*=\s*(\S+)`),
-	regexp.MustCompile(`(?:^|[\s,;])(?:env[._-])?[A-Z_][A-Z0-9_]{1,63}\s*=\s*(\S+)`),
-}
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	for field, value := range map[string]string{
@@ -144,7 +124,7 @@ func validateAsset(asset model.Asset) error {
 			if err := validateSafeKeyList(value); err != nil {
 				return ErrSensitiveSnapshot
 			}
-		} else if metadataKeyCarriesSecret(key) && value != "" && !isRedactedPlaceholder(value) {
+		} else if metadataKeyCarriesSecret(key) && value != "" && !privacy.IsRedactedPlaceholder(value) {
 			return ErrSensitiveSnapshot
 		}
 		if err := validateOptionalString("asset metadata value", value); err != nil {
@@ -188,101 +168,10 @@ func validateOptionalString(field, value string) error {
 	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
 		return fmt.Errorf("%s is not valid text", field)
 	}
-	if containsSensitiveValue(value) {
+	if privacy.ContainsSensitiveValue(value) {
 		return ErrSensitiveSnapshot
 	}
 	return nil
-}
-
-func containsSensitiveValue(value string) bool {
-	if isRedactedPlaceholder(value) {
-		return false
-	}
-	for _, pattern := range sensitiveValuePatterns {
-		if pattern.MatchString(value) {
-			return true
-		}
-	}
-	plainValue := value
-	for _, candidate := range embeddedURIPattern.FindAllString(value, -1) {
-		if sensitiveURI(candidate) {
-			return true
-		}
-		plainValue = strings.ReplaceAll(plainValue, candidate, "")
-	}
-	return containsSensitiveAssignment(plainValue)
-}
-
-func sensitiveURI(value string) bool {
-	parsed, err := url.Parse(value)
-	if err == nil && parsed.Scheme != "" && (parsed.Host != "" || parsed.Opaque != "") {
-		if parsed.User != nil {
-			if _, hasPassword := parsed.User.Password(); hasPassword || credentialLikeUser(parsed.User.Username()) {
-				return true
-			}
-		}
-		for key, values := range parsed.Query() {
-			if sensitiveQueryKey(key) {
-				for _, queryValue := range values {
-					if queryValue != "" && !isRedactedPlaceholder(queryValue) {
-						return true
-					}
-				}
-			}
-		}
-		fragment, fragmentErr := url.QueryUnescape(parsed.Fragment)
-		if fragmentErr == nil && fragment != "" {
-			for _, pattern := range sensitiveValuePatterns {
-				if pattern.MatchString(fragment) {
-					return true
-				}
-			}
-			if containsSensitiveAssignment("&" + fragment) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func containsSensitiveAssignment(value string) bool {
-	for _, pattern := range sensitiveAssignments {
-		for _, match := range pattern.FindAllStringSubmatch(value, -1) {
-			if len(match) == 2 && match[1] != "" && !isRedactedPlaceholder(match[1]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isRedactedPlaceholder(value string) bool {
-	return strings.EqualFold(value, "redacted") || strings.EqualFold(value, "[redacted]")
-}
-
-func credentialLikeUser(username string) bool {
-	for _, pattern := range sensitiveValuePatterns[:7] {
-		if pattern.MatchString(username) {
-			return true
-		}
-	}
-	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(username))
-	for _, marker := range []string{"token", "secret", "password", "passwd", "credential", "authorization", "api_key", "access_key"} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func sensitiveQueryKey(key string) bool {
-	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(key))
-	for _, marker := range []string{"token", "secret", "password", "passwd", "credential", "authorization", "api_key", "access_key"} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func metadataKeyCarriesSecret(key string) bool {
@@ -314,10 +203,10 @@ func safeListMetadataKey(key string) bool {
 }
 
 func validateSafeKeyList(value string) error {
-	if isRedactedPlaceholder(value) {
+	if privacy.IsRedactedPlaceholder(value) {
 		return nil
 	}
-	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\r\n\t =;:/?#&") || containsSensitiveValue(value) {
+	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\r\n\t =;:/?#&") || privacy.ContainsSensitiveValue(value) {
 		return ErrSensitiveSnapshot
 	}
 	items := strings.Split(value, ",")
