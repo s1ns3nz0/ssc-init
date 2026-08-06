@@ -1167,10 +1167,10 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 			inventory.Assets[0].Metadata["args"] = `{"dist/config.json":{"nested":"relative/value"}}`
 		}},
 		{name: "safe literal percent", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
-			inventory.Assets[0].Metadata["entry_point"] = "progress=100%"
+			inventory.Assets[0].Metadata["entry_point"] = "100%"
 		}},
 		{name: "safe malformed percent literal", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
-			inventory.Assets[0].Metadata["entry_point"] = "literal=%ZZ"
+			inventory.Assets[0].Metadata["entry_point"] = "%ZZ"
 		}},
 		{name: "probe source identifier metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Observations[0].Metadata["probe_source_id"] = "/Volumes/opaque-identifier"
@@ -1238,6 +1238,7 @@ func TestApprovedPackageReferenceRequiresConformantLocalPURLGrammar(t *testing.T
 		{value: "pkg:npm/example@%00"},
 		{value: "pkg:npm/example@1.0.0?arch=%1F"},
 		{value: "pkg:npm/example@1.0.0#file:/Volumes/private"},
+		{value: "pkg:npm/%25ZZfile%3Arelative@1.0.0"},
 		{value: "pkg:npm/example@1.0.0|/Volumes/private"},
 		{value: "pkg:npm/%GGexample@1.0.0"},
 	} {
@@ -1527,6 +1528,9 @@ func canonicalEncodedPathCases() []canonicalEncodedPathCase {
 		{name: "PURL NUL version", value: "pkg:npm/example@%00"},
 		{name: "PURL control qualifier", value: "pkg:npm/example@1.0.0?arch=%1F"},
 		{name: "PURL local file subpath", value: "pkg:npm/example@1.0.0#file:/Volumes/private"},
+		{name: "terminal malformed escape masks absolute", value: "prefix=%25ZZ%2FVolumes%2Fprivate"},
+		{name: "terminal malformed escape masks PURL local file", value: "pkg:npm/%25ZZfile%3Arelative@1.0.0"},
+		{name: "final round malformed escape masks absolute", value: "%252525ZZ%25252FVolumes%25252Fprivate"},
 	}
 }
 

@@ -422,10 +422,11 @@ func textCarriesRawPOSIXAbsolutePath(value string) bool {
 
 func boundedPercentDecode(value string) (string, bool) {
 	decoded := value
+	progressed := false
 	for range maxPercentDecodeRounds {
 		next, changed := decodePercentTriplets(decoded)
 		if !changed {
-			return decoded, false
+			return decoded, progressed && hasMalformedPercentEscape(decoded)
 		}
 		if hasMalformedPercentEscape(decoded) {
 			return next, true
@@ -434,8 +435,9 @@ func boundedPercentDecode(value string) (string, bool) {
 			return next, true
 		}
 		decoded = next
+		progressed = true
 	}
-	if hasDecodablePercentTriplet(decoded) {
+	if hasMalformedPercentEscape(decoded) || hasDecodablePercentTriplet(decoded) {
 		return decoded, true
 	}
 	return decoded, false
