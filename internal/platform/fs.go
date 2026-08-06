@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 // FileSystem is the read-only filesystem boundary used by collectors.
@@ -78,7 +80,7 @@ func (r *osRootedDirectory) OpenRoot(name string) (RootedDirectory, error) {
 }
 
 func (r *osRootedDirectory) Open(name string) (RootedFile, error) {
-	return r.root.Open(name)
+	return r.root.OpenFile(name, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
 }
 
 func (r *osRootedDirectory) Close() error {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/store"
 	"github.com/ssc-init/ssc-init/internal/testutil"
+	"golang.org/x/sys/unix"
 )
 
 func TestPackagesCollectorUsesFixedProbesAndEmitsPackageURLs(t *testing.T) {
@@ -165,6 +167,7 @@ func TestAllOptInPackageProbesUseInspectedAbsolutePathsAndExactFixedArgv(t *test
 	events := []string{}
 	inspector := &fakeInspector{events: &events, evidence: make(map[string]platform.ExecutableEvidence), errors: make(map[string]error)}
 	runner := &recordingRunner{events: &events, results: make(map[string]platform.CommandResult)}
+	missingRoot := filepath.Join(t.TempDir(), "missing-package-root")
 	for _, probe := range probes() {
 		path := filepath.Join("/inspected-bin", probe.command)
 		digest := sha256.Sum256([]byte(probe.command))
@@ -172,7 +175,16 @@ func TestAllOptInPackageProbesUseInspectedAbsolutePathsAndExactFixedArgv(t *test
 			Command: probe.command, Path: path, LocationRef: "external-executable:1/path-sha256:" + fmt.Sprintf("%x", digest),
 			SHA256: fmt.Sprintf("%x", digest), Mode: 0o755,
 		}
-		runner.results[commandKey(path, probe.args...)] = platform.CommandResult{}
+		result := platform.CommandResult{}
+		switch probe.targetID {
+		case "packages.npm", "packages.go":
+			result.Stdout = missingRoot + "\n"
+		case "packages.pip":
+			result.Stdout = `[{"name":"probe-package","version":"1.0.0"}]`
+		case "packages.pipx":
+			result.Stdout = `{"venvs":{"probe-package":{"metadata":{"main_package":{"package":"probe-package","package_version":"1.0.0"}}}}}`
+		}
+		runner.results[commandKey(path, probe.args...)] = result
 	}
 	env := testutil.Environment(t, t.TempDir())
 	env.Scope.ExternalProbes = true
@@ -543,31 +555,69 @@ func TestPackagesCollectorMarksAllMissingExecutablesSkipped(t *testing.T) {
 	}
 }
 
-func TestPackagesCollectorMarksStoppedDockerUnavailableWithoutStderr(t *testing.T) {
-	secret := "registry-token-do-not-persist"
-	runner := missingRunner()
-	dockerKey := commandKey("docker", "image", "ls", "--format", "{{json .}}")
-	delete(runner.Errors, dockerKey)
-	runner.Results = map[string]platform.CommandResult{
-		dockerKey: {Stderr: "Cannot connect to daemon: " + secret, ExitCode: 1},
-	}
-	runner.Errors[dockerKey] = errors.New("exit status 1")
-	env := optInEnvironment(t, t.TempDir(), runner)
+func TestDockerFailureClassificationIsBoundedEphemeralAndAlwaysVerified(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		result     platform.CommandResult
+		runErr     error
+		wantStatus model.TargetStatus
+	}{
+		{
+			name:   "identified daemon failure",
+			result: platform.CommandResult{ExitCode: 1, Stderr: "Cannot connect to the Docker daemon at unix:///private.sock. Is the docker daemon running? registry-token-do-not-persist"},
+			runErr: errors.New("exit status 1"), wantStatus: model.TargetUnavailable,
+		},
+		{
+			name:   "timeout",
+			result: platform.CommandResult{ExitCode: -1, Stderr: "Cannot connect to the Docker daemon"},
+			runErr: &platform.TimeoutError{Command: "/private/docker"}, wantStatus: model.TargetPartial,
+		},
+		{
+			name:   "generic nonzero",
+			result: platform.CommandResult{ExitCode: 125, Stderr: "generic private failure detail"},
+			runErr: errors.New("exit status 125"), wantStatus: model.TargetPartial,
+		},
+		{
+			name:   "invalid invocation",
+			result: platform.CommandResult{ExitCode: 125, Stderr: "unknown flag: --private-invalid"},
+			runErr: errors.New("exit status 125"), wantStatus: model.TargetPartial,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			dockerPath := filepath.Join(home, "bin", "docker")
+			events := []string{}
+			inspector := &fakeInspector{
+				events: &events,
+				evidence: map[string]platform.ExecutableEvidence{
+					"docker": {Command: "docker", Path: dockerPath, LocationRef: "$HOME/bin/docker", SHA256: strings.Repeat("3", 64), Mode: 0o755},
+				},
+				errors: missingInspectorErrors("docker"),
+			}
+			key := commandKey(dockerPath, "image", "ls", "--format", "{{json .}}")
+			runner := &recordingRunner{
+				events: &events, results: map[string]platform.CommandResult{key: testCase.result}, errors: map[string]error{key: testCase.runErr},
+			}
+			env := testutil.Environment(t, home)
+			env.Scope.ExternalProbes = true
+			env.Inspector, env.Runner = inspector, runner
 
-	got, err := New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != model.CoveragePartial {
-		t.Fatalf("result=%+v", got)
-	}
-	assertPackageTarget(t, got, "packages.docker", model.TargetUnavailable, 1, 1)
-	encoded, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "Cannot connect") {
-		t.Fatalf("stderr persisted: %s", encoded)
+			got, err := New().Collect(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPackageTarget(t, got, "packages.docker", testCase.wantStatus, 1, 1)
+			if !containsEventSequence(events, []string{"inspect:docker", "run:" + key, "verify:docker"}) {
+				t.Fatalf("events=%q", events)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte(testCase.result.Stderr)) || bytes.Contains(encoded, []byte("registry-token-do-not-persist")) {
+				t.Fatalf("stderr persisted: %s", encoded)
+			}
+		})
 	}
 }
 
@@ -595,7 +645,7 @@ func TestPackagesCollectorKeepsValidSiblingsWhenOneProbeIsMalformed(t *testing.T
 
 func TestPackagesCollectorTreatsMissingPackageDirectoriesAsBenign(t *testing.T) {
 	home := t.TempDir()
-	runner := successfulRunner()
+	runner := successfulRunner(t)
 	runner.Results[commandKey("npm", "root", "-g")] = platform.CommandResult{Stdout: filepath.Join(home, "missing-npm") + "\n"}
 	runner.Results[commandKey("go", "env", "GOPATH")] = platform.CommandResult{Stdout: filepath.Join(home, "missing-go") + "\n"}
 	env := optInEnvironment(t, home, runner)
@@ -662,7 +712,7 @@ func TestPackagesCollectorReportsFilesystemAccessWithoutPersistingDetails(t *tes
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			home := t.TempDir()
-			runner := successfulRunner()
+			runner := successfulRunner(t)
 			env := optInEnvironment(t, home, runner)
 			env.FS = testCase.setup(t, home, runner)
 
@@ -740,6 +790,7 @@ func TestPackageParsersReportLossInsteadOfSilentlyDroppingRecords(t *testing.T) 
 	}{
 		{name: "npm", parse: parseNPM, stdout: npmRoot + "\n"},
 		{name: "pipx", parse: parsePipx, stdout: `{"venvs":{"bad":{"metadata":{"main_package":{"package":"bad"}}}}}`},
+		{name: "pipx shape-less", parse: parsePipx, stdout: `{}`},
 		{name: "uv", parse: parseUV, stdout: "broken output\n"},
 		{name: "cargo", parse: parseCargo, stdout: "broken output\n"},
 		{name: "homebrew", parse: parseBrew, stdout: "missing-version\n"},
@@ -752,6 +803,206 @@ func TestPackageParsersReportLossInsteadOfSilentlyDroppingRecords(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestSuccessfulEmptyDiscoveryOutputsAreParserLoss(t *testing.T) {
+	env := testutil.Environment(t, t.TempDir())
+	for _, testCase := range []struct {
+		name, stdout string
+		parse        func(context.Context, collector.Environment, string) ([]model.Asset, error)
+	}{
+		{name: "npm", stdout: " \n", parse: parseNPM},
+		{name: "pip", stdout: `[]`, parse: parsePip},
+		{name: "pipx", stdout: `{"venvs":{}}`, parse: parsePipx},
+		{name: "go", stdout: " \n", parse: parseGoPath},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assets, err := testCase.parse(context.Background(), env, testCase.stdout)
+			if len(assets) != 0 || !errors.Is(err, errParserLoss) {
+				t.Fatalf("assets=%+v error=%v", assets, err)
+			}
+		})
+	}
+}
+
+func TestDockerMalformedNDJSONLinePreservesValidSiblingsAndReportsLoss(t *testing.T) {
+	stdout := strings.Join([]string{
+		`{"Repository":"alpine","Tag":"3.20"}`,
+		`{"Repository":`,
+		`{"Repository":"ubuntu","Tag":"24.04"}`,
+	}, "\n")
+	assets, err := parseDocker(context.Background(), testutil.Environment(t, t.TempDir()), stdout)
+	if !errors.Is(err, errParserLoss) {
+		t.Fatalf("error=%v", err)
+	}
+	want := []string{"pkg:docker/alpine@3.20", "pkg:docker/ubuntu@24.04"}
+	got := make([]string, len(assets))
+	for index, asset := range assets {
+		got[index] = asset.ID
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("assets=%q want=%q", got, want)
+	}
+}
+
+func TestNPMManifestFIFOIsRejectedWithoutBlockingAndValidSiblingSurvives(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "node_modules")
+	writeFile(t, filepath.Join(root, "valid", "package.json"), `{"name":"valid","version":"1.0.0"}`)
+	fifoPath := filepath.Join(root, "hostile", "package.json")
+	if err := os.MkdirAll(filepath.Dir(fifoPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		assets []model.Asset
+		err    error
+	}
+	done := make(chan outcome, 1)
+	env := testutil.Environment(t, home)
+	go func() {
+		assets, err := parseNPM(context.Background(), env, root+"\n")
+		done <- outcome{assets: assets, err: err}
+	}()
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, errParserLoss) {
+			t.Fatalf("error=%v", got.err)
+		}
+		testutil.AssertAsset(t, got.assets, "pkg:npm/valid@1.0.0")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("FIFO manifest read blocked")
+	}
+}
+
+func TestNPMEntryBudgetExactLimitAndPlusOne(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		entries    int
+		wantLoss   bool
+		wantAssets int
+	}{
+		{name: "exact limit", entries: 2, wantAssets: 2},
+		{name: "limit plus one", entries: 3, wantLoss: true, wantAssets: 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			root := filepath.Join(home, "node_modules")
+			for index := 0; index < testCase.entries; index++ {
+				name := fmt.Sprintf("package-%02d", index)
+				writeFile(t, filepath.Join(root, name, "package.json"), fmt.Sprintf(`{"name":%q,"version":"1.0.0"}`, name))
+			}
+			assets, err := parseNPMWithEntryLimit(context.Background(), testutil.Environment(t, home), root+"\n", 2)
+			if len(assets) != testCase.wantAssets || errors.Is(err, errParserLoss) != testCase.wantLoss {
+				t.Fatalf("assets=%+v error=%v", assets, err)
+			}
+		})
+	}
+}
+
+func TestNPMEntryBudgetIsSharedWithScopedPackages(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "node_modules")
+	writeFile(t, filepath.Join(root, "direct", "package.json"), `{"name":"direct","version":"1.0.0"}`)
+	writeFile(t, filepath.Join(root, "@scope", "first", "package.json"), `{"name":"@scope/first","version":"1.0.0"}`)
+	writeFile(t, filepath.Join(root, "@scope", "second", "package.json"), `{"name":"@scope/second","version":"1.0.0"}`)
+
+	assets, err := parseNPMWithEntryLimit(context.Background(), testutil.Environment(t, home), root+"\n", 3)
+	if len(assets) != 2 || !errors.Is(err, errParserLoss) {
+		t.Fatalf("assets=%+v error=%v", assets, err)
+	}
+	testutil.AssertAsset(t, assets, "pkg:npm/direct@1.0.0")
+}
+
+func TestGoEntryBudgetIsSharedAcrossGOPATHDirectories(t *testing.T) {
+	home := t.TempDir()
+	first, second := filepath.Join(home, "go-one"), filepath.Join(home, "go-two")
+	writeFile(t, filepath.Join(first, "bin", "first-tool"), "binary")
+	writeFile(t, filepath.Join(second, "bin", "second-tool"), "binary")
+	writeFile(t, filepath.Join(second, "bin", "third-tool"), "binary")
+	assets, err := parseGoPathWithEntryLimit(context.Background(), testutil.Environment(t, home), strings.Join([]string{first, second}, string(os.PathListSeparator)), 2)
+	if len(assets) != 2 || !errors.Is(err, errParserLoss) {
+		t.Fatalf("assets=%+v error=%v", assets, err)
+	}
+}
+
+func TestNPMManifestBoundAcceptsExactLimitRejectsPlusOneAndPreservesSibling(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "node_modules")
+	exact := paddedNPMManifest(t, "exact", maxPackageManifestBytes)
+	oversized := paddedNPMManifest(t, "oversized", maxPackageManifestBytes+1)
+	writeFile(t, filepath.Join(root, "exact", "package.json"), exact)
+	writeFile(t, filepath.Join(root, "oversized", "package.json"), oversized)
+	assets, err := parseNPM(context.Background(), testutil.Environment(t, home), root+"\n")
+	if !errors.Is(err, errParserLoss) {
+		t.Fatalf("error=%v", err)
+	}
+	testutil.AssertAsset(t, assets, "pkg:npm/exact@1.0.0")
+	for _, asset := range assets {
+		if asset.ID == "pkg:npm/oversized@1.0.0" {
+			t.Fatalf("oversized manifest accepted: %+v", asset)
+		}
+	}
+}
+
+func TestNPMSymlinkManifestIsRejectedWithoutReadingOutsideAndValidSiblingSurvives(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "node_modules")
+	writeFile(t, filepath.Join(root, "valid", "package.json"), `{"name":"valid","version":"1.0.0"}`)
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	writeFile(t, outside, `{"name":"outside-marker","version":"9.9.9"}`)
+	linkedManifest := filepath.Join(root, "linked", "package.json")
+	if err := os.MkdirAll(filepath.Dir(linkedManifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, linkedManifest); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := parseNPM(context.Background(), testutil.Environment(t, home), root+"\n")
+	if !errors.Is(err, errParserLoss) {
+		t.Fatalf("error=%v", err)
+	}
+	testutil.AssertAsset(t, assets, "pkg:npm/valid@1.0.0")
+	for _, asset := range assets {
+		if strings.Contains(asset.ID, "outside-marker") {
+			t.Fatalf("outside manifest followed: %+v", asset)
+		}
+	}
+}
+
+func TestNPMManifestReplacementBetweenLstatAndOpenIsRejectedAndValidSiblingSurvives(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "node_modules")
+	replacedDir := filepath.Join(root, "replaced")
+	writeFile(t, filepath.Join(root, "valid", "package.json"), `{"name":"valid","version":"1.0.0"}`)
+	writeFile(t, filepath.Join(replacedDir, "package.json"), `{"name":"original","version":"1.0.0"}`)
+	replacement := filepath.Join(home, "replacement.json")
+	writeFile(t, replacement, `{"name":"replacement-marker","version":"9.9.9"}`)
+	env := testutil.Environment(t, home)
+	env.FS = &replacingRootedFS{OSFileSystem: platform.OSFileSystem{}, packageDir: replacedDir, replacement: replacement}
+
+	assets, err := parseNPM(context.Background(), env, root+"\n")
+	if !errors.Is(err, errParserLoss) {
+		t.Fatalf("error=%v", err)
+	}
+	testutil.AssertAsset(t, assets, "pkg:npm/valid@1.0.0")
+	for _, asset := range assets {
+		if strings.Contains(asset.ID, "original") || strings.Contains(asset.ID, "replacement-marker") {
+			t.Fatalf("replaced manifest accepted: %+v", asset)
+		}
+	}
+}
+
+func paddedNPMManifest(t *testing.T, name string, size int) string {
+	t.Helper()
+	prefix := fmt.Sprintf(`{"name":%q,"version":"1.0.0","padding":"`, name)
+	suffix := `"}`
+	if size < len(prefix)+len(suffix) {
+		t.Fatalf("manifest size %d is too small", size)
+	}
+	return prefix + strings.Repeat("a", size-len(prefix)-len(suffix)) + suffix
 }
 
 func writeFile(t *testing.T, path, contents string) {
@@ -768,8 +1019,15 @@ func commandKey(command string, args ...string) string {
 	return strings.Join(append([]string{command}, args...), "\x1f")
 }
 
-func successfulRunner() *testutil.FakeRunner {
-	return &testutil.FakeRunner{Results: make(map[string]platform.CommandResult)}
+func successfulRunner(t *testing.T) *testutil.FakeRunner {
+	t.Helper()
+	missingRoot := filepath.Join(t.TempDir(), "missing-package-root")
+	return &testutil.FakeRunner{Results: map[string]platform.CommandResult{
+		commandKey("npm", "root", "-g"):                             {Stdout: missingRoot + "\n"},
+		commandKey("python3", "-m", "pip", "list", "--format=json"): {Stdout: `[{"name":"fixture","version":"1.0.0"}]`},
+		commandKey("pipx", "list", "--json"):                        {Stdout: `{"venvs":{"fixture":{"metadata":{"main_package":{"package":"fixture","package_version":"1.0.0"}}}}}`},
+		commandKey("go", "env", "GOPATH"):                           {Stdout: missingRoot + "\n"},
+	}}
 }
 
 func missingRunner() *testutil.FakeRunner {
@@ -824,6 +1082,92 @@ type faultFS struct {
 	platform.FileSystem
 	readDirErrors  map[string]error
 	readFileErrors map[string]error
+}
+
+func (f faultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	if err := f.readDirErrors[name]; err != nil {
+		return nil, err
+	}
+	rootedFS, ok := f.FileSystem.(platform.RootedFileSystem)
+	if !ok {
+		return nil, errors.New("test filesystem does not support rooted access")
+	}
+	root, err := rootedFS.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &faultRootedDirectory{RootedDirectory: root, path: name, fs: f}, nil
+}
+
+type faultRootedDirectory struct {
+	platform.RootedDirectory
+	path string
+	fs   faultFS
+}
+
+func (r *faultRootedDirectory) OpenRoot(name string) (platform.RootedDirectory, error) {
+	childPath := filepath.Join(r.path, name)
+	if err := r.fs.readDirErrors[childPath]; err != nil {
+		return nil, err
+	}
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &faultRootedDirectory{RootedDirectory: child, path: childPath, fs: r.fs}, nil
+}
+
+func (r *faultRootedDirectory) Open(name string) (platform.RootedFile, error) {
+	if name == "." {
+		if err := r.fs.readDirErrors[r.path]; err != nil {
+			return nil, err
+		}
+	} else if err := r.fs.readFileErrors[filepath.Join(r.path, name)]; err != nil {
+		return nil, err
+	}
+	return r.RootedDirectory.Open(name)
+}
+
+type replacingRootedFS struct {
+	platform.OSFileSystem
+	packageDir  string
+	replacement string
+	once        sync.Once
+	replaceErr  error
+}
+
+func (f *replacingRootedFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &replacingRootedDirectory{RootedDirectory: root, path: name, fs: f}, nil
+}
+
+type replacingRootedDirectory struct {
+	platform.RootedDirectory
+	path string
+	fs   *replacingRootedFS
+}
+
+func (r *replacingRootedDirectory) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &replacingRootedDirectory{RootedDirectory: child, path: filepath.Join(r.path, name), fs: r.fs}, nil
+}
+
+func (r *replacingRootedDirectory) Open(name string) (platform.RootedFile, error) {
+	if r.path == r.fs.packageDir && name == "package.json" {
+		r.fs.once.Do(func() {
+			r.fs.replaceErr = os.Rename(r.fs.replacement, filepath.Join(r.path, name))
+		})
+		if r.fs.replaceErr != nil {
+			return nil, r.fs.replaceErr
+		}
+	}
+	return r.RootedDirectory.Open(name)
 }
 
 type fakeInspector struct {

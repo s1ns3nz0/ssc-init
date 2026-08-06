@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -27,6 +29,9 @@ import (
 
 const (
 	maxPackageManifestBytes           = 1 << 20
+	maxPackageEntries                 = 10_000
+	packageDirectoryBatchSize         = 128
+	maxDockerFailureClassifyBytes     = 8 << 10
 	absolutePackageExecutableRefLimit = 17
 )
 
@@ -122,7 +127,7 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 			appendPackageIssue(&result, &target, model.TargetPartial, "executable_replaced", "package probe executable identity changed")
 		}
 		if runErr != nil || commandResult.ExitCode != 0 {
-			if verifyErr == nil && probe.targetID == "packages.docker" {
+			if verifyErr == nil && probe.targetID == "packages.docker" && dockerDaemonUnavailable(commandResult, runErr) {
 				appendPackageIssue(&result, &target, model.TargetUnavailable, "docker_unavailable", "Docker image inventory is unavailable")
 			} else {
 				appendPackageIssue(&result, &target, model.TargetPartial, "probe_failed", probe.ecosystem+" package probe failed")
@@ -158,6 +163,29 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 	sort.SliceStable(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
 	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
+}
+
+func dockerDaemonUnavailable(result platform.CommandResult, runErr error) bool {
+	var timeoutErr *platform.TimeoutError
+	if errors.As(runErr, &timeoutErr) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled) {
+		return false
+	}
+	stderr := result.Stderr
+	if len(stderr) > maxDockerFailureClassifyBytes {
+		stderr = stderr[:maxDockerFailureClassifyBytes]
+	}
+	stderr = strings.ToLower(stderr)
+	for _, marker := range []string{
+		"cannot connect to the docker daemon",
+		"is the docker daemon running",
+		"docker daemon is not running",
+		"error during connect",
+	} {
+		if strings.Contains(stderr, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendExecutableEvidence(result *model.CollectorResult, target *model.TargetCoverage, probe commandProbe, evidence platform.ExecutableEvidence) (model.Observation, bool) {
@@ -334,82 +362,55 @@ func executableMissing(err error) bool {
 }
 
 func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]model.Asset, error) {
+	return parseNPMWithEntryLimit(ctx, env, stdout, maxPackageEntries)
+}
+
+func parseNPMWithEntryLimit(ctx context.Context, env collector.Environment, stdout string, entryLimit int) ([]model.Asset, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	root := firstLine(stdout)
 	if root == "" {
-		return nil, nil
+		return nil, errParserLoss
 	}
-	entries, err := env.FS.ReadDir(root)
+	rootedFS, ok := env.FS.(platform.RootedFileSystem)
+	if !ok {
+		return nil, errFilesystemAccess
+	}
+	rootDirectory, err := rootedFS.OpenRoot(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
+		if errors.Is(err, platform.ErrUnsafeRootedPath) {
+			return nil, errParserLoss
+		}
 		return nil, errFilesystemAccess
 	}
-	var manifests []string
-	accessIncomplete := false
-	loss := false
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if !entry.IsDir() {
-			continue
-		}
-		entryPath := filepath.Join(root, entry.Name())
-		if strings.HasPrefix(entry.Name(), "@") {
-			scoped, readErr := env.FS.ReadDir(entryPath)
-			if readErr != nil {
-				if !errors.Is(readErr, fs.ErrNotExist) {
-					accessIncomplete = true
-				}
-				continue
-			}
-			for _, packageEntry := range scoped {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				if packageEntry.IsDir() {
-					manifests = append(manifests, filepath.Join(entryPath, packageEntry.Name(), "package.json"))
-				}
-			}
-			continue
-		}
-		manifests = append(manifests, filepath.Join(entryPath, "package.json"))
+	defer rootDirectory.Close()
+	budget := newPackageEntryBudget(entryLimit)
+	entries, truncated, readErr := readPackageDirectory(ctx, rootDirectory, budget)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	sort.Strings(manifests)
-	assets := make([]model.Asset, 0, len(manifests))
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		info, statErr := env.FS.Stat(manifest)
-		if statErr != nil {
-			if !errors.Is(statErr, fs.ErrNotExist) {
-				accessIncomplete = true
-			} else {
-				loss = true
-			}
-			continue
-		}
-		if info.Size() < 0 || info.Size() > maxPackageManifestBytes {
+	assets := make([]model.Asset, 0)
+	accessIncomplete := false
+	loss := truncated
+	markIssue := func(err error) {
+		switch {
+		case err == nil:
+		case errors.Is(err, errParserLoss), errors.Is(err, platform.ErrUnsafeRootedPath), errors.Is(err, fs.ErrNotExist):
 			loss = true
-			continue
+		default:
+			accessIncomplete = true
 		}
-		contents, readErr := env.FS.ReadFile(manifest)
+	}
+	markIssue(readErr)
+	appendManifest := func(packageRoot platform.RootedDirectory, location string) {
+		contents, readErr := readNPMManifest(ctx, packageRoot)
 		if readErr != nil {
-			if !errors.Is(readErr, fs.ErrNotExist) {
-				accessIncomplete = true
-			} else {
-				loss = true
-			}
-			continue
-		}
-		if len(contents) > maxPackageManifestBytes {
-			loss = true
-			continue
+			markIssue(readErr)
+			return
 		}
 		var parsed struct {
 			Name    string `json:"name"`
@@ -417,13 +418,132 @@ func parseNPM(ctx context.Context, env collector.Environment, stdout string) ([]
 		}
 		if json.Unmarshal(contents, &parsed) != nil || parsed.Name == "" || parsed.Version == "" {
 			loss = true
-			continue
+			return
 		}
 		asset := purlAsset("npm", parsed.Name, parsed.Version, "npm")
-		asset.Path = filepath.Dir(manifest)
+		asset.Path = location
 		assets = append(assets, asset)
 	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry.Name() == ".bin" {
+			continue
+		}
+		entryInfo, infoErr := rootDirectory.Lstat(entry.Name())
+		if infoErr != nil {
+			markIssue(infoErr)
+			continue
+		}
+		if entryInfo.Mode()&fs.ModeSymlink != 0 {
+			loss = true
+			continue
+		}
+		if !entryInfo.IsDir() {
+			continue
+		}
+		entryPath := filepath.Join(root, entry.Name())
+		entryRoot, openErr := platform.OpenVerifiedRoot(ctx, rootDirectory, entry.Name())
+		if openErr != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			markIssue(openErr)
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), "@") {
+			scoped, scopeTruncated, scopeErr := readPackageDirectory(ctx, entryRoot, budget)
+			if err := ctx.Err(); err != nil {
+				_ = entryRoot.Close()
+				return nil, err
+			}
+			if scopeTruncated {
+				loss = true
+			}
+			markIssue(scopeErr)
+			for _, packageEntry := range scoped {
+				if err := ctx.Err(); err != nil {
+					_ = entryRoot.Close()
+					return nil, err
+				}
+				packageInfo, infoErr := entryRoot.Lstat(packageEntry.Name())
+				if infoErr != nil {
+					markIssue(infoErr)
+					continue
+				}
+				if packageInfo.Mode()&fs.ModeSymlink != 0 {
+					loss = true
+					continue
+				}
+				if !packageInfo.IsDir() {
+					continue
+				}
+				packageRoot, openErr := platform.OpenVerifiedRoot(ctx, entryRoot, packageEntry.Name())
+				if openErr != nil {
+					if err := ctx.Err(); err != nil {
+						_ = entryRoot.Close()
+						return nil, err
+					}
+					markIssue(openErr)
+					continue
+				}
+				appendManifest(packageRoot, filepath.Join(entryPath, packageEntry.Name()))
+				_ = packageRoot.Close()
+				if err := ctx.Err(); err != nil {
+					_ = entryRoot.Close()
+					return nil, err
+				}
+			}
+			_ = entryRoot.Close()
+			continue
+		}
+		appendManifest(entryRoot, entryPath)
+		_ = entryRoot.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	sort.SliceStable(assets, func(i, j int) bool { return assets[i].ID < assets[j].ID })
 	return assets, packageParseError(accessIncomplete, loss)
+}
+
+func readNPMManifest(ctx context.Context, packageRoot platform.RootedDirectory) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, beforeOpen, opened, err := platform.OpenVerifiedFile(packageRoot, "package.json")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, platform.ErrUnsafeRootedPath) {
+			return nil, errParserLoss
+		}
+		return nil, errFilesystemAccess
+	}
+	defer file.Close()
+	if !samePackageFileSnapshot(beforeOpen, opened) {
+		return nil, errParserLoss
+	}
+	if opened.Size() < 0 || opened.Size() > maxPackageManifestBytes {
+		return nil, errParserLoss
+	}
+	contents, err := io.ReadAll(io.LimitReader(&packageContextReader{ctx: ctx, reader: file}, maxPackageManifestBytes+1))
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, errFilesystemAccess
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	afterRead, err := file.Stat()
+	if err != nil {
+		return nil, errFilesystemAccess
+	}
+	if len(contents) > maxPackageManifestBytes || !samePackageFileSnapshot(opened, afterRead) || int64(len(contents)) != opened.Size() || int64(len(contents)) != afterRead.Size() {
+		return nil, errParserLoss
+	}
+	return contents, nil
 }
 
 func parsePip(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
@@ -431,7 +551,7 @@ func parsePip(ctx context.Context, _ collector.Environment, stdout string) ([]mo
 		return nil, err
 	}
 	if strings.TrimSpace(stdout) == "" {
-		return nil, nil
+		return nil, errParserLoss
 	}
 	var packages []struct {
 		Name    string `json:"name"`
@@ -439,6 +559,9 @@ func parsePip(ctx context.Context, _ collector.Environment, stdout string) ([]mo
 	}
 	if err := json.Unmarshal([]byte(stdout), &packages); err != nil {
 		return nil, err
+	}
+	if len(packages) == 0 {
+		return nil, errParserLoss
 	}
 	assets := make([]model.Asset, 0, len(packages))
 	loss := false
@@ -463,7 +586,7 @@ func parsePipx(ctx context.Context, _ collector.Environment, stdout string) ([]m
 		return nil, err
 	}
 	if strings.TrimSpace(stdout) == "" {
-		return nil, nil
+		return nil, errParserLoss
 	}
 	type pipxPackage struct {
 		Package        string `json:"package"`
@@ -479,6 +602,9 @@ func parsePipx(ctx context.Context, _ collector.Environment, stdout string) ([]m
 	}
 	if err := json.Unmarshal([]byte(stdout), &listing); err != nil {
 		return nil, err
+	}
+	if len(listing.Venvs) == 0 {
+		return nil, errParserLoss
 	}
 	var assets []model.Asset
 	loss := false
@@ -566,8 +692,24 @@ func parseCargo(ctx context.Context, _ collector.Environment, stdout string) ([]
 }
 
 func parseGoPath(ctx context.Context, env collector.Environment, stdout string) ([]model.Asset, error) {
+	return parseGoPathWithEntryLimit(ctx, env, stdout, maxPackageEntries)
+}
+
+func parseGoPathWithEntryLimit(ctx context.Context, env collector.Environment, stdout string, entryLimit int) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(stdout) == "" {
+		return nil, errParserLoss
+	}
+	rootedFS, ok := env.FS.(platform.RootedFileSystem)
+	if !ok {
+		return nil, errFilesystemAccess
+	}
 	var assets []model.Asset
 	accessIncomplete := false
+	loss := false
+	budget := newPackageEntryBudget(entryLimit)
 	for _, goPath := range filepath.SplitList(strings.TrimSpace(stdout)) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -576,18 +718,50 @@ func parseGoPath(ctx context.Context, env collector.Environment, stdout string) 
 			continue
 		}
 		binPath := filepath.Join(goPath, "bin")
-		entries, err := env.FS.ReadDir(binPath)
+		binRoot, err := rootedFS.OpenRoot(binPath)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
-				accessIncomplete = true
+				if errors.Is(err, platform.ErrUnsafeRootedPath) {
+					loss = true
+				} else {
+					accessIncomplete = true
+				}
 			}
 			continue
 		}
+		entries, truncated, readErr := readPackageDirectory(ctx, binRoot, budget)
+		if err := ctx.Err(); err != nil {
+			_ = binRoot.Close()
+			return nil, err
+		}
+		if truncated {
+			loss = true
+		}
+		if readErr != nil {
+			if errors.Is(readErr, fs.ErrNotExist) || errors.Is(readErr, platform.ErrUnsafeRootedPath) {
+				loss = true
+			} else {
+				accessIncomplete = true
+			}
+		}
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
+				_ = binRoot.Close()
 				return nil, err
 			}
-			if entry.IsDir() {
+			info, statErr := binRoot.Lstat(entry.Name())
+			if statErr != nil {
+				if errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, platform.ErrUnsafeRootedPath) {
+					loss = true
+				} else {
+					accessIncomplete = true
+				}
+				continue
+			}
+			if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				if !info.IsDir() {
+					loss = true
+				}
 				continue
 			}
 			name := entry.Name()
@@ -599,11 +773,10 @@ func parseGoPath(ctx context.Context, env collector.Environment, stdout string) 
 				Source: "go",
 			})
 		}
+		_ = binRoot.Close()
 	}
-	if accessIncomplete {
-		return assets, errFilesystemAccess
-	}
-	return assets, nil
+	sort.SliceStable(assets, func(i, j int) bool { return assets[i].ID < assets[j].ID })
+	return assets, packageParseError(accessIncomplete, loss)
 }
 
 func parseBrew(ctx context.Context, _ collector.Environment, stdout string) ([]model.Asset, error) {
@@ -657,7 +830,8 @@ func parseDocker(ctx context.Context, _ collector.Environment, stdout string) ([
 			Digest     string `json:"Digest"`
 		}
 		if err := json.Unmarshal([]byte(line), &image); err != nil {
-			return nil, err
+			loss = true
+			continue
 		}
 		if image.Repository == "" || image.Repository == "<none>" {
 			loss = true
@@ -677,6 +851,83 @@ func parseDocker(ctx context.Context, _ collector.Environment, stdout string) ([
 		return assets, errParserLoss
 	}
 	return assets, nil
+}
+
+type packageEntryBudget struct {
+	remaining int
+}
+
+func newPackageEntryBudget(limit int) *packageEntryBudget {
+	if limit < 0 {
+		limit = 0
+	}
+	return &packageEntryBudget{remaining: limit}
+}
+
+func (b *packageEntryBudget) take() bool {
+	if b == nil || b.remaining <= 0 {
+		return false
+	}
+	b.remaining--
+	return true
+}
+
+func readPackageDirectory(ctx context.Context, root platform.RootedDirectory, budget *packageEntryBudget) ([]os.DirEntry, bool, error) {
+	directory, err := platform.OpenVerifiedDirectory(root)
+	if err != nil {
+		return nil, false, err
+	}
+	defer directory.Close()
+	entries := make([]os.DirEntry, 0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return entries, false, err
+		}
+		request := packageDirectoryBatchSize
+		if budget == nil || budget.remaining < request {
+			request = 1
+			if budget != nil && budget.remaining > 0 {
+				request = budget.remaining + 1
+			}
+		}
+		batch, readErr := directory.ReadDir(request)
+		for _, entry := range batch {
+			if !budget.take() {
+				sort.SliceStable(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+				return entries, true, nil
+			}
+			entries = append(entries, entry)
+		}
+		if errors.Is(readErr, io.EOF) {
+			sort.SliceStable(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			return entries, false, nil
+		}
+		if readErr != nil {
+			sort.SliceStable(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			return entries, false, readErr
+		}
+		if len(batch) == 0 {
+			sort.SliceStable(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			return entries, false, nil
+		}
+	}
+}
+
+func samePackageFileSnapshot(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) && left.Size() == right.Size() &&
+		left.Mode() == right.Mode() && left.ModTime().Equal(right.ModTime())
+}
+
+type packageContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *packageContextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }
 
 func packageParseError(accessIncomplete, loss bool) error {
