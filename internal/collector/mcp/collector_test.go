@@ -53,6 +53,25 @@ func TestMCPCollectorRedactsEnvironmentValuesAndCredentials(t *testing.T) {
 	}
 }
 
+func TestMCPCollectorOmitsEmptyEnvironmentKeyList(t *testing.T) {
+	home := t.TempDir()
+	writeMCPFile(t, filepath.Join(home, ".claude", "settings.json"), `{
+		"mcpServers": {
+			"documentation": {"url": "https://docs.example.test/mcp"}
+		}
+	}`)
+	env := testutil.Environment(t, home)
+
+	got, err := mcp.New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := testutil.AssertAsset(t, got.Assets, "mcp:claude:documentation")
+	if value, exists := asset.Metadata["env_keys"]; exists {
+		t.Fatalf("empty env_keys metadata emitted: %q", value)
+	}
+}
+
 func TestMCPCollectorSanitizesCommandAndCombinedCredentialArguments(t *testing.T) {
 	home := t.TempDir()
 	markers := []string{

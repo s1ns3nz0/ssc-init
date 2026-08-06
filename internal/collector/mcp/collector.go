@@ -211,16 +211,19 @@ func sanitizeServer(home, host, name string, config serverConfig) model.Asset {
 	}
 	sort.Strings(keys)
 	args := sanitizeArgs(home, config.Args)
+	metadata := map[string]string{
+		"command": sanitizeCommand(home, config.Command),
+		"args":    strings.Join(args, "\x1f"),
+		"url":     sanitizeURL(home, config.URL),
+	}
+	if len(keys) > 0 {
+		metadata["env_keys"] = strings.Join(keys, ",")
+	}
 	return model.Asset{
-		ID:   "mcp:" + host + ":" + name,
-		Type: model.AssetMCP,
-		Name: name,
-		Metadata: map[string]string{
-			"command":  sanitizeCommand(home, config.Command),
-			"args":     strings.Join(args, "\x1f"),
-			"url":      sanitizeURL(home, config.URL),
-			"env_keys": strings.Join(keys, ","),
-		},
+		ID:       "mcp:" + host + ":" + name,
+		Type:     model.AssetMCP,
+		Name:     name,
+		Metadata: metadata,
 	}
 }
 
