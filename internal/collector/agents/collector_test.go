@@ -1,4 +1,4 @@
-package agents_test
+package agents
 
 import (
 	"bytes"
@@ -8,155 +8,617 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
+	"reflect"
+	"sort"
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/collector/agents"
+	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
 
-func TestAgentCollectorFindsCodexPlugin(t *testing.T) {
-	env := testutil.Environment(t, "../../../testdata/home")
-	got, err := agents.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
+func TestAgentCatalogDeclaresFixedAndUnsupportedTargets(t *testing.T) {
+	want := []targetDeclaration{
+		{spec: literalAgentTarget("agents.claude.plugins", "claude", model.TargetDirectory), relativePath: ".claude/plugins", kind: model.AssetAgentPlugin, marker: markerClaudePlugin, supported: true},
+		{spec: literalAgentTarget("agents.claude.skills", "claude", model.TargetDirectory), relativePath: ".claude/skills", kind: model.AssetSkill, marker: markerSkill, supported: true},
+		{spec: literalAgentTarget("agents.codex.plugins", "codex", model.TargetDirectory), relativePath: ".codex/plugins", kind: model.AssetAgentPlugin, marker: markerCodexPlugin, supported: true},
+		{spec: literalAgentTarget("agents.codex.skills", "codex", model.TargetDirectory), relativePath: ".codex/skills", kind: model.AssetSkill, marker: markerSkill, supported: true},
+		{spec: literalAgentTarget("agents.cursor.plugins", "cursor", model.TargetDirectory), relativePath: ".cursor/plugins", kind: model.AssetAgentPlugin},
+		{spec: literalAgentTarget("agents.cursor.skills", "cursor", model.TargetDirectory), relativePath: ".cursor/skills", kind: model.AssetSkill, marker: markerSkill, supported: true},
+		{spec: literalAgentTarget("agents.custom-roots", "", model.TargetDirectory)},
+		{spec: literalAgentTarget("agents.dynamic-api", "", model.TargetDynamicAPI)},
+		{spec: literalAgentTarget("agents.environment-relocated", "", model.TargetDirectory)},
+		{spec: literalAgentTarget("agents.remote-host", "", model.TargetDirectory)},
+		{spec: literalAgentTarget("agents.windsurf.plugins", "windsurf", model.TargetDirectory), relativePath: ".windsurf", kind: model.AssetAgentPlugin},
+	}
+	if got := catalogDeclarations(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog=\n%+v\nwant=\n%+v", got, want)
 	}
 
-	asset := testutil.AssertAsset(t, got.Assets, "agent-plugin:codex:example")
-	if asset.Type != model.AssetAgentPlugin || asset.Name != "example" || asset.Path != "$HOME/.codex/plugins/example" {
-		t.Fatalf("asset=%+v", asset)
+	var targeted collector.TargetedCollector = New()
+	first := targeted.Targets()
+	if len(first) != len(want) {
+		t.Fatalf("targets=%+v", first)
 	}
-	if got.Status != model.CoverageComplete {
-		t.Fatalf("result=%+v", got)
+	for index, declaration := range want {
+		if first[index] != declaration.spec {
+			t.Fatalf("target[%d]=%+v want=%+v", index, first[index], declaration.spec)
+		}
+	}
+	first[0].ID = "mutated"
+	if targeted.Targets()[0].ID != "agents.claude.plugins" {
+		t.Fatal("Targets returned mutable catalog storage")
 	}
 }
 
-func TestAgentCollectorStaysWithinExplicitRootsAndFindsSkills(t *testing.T) {
-	home := t.TempDir()
-	writeAgentFile(t, filepath.Join(home, ".claude", "skills", "review", "SKILL.md"), "safe")
-	writeAgentFile(t, filepath.Join(home, "unrelated", "plugins", "outside", ".codex-plugin", "plugin.json"), `{}`)
-	env := testutil.Environment(t, home)
-
-	got, err := agents.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := testutil.AssertAsset(t, got.Assets, "agent-skill:claude:review")
-	if asset.Type != model.AssetSkill || asset.Path != "$HOME/.claude/skills/review" {
-		t.Fatalf("asset=%+v", asset)
-	}
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
-	if strings.Contains(string(encoded), "outside") {
-		t.Fatalf("scanned outside catalog: %s", encoded)
+func literalAgentTarget(id, host string, method model.TargetMethod) model.TargetSpec {
+	return model.TargetSpec{
+		ID: id, Collector: "agents", Host: host, Scope: model.ScopeUser,
+		Platform: "darwin", Method: method,
 	}
 }
 
-func TestAgentCollectorFindsDirectWindsurfAsset(t *testing.T) {
+func TestCatalogContainersAreNotAssets(t *testing.T) {
 	home := t.TempDir()
-	writeAgentFile(t, filepath.Join(home, ".windsurf", "direct-tool", "README.md"), "safe")
-	env := testutil.Environment(t, home)
-
-	got, err := agents.New().Collect(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "cache", "vendor", "demo", "1.2.3", ".claude-plugin", "plugin.json"), `{"name":"demo","version":"1.2.3"}`)
+	for _, relative := range []string{
+		".claude/plugins/extensions/README.md",
+		".claude/plugins/marketplaces/README.md",
+		".claude/plugins/readme-only/README.md",
+		".claude/plugins/arbitrary/nested/file.txt",
+		".windsurf/direct-tool/README.md",
+	} {
+		writeAgentFile(t, filepath.Join(home, filepath.FromSlash(relative)), "not evidence")
 	}
-	asset := testutil.AssertAsset(t, got.Assets, "agent-plugin:windsurf:direct-tool")
-	if asset.Path != "$HOME/.windsurf/direct-tool" || asset.Type != model.AssetAgentPlugin {
+
+	got := collectAgents(t, New(), context.Background(), home)
+	assertNoAssetNamed(t, got.Assets, "cache")
+	assertNoAssetNamed(t, got.Assets, "extensions")
+	assertNoAssetNamed(t, got.Assets, "marketplaces")
+	assertNoAssetNamed(t, got.Assets, "readme-only")
+	assertNoAssetNamed(t, got.Assets, "arbitrary")
+	assertNoAssetNamed(t, got.Assets, "direct-tool")
+	asset := testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:demo@1.2.3")
+	if asset.Type != model.AssetAgentPlugin || asset.Name != "demo" || asset.Version != "1.2.3" || asset.Source != "claude" || asset.Path != "" || asset.Metadata != nil {
 		t.Fatalf("asset=%+v", asset)
+	}
+	assertTarget(t, got, "agents.claude.plugins", model.TargetComplete, 1, 1)
+	assertObservation(t, got.Observations, asset.ID, "agents.claude.plugins", "claude", "$HOME/.claude/plugins/cache/vendor/demo/1.2.3/.claude-plugin/plugin.json", "cache/vendor/demo/1.2.3/.claude-plugin/plugin.json", "claude-plugin", "1.2.3")
+	assertCatalogCoverage(t, got, map[string]model.TargetStatus{
+		"agents.claude.plugins":        model.TargetComplete,
+		"agents.claude.skills":         model.TargetNotPresent,
+		"agents.codex.plugins":         model.TargetNotPresent,
+		"agents.codex.skills":          model.TargetNotPresent,
+		"agents.cursor.plugins":        model.TargetUnsupported,
+		"agents.cursor.skills":         model.TargetNotPresent,
+		"agents.custom-roots":          model.TargetUnsupported,
+		"agents.dynamic-api":           model.TargetUnsupported,
+		"agents.environment-relocated": model.TargetUnsupported,
+		"agents.remote-host":           model.TargetUnsupported,
+		"agents.windsurf.plugins":      model.TargetUnsupported,
+	})
+	if got.Status != model.CoveragePartial {
+		t.Fatalf("status=%q result=%+v", got.Status, got)
 	}
 }
 
-func TestAgentCollectorRejectsSymlinkedCatalogRootsAndEntries(t *testing.T) {
-	home := t.TempDir()
-	outside := t.TempDir()
-	marker := "outside-agent-marker"
-	writeAgentFile(t, filepath.Join(outside, "plugins", marker, "plugin.json"), `{}`)
-	if err := os.Symlink(outside, filepath.Join(home, ".codex")); err != nil {
-		t.Fatal(err)
+func TestAgentManifestBackedRepositoryFixture(t *testing.T) {
+	got := collectAgents(t, New(), context.Background(), "../../../testdata/home")
+	asset := testutil.AssertAsset(t, got.Assets, "agent-plugin:codex:example@1.2.3")
+	if asset.Type != model.AssetAgentPlugin || asset.Name != "example" || asset.Version != "1.2.3" || asset.Path != "" {
+		t.Fatalf("asset=%+v", asset)
 	}
-	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe", "plugin.json"), `{}`)
-	if err := os.Symlink(filepath.Join(outside, "plugins", marker), filepath.Join(home, ".claude", "plugins", "linked")); err != nil {
-		t.Fatal(err)
+	if len(got.Assets) != 1 || len(got.Observations) != 1 {
+		t.Fatalf("assets=%+v observations=%+v", got.Assets, got.Observations)
 	}
-	env := testutil.Environment(t, home)
+	assertTarget(t, got, "agents.codex.plugins", model.TargetComplete, 1, 1)
+	assertObservation(t, got.Observations, asset.ID, "agents.codex.plugins", "codex", "$HOME/.codex/plugins/example/.codex-plugin/plugin.json", "example/.codex-plugin/plugin.json", "codex-plugin", "1.2.3")
+}
 
-	got, err := agents.New().Collect(context.Background(), env)
+func TestAgentManifestFindsExplicitAndBundledSkillsWithoutReadingBody(t *testing.T) {
+	home := t.TempDir()
+	bodySecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	writeAgentFile(t, filepath.Join(home, ".claude", "skills", "directory-name", "SKILL.md"), "---\nname: review-safe\ndescription: ignored\n---\n"+bodySecret)
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "fallback-safe", "SKILL.md"), "instructions only")
+	writeAgentFile(t, filepath.Join(home, ".cursor", "skills", "cursor-safe", "SKILL.md"), "---\ndescription: no name\n---\nbody")
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "bundle", ".claude-plugin", "plugin.json"), `{"name":"bundle","version":"2.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "bundle", "skills", "helper", "SKILL.md"), "---\nname: bundled-helper\n---\nbody")
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "not-a-plugin", "skills", "orphan", "SKILL.md"), "---\nname: orphan\n---\nbody")
+
+	got := collectAgents(t, New(), context.Background(), home)
+	again := collectAgents(t, New(), context.Background(), home)
+	if !reflect.DeepEqual(got, again) {
+		t.Fatalf("non-deterministic results:\nfirst=%+v\nsecond=%+v", got, again)
+	}
+	for _, id := range []string{
+		"agent-skill:claude:review-safe",
+		"agent-skill:codex:fallback-safe",
+		"agent-skill:cursor:cursor-safe",
+		"agent-plugin:claude:bundle@2.0.0",
+		"agent-skill:claude:bundled-helper",
+	} {
+		testutil.AssertAsset(t, got.Assets, id)
+	}
+	assertNoAssetNamed(t, got.Assets, "directory-name")
+	assertNoAssetNamed(t, got.Assets, "orphan")
+	assertTarget(t, got, "agents.claude.plugins", model.TargetComplete, 2, 2)
+	assertTarget(t, got, "agents.claude.skills", model.TargetComplete, 1, 1)
+	assertTarget(t, got, "agents.codex.skills", model.TargetComplete, 1, 1)
+	assertTarget(t, got, "agents.cursor.skills", model.TargetComplete, 1, 1)
+	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe")
-	encoded, marshalErr := json.Marshal(got)
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
+	if bytes.Contains(encoded, []byte(bodySecret)) || bytes.Contains(encoded, []byte("instructions only")) {
+		t.Fatalf("skill body leaked: %s", encoded)
 	}
-	if got.Status != model.CoveragePartial || len(got.Errors) != 2 || len(got.Assets) != 1 || bytes.Contains(encoded, []byte(marker)) || bytes.Contains(encoded, []byte(outside)) {
-		t.Fatalf("result=%s", encoded)
+}
+
+func TestAgentManifestPreservesEveryVersionAndLocation(t *testing.T) {
+	home := t.TempDir()
+	for _, relative := range []string{
+		".claude/plugins/cache/a/demo/1.0.0/.claude-plugin/plugin.json",
+		".claude/plugins/cache/b/demo/1.0.0/.claude-plugin/plugin.json",
+	} {
+		writeAgentFile(t, filepath.Join(home, filepath.FromSlash(relative)), `{"name":"demo","version":"1.0.0"}`)
 	}
-	for _, coverageErr := range got.Errors {
-		if !strings.HasPrefix(coverageErr.Path, "$HOME/.codex/") {
-			t.Fatalf("error=%+v", coverageErr)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "cache", "c", "demo", "2.0.0", ".claude-plugin", "plugin.json"), `{"name":"demo","version":"2.0.0"}`)
+
+	got := collectAgents(t, New(), context.Background(), home)
+	if countAssets(got.Assets, "agent-plugin:claude:demo@1.0.0") != 2 || countAssets(got.Assets, "agent-plugin:claude:demo@2.0.0") != 1 {
+		t.Fatalf("assets=%+v", got.Assets)
+	}
+	if countObservations(got.Observations, "agent-plugin:claude:demo@1.0.0") != 2 || countObservations(got.Observations, "agent-plugin:claude:demo@2.0.0") != 1 {
+		t.Fatalf("observations=%+v", got.Observations)
+	}
+	assertTarget(t, got, "agents.claude.plugins", model.TargetComplete, 3, 3)
+	normalized := inventory.Build([]model.CollectorResult{got})
+	if len(normalized.Assets) != 2 || len(normalized.Observations) != 3 || len(normalized.Errors) != 0 {
+		t.Fatalf("normalized=%+v", normalized)
+	}
+}
+
+func TestAgentManifestParsersRejectMalformedAndDuplicateKeys(t *testing.T) {
+	valid, err := os.ReadFile("testdata/plugin/valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := parsePluginManifest(valid); err != nil || got.name != "demo" || got.version != "1.2.3" {
+		t.Fatalf("manifest=%+v err=%v", got, err)
+	}
+	for _, fixture := range []string{"testdata/plugin/duplicate-name.json", "testdata/plugin/duplicate-unknown.json", "testdata/plugin/duplicate-nested.json", "testdata/plugin/malformed.json"} {
+		contents, readErr := os.ReadFile(fixture)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, parseErr := parsePluginManifest(contents); parseErr == nil {
+			t.Fatalf("accepted %s", fixture)
+		}
+	}
+
+	for _, test := range []struct {
+		fixture  string
+		fallback string
+		want     string
+		wantErr  bool
+	}{
+		{fixture: "testdata/skill/named.md", fallback: "directory", want: "frontmatter-name"},
+		{fixture: "testdata/skill/fallback.md", fallback: "directory", want: "directory"},
+		{fixture: "testdata/skill/body-secret.md", fallback: "directory", want: "safe-name"},
+		{fixture: "testdata/skill/duplicate-name.md", fallback: "directory", wantErr: true},
+		{fixture: "testdata/skill/unclosed.md", fallback: "directory", wantErr: true},
+	} {
+		contents, readErr := os.ReadFile(test.fixture)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		got, parseErr := parseSkillManifest(contents, test.fallback)
+		if (parseErr != nil) != test.wantErr || (!test.wantErr && got != test.want) {
+			t.Fatalf("fixture=%s got=%q err=%v", test.fixture, got, parseErr)
 		}
 	}
 }
 
-func TestAgentCollectorFailsClosedWithoutRootedFilesystem(t *testing.T) {
+func TestAgentWalkMalformedSiblingIsPartialAndSafeSiblingContinues(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "a-safe", ".claude-plugin", "plugin.json"), `{"name":"safe","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "b-duplicate", ".claude-plugin", "plugin.json"), `{"name":"bad","name":"worse"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "c-malformed", ".claude-plugin", "plugin.json"), `{`)
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "safe-skill", "SKILL.md"), "---\nname: safe-skill\n---\nbody")
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "bad-skill", "SKILL.md"), "---\nname: first\nname: second\n---\nbody")
+
+	got := collectAgents(t, New(), context.Background(), home)
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe@1.0.0")
+	testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe-skill")
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "manifest_invalid")
+	assertTargetIssue(t, got, "agents.codex.skills", model.TargetPartial, "manifest_invalid")
+	assertTargetCounts(t, got, "agents.claude.plugins", 1, 1)
+	assertTargetCounts(t, got, "agents.codex.skills", 1, 1)
+}
+
+func TestAgentWalkQuarantinesCredentialShapedIdentityGenerically(t *testing.T) {
+	home := t.TempDir()
+	secretName := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "rejected-plugin", ".claude-plugin", "plugin.json"), `{"name":"`+secretName+`","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe-plugin", ".claude-plugin", "plugin.json"), `{"name":"safe","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "rejected-skill", "SKILL.md"), "---\nname: "+secretName+"\n---\nbody")
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "safe-skill", "SKILL.md"), "---\nname: safe-skill\n---\nbody")
+
+	got := collectAgents(t, New(), context.Background(), home)
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe@1.0.0")
+	testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe-skill")
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "identity_rejected")
+	assertTargetIssue(t, got, "agents.codex.skills", model.TargetPartial, "identity_rejected")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{secretName, "rejected-plugin", "rejected-skill"} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("quarantined identity leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestAgentWalkRejectsSymlinkedRootsEntriesAndMarkers(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	outsideMarker := "outside-agent-marker"
+	writeAgentFile(t, filepath.Join(outside, "codex", "linked", ".codex-plugin", "plugin.json"), `{"name":"`+outsideMarker+`"}`)
+	if err := os.Symlink(filepath.Join(outside, "codex"), filepath.Join(home, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe", ".claude-plugin", "plugin.json"), `{"name":"safe"}`)
+	writeAgentFile(t, filepath.Join(outside, "linked", ".claude-plugin", "plugin.json"), `{"name":"`+outsideMarker+`"}`)
+	if err := os.Symlink(filepath.Join(outside, "linked"), filepath.Join(home, ".claude", "plugins", "linked")); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "marker-link", ".claude-plugin", "real.json"), `{"name":"`+outsideMarker+`"}`)
+	if err := os.Symlink("real.json", filepath.Join(home, ".claude", "plugins", "marker-link", ".claude-plugin", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := collectAgents(t, New(), context.Background(), home)
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe")
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "symlink_rejected")
+	assertTargetIssue(t, got, "agents.codex.plugins", model.TargetPartial, "symlink_rejected")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(outsideMarker)) || bytes.Contains(encoded, []byte(outside)) {
+		t.Fatalf("symlink target leaked: %s", encoded)
+	}
+}
+
+func TestAgentWalkDetectsIdentitySwapAndKeepsSafeSibling(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".claude", "plugins")
+	writeAgentFile(t, filepath.Join(root, "safe", ".claude-plugin", "plugin.json"), `{"name":"safe"}`)
+	writeAgentFile(t, filepath.Join(root, "swapped", ".claude-plugin", "plugin.json"), `{"name":"original"}`)
+	replacement := filepath.Join(home, "replacement")
+	writeAgentFile(t, filepath.Join(replacement, ".claude-plugin", "plugin.json"), `{"name":"replacement"}`)
+	c := &agentCollector{limits: defaultWalkLimits()}
+	c.beforeOpen = func(targetID, relative string) {
+		if targetID != "agents.claude.plugins" || relative != "swapped" {
+			return
+		}
+		if err := os.Rename(filepath.Join(root, "swapped"), filepath.Join(root, "moved")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, filepath.Join(root, "swapped")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := collectAgents(t, c, context.Background(), home)
+	testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe")
+	assertNoAssetNamed(t, got.Assets, "original")
+	assertNoAssetNamed(t, got.Assets, "replacement")
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "identity_changed")
+}
+
+func TestAgentWalkDetectsTargetRootIdentitySwapAndKeepsSafeTarget(t *testing.T) {
+	home := t.TempDir()
+	claudeRoot := filepath.Join(home, ".claude", "plugins")
+	if err := os.MkdirAll(claudeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "safe", "SKILL.md"), "---\nname: safe\n---\n")
+	replacement := filepath.Join(home, "replacement")
+	if err := os.MkdirAll(replacement, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacementInfo, err := os.Stat(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := testutil.Environment(t, home)
+	env.FS = agentSwapFS{FileSystem: platform.OSFileSystem{}, swapPath: claudeRoot, replacement: replacementInfo}
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "identity_changed")
+	testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe")
+}
+
+func TestAgentWalkEnforcesRootDepthEntryManifestAndByteLimits(t *testing.T) {
+	t.Run("roots", func(t *testing.T) {
+		home := t.TempDir()
+		writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe", ".claude-plugin", "plugin.json"), `{"name":"safe"}`)
+		writeAgentFile(t, filepath.Join(home, ".claude", "skills", "later", "SKILL.md"), "---\nname: later\n---\n")
+		limits := defaultWalkLimits()
+		limits.maxRoots = 1
+		got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+		testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:safe")
+		assertTargetIssue(t, got, "agents.claude.skills", model.TargetPartial, "root_limit")
+		assertNoAssetNamed(t, got.Assets, "later")
+	})
+
+	t.Run("depth and safe target", func(t *testing.T) {
+		home := t.TempDir()
+		writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "too", "deep", ".claude-plugin", "plugin.json"), `{"name":"too-deep"}`)
+		writeAgentFile(t, filepath.Join(home, ".codex", "skills", "safe", "SKILL.md"), "---\nname: safe\n---\n")
+		limits := defaultWalkLimits()
+		limits.maxDepth = 1
+		got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+		assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "depth_limit")
+		testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe")
+	})
+
+	t.Run("entries and safe target", func(t *testing.T) {
+		home := t.TempDir()
+		for _, name := range []string{"a", "b", "c"} {
+			if err := os.MkdirAll(filepath.Join(home, ".claude", "plugins", name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeAgentFile(t, filepath.Join(home, ".codex", "skills", "safe", "SKILL.md"), "---\nname: safe\n---\n")
+		limits := defaultWalkLimits()
+		limits.maxEntries = 2
+		got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+		assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "entry_limit")
+		testutil.AssertAsset(t, got.Assets, "agent-skill:codex:safe")
+	})
+
+	t.Run("manifest count", func(t *testing.T) {
+		home := t.TempDir()
+		writeAgentFile(t, filepath.Join(home, ".claude", "skills", "a", "SKILL.md"), "---\nname: a\n---\n")
+		writeAgentFile(t, filepath.Join(home, ".claude", "skills", "b", "SKILL.md"), "---\nname: b\n---\n")
+		limits := defaultWalkLimits()
+		limits.maxManifests = 1
+		got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+		assertTargetIssue(t, got, "agents.claude.skills", model.TargetPartial, "manifest_limit")
+		assertTargetCounts(t, got, "agents.claude.skills", 1, 1)
+	})
+
+	t.Run("manifest bytes", func(t *testing.T) {
+		home := t.TempDir()
+		writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "large", ".claude-plugin", "plugin.json"), `{"name":"far-too-large"}`)
+		writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "safe", ".claude-plugin", "plugin.json"), `{"name":"ok"}`)
+		limits := defaultWalkLimits()
+		limits.maxManifestBytes = 16
+		got := collectAgents(t, &agentCollector{limits: limits}, context.Background(), home)
+		assertTargetIssue(t, got, "agents.claude.plugins", model.TargetPartial, "manifest_size_limit")
+		testutil.AssertAsset(t, got.Assets, "agent-plugin:claude:ok")
+		assertTargetCounts(t, got, "agents.claude.plugins", 1, 1)
+	})
+}
+
+func TestAgentWalkHonorsCancellationBeforeAndDuringTraversal(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "one", ".claude-plugin", "plugin.json"), `{"name":"one"}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New().Collect(ctx, testutil.Environment(t, home)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled error=%v", err)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	c := &agentCollector{limits: defaultWalkLimits()}
+	c.beforeOpen = func(_, _ string) { cancel() }
+	if _, err := c.Collect(ctx, testutil.Environment(t, home)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-walk error=%v", err)
+	}
+}
+
+func TestAgentWalkFailsClosedWithoutRootedFilesystem(t *testing.T) {
 	home := t.TempDir()
 	marker := "agent-path-fallback-marker"
-	writeAgentFile(t, filepath.Join(home, ".codex", "plugins", marker, "plugin.json"), `{}`)
+	writeAgentFile(t, filepath.Join(home, ".codex", "plugins", marker, ".codex-plugin", "plugin.json"), `{"name":"safe"}`)
 	env := testutil.Environment(t, home)
 	env.FS = pathOnlyAgentFileSystem{FileSystem: platform.OSFileSystem{}}
 
-	got, err := agents.New().Collect(context.Background(), env)
+	got, err := New().Collect(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(got.Assets) != 0 || len(got.Observations) != 0 {
+		t.Fatalf("result=%+v", got)
+	}
+	for _, id := range []string{"agents.claude.plugins", "agents.claude.skills", "agents.codex.plugins", "agents.codex.skills", "agents.cursor.skills"} {
+		assertTarget(t, got, id, model.TargetUnavailable, 0, 0)
 	}
 	encoded, marshalErr := json.Marshal(got)
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
-	if got.Status != model.CoveragePartial || len(got.Assets) != 0 || bytes.Contains(encoded, []byte(marker)) {
-		t.Fatalf("result=%s", encoded)
+	if bytes.Contains(encoded, []byte(marker)) {
+		t.Fatalf("path fallback leaked: %s", encoded)
 	}
 }
 
-func TestAgentCollectorSanitizesAccessFailures(t *testing.T) {
+func TestAgentWalkSanitizesAccessFailureAndDoesNotTraverseUnsupportedRoots(t *testing.T) {
 	home := t.TempDir()
-	blocked := filepath.Join(home, ".cursor", "plugins")
-	if err := os.MkdirAll(blocked, 0o755); err != nil {
+	claudeRoot := filepath.Join(home, ".claude", "plugins")
+	cursorRoot := filepath.Join(home, ".cursor", "plugins")
+	if err := os.MkdirAll(claudeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cursorRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	env := testutil.Environment(t, home)
-	env.FS = agentFaultFS{FileSystem: platform.OSFileSystem{}, blocked: blocked}
+	env.FS = &agentFaultFS{FileSystem: platform.OSFileSystem{}, blocked: map[string]error{
+		claudeRoot: fs.ErrPermission,
+		cursorRoot: errors.New("unsupported root must not be opened"),
+	}}
 
-	got, err := agents.New().Collect(context.Background(), env)
+	got, err := New().Collect(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.CoveragePartial || len(got.Errors) != 1 {
-		t.Fatalf("result=%+v", got)
+	assertTargetIssue(t, got, "agents.claude.plugins", model.TargetUnavailable, "root_unavailable")
+	assertTarget(t, got, "agents.cursor.plugins", model.TargetUnsupported, 0, 0)
+	if env.FS.(*agentFaultFS).opened[cursorRoot] {
+		t.Fatal("unsupported Cursor plugin root was traversed")
 	}
-	if got.Errors[0].Path != "$HOME/.cursor/plugins" || strings.Contains(got.Errors[0].Message, home) {
-		t.Fatalf("error=%+v", got.Errors[0])
+	encoded, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(home)) || bytes.Contains(encoded, []byte("permission")) {
+		t.Fatalf("access detail leaked: %s", encoded)
 	}
 }
 
-func TestAgentCollectorHonorsCanceledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := agents.New().Collect(ctx, testutil.Environment(t, t.TempDir()))
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error=%v", err)
+func TestAgentWalkOutputOrderIsDeterministic(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "z", "SKILL.md"), "---\nname: z\n---\n")
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "a", "SKILL.md"), "---\nname: a\n---\n")
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "z", ".claude-plugin", "plugin.json"), `{"name":"z"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "a", ".claude-plugin", "plugin.json"), `{"name":"a"}`)
+
+	got := collectAgents(t, New(), context.Background(), home)
+	if !sort.SliceIsSorted(got.Targets, func(i, j int) bool { return got.Targets[i].TargetID < got.Targets[j].TargetID }) {
+		t.Fatalf("targets=%+v", got.Targets)
 	}
+	if !sort.SliceIsSorted(got.Assets, func(i, j int) bool { return got.Assets[i].ID < got.Assets[j].ID }) {
+		t.Fatalf("assets=%+v", got.Assets)
+	}
+	if !sort.SliceIsSorted(got.Observations, func(i, j int) bool { return got.Observations[i].ID < got.Observations[j].ID }) {
+		t.Fatalf("observations=%+v", got.Observations)
+	}
+}
+
+func collectAgents(t *testing.T, c collector.Collector, ctx context.Context, home string) model.CollectorResult {
+	t.Helper()
+	got, err := c.Collect(ctx, testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func assertNoAssetNamed(t *testing.T, assets []model.Asset, name string) {
+	t.Helper()
+	for _, asset := range assets {
+		if asset.Name == name {
+			t.Fatalf("unexpected asset named %q: %+v", name, asset)
+		}
+	}
+}
+
+func assertObservation(t *testing.T, observations []model.Observation, assetID, targetID, host, locationRef, manifestPath, markerKind, version string) {
+	t.Helper()
+	for _, observation := range observations {
+		if observation.AssetID != assetID || observation.Source != targetID || observation.LocationRef != locationRef {
+			continue
+		}
+		if observation.ID == "" || observation.Collector != "agents" || observation.Host != host || !reflect.DeepEqual(observation.Consumers, []string{host}) || observation.Scope != model.ScopeUser || observation.Metadata["marker_kind"] != markerKind || observation.Metadata["manifest_path"] != manifestPath || observation.Metadata["version"] != version {
+			t.Fatalf("observation=%+v", observation)
+		}
+		return
+	}
+	t.Fatalf("missing observation asset=%q target=%q location=%q: %+v", assetID, targetID, locationRef, observations)
+}
+
+func assertCatalogCoverage(t *testing.T, result model.CollectorResult, want map[string]model.TargetStatus) {
+	t.Helper()
+	if len(result.Targets) != len(want) {
+		t.Fatalf("targets=%+v want=%+v", result.Targets, want)
+	}
+	for _, target := range result.Targets {
+		status, ok := want[target.TargetID]
+		if !ok || status != target.Status || target.InstanceRef != "" {
+			t.Fatalf("target=%+v want=%+v", target, want)
+		}
+	}
+}
+
+func assertTarget(t *testing.T, result model.CollectorResult, id string, status model.TargetStatus, assets, observations int) {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.TargetID == id {
+			if target.Status != status || target.Assets != assets || target.Observations != observations || target.InstanceRef != "" {
+				t.Fatalf("target=%+v", target)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing target %q: %+v", id, result.Targets)
+}
+
+func assertTargetCounts(t *testing.T, result model.CollectorResult, id string, assets, observations int) {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.TargetID == id {
+			if target.Assets != assets || target.Observations != observations {
+				t.Fatalf("target=%+v", target)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing target %q: %+v", id, result.Targets)
+}
+
+func assertTargetIssue(t *testing.T, result model.CollectorResult, id string, status model.TargetStatus, code string) {
+	t.Helper()
+	for _, target := range result.Targets {
+		if target.TargetID != id {
+			continue
+		}
+		if target.Status != status {
+			t.Fatalf("target=%+v", target)
+		}
+		for _, issue := range target.Errors {
+			if issue.Code == code {
+				return
+			}
+		}
+		t.Fatalf("target=%+v missing issue %q", target, code)
+	}
+	t.Fatalf("missing target %q: %+v", id, result.Targets)
+}
+
+func countAssets(assets []model.Asset, id string) int {
+	count := 0
+	for _, asset := range assets {
+		if asset.ID == id {
+			count++
+		}
+	}
+	return count
+}
+
+func countObservations(observations []model.Observation, assetID string) int {
+	count := 0
+	for _, observation := range observations {
+		if observation.AssetID == assetID {
+			count++
+		}
+	}
+	return count
 }
 
 func writeAgentFile(t *testing.T, path, contents string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -166,10 +628,18 @@ func writeAgentFile(t *testing.T, path, contents string) {
 
 type agentFaultFS struct {
 	platform.FileSystem
-	blocked string
+	blocked map[string]error
+	opened  map[string]bool
 }
 
-func (f agentFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+func (f *agentFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	if f.opened == nil {
+		f.opened = make(map[string]bool)
+	}
+	f.opened[name] = true
+	if err := f.blocked[name]; err != nil {
+		return nil, err
+	}
 	rooted, ok := f.FileSystem.(platform.RootedFileSystem)
 	if !ok {
 		return nil, fs.ErrInvalid
@@ -178,34 +648,85 @@ func (f agentFaultFS) OpenRoot(name string) (platform.RootedDirectory, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &agentFaultRoot{RootedDirectory: root, current: name, blocked: f.blocked}, nil
+	return &agentFaultRoot{RootedDirectory: root, current: name, owner: f}, nil
 }
 
 type agentFaultRoot struct {
 	platform.RootedDirectory
 	current string
-	blocked string
+	owner   *agentFaultFS
 }
 
 func (r *agentFaultRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
 	path := filepath.Join(r.current, name)
-	if path == r.blocked {
-		return nil, fs.ErrPermission
+	if r.owner.opened == nil {
+		r.owner.opened = make(map[string]bool)
+	}
+	r.owner.opened[path] = true
+	if err := r.owner.blocked[path]; err != nil {
+		return nil, err
 	}
 	child, err := r.RootedDirectory.OpenRoot(name)
 	if err != nil {
 		return nil, err
 	}
-	return &agentFaultRoot{RootedDirectory: child, current: path, blocked: r.blocked}, nil
+	return &agentFaultRoot{RootedDirectory: child, current: path, owner: r.owner}, nil
 }
 
 type pathOnlyAgentFileSystem struct {
 	platform.FileSystem
 }
 
-func (f agentFaultFS) ReadDir(path string) ([]fs.DirEntry, error) {
-	if path == f.blocked {
-		return nil, fs.ErrPermission
-	}
-	return f.FileSystem.ReadDir(path)
+type agentSwapFS struct {
+	platform.FileSystem
+	swapPath    string
+	replacement os.FileInfo
 }
+
+func (f agentSwapFS) OpenRoot(name string) (platform.RootedDirectory, error) {
+	rooted, ok := f.FileSystem.(platform.RootedFileSystem)
+	if !ok {
+		return nil, fs.ErrInvalid
+	}
+	root, err := rooted.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &agentSwapRoot{RootedDirectory: root, current: name, swapPath: f.swapPath, replacement: f.replacement}, nil
+}
+
+type agentSwapRoot struct {
+	platform.RootedDirectory
+	current     string
+	swapPath    string
+	replacement os.FileInfo
+}
+
+func (r *agentSwapRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &agentSwapRoot{
+		RootedDirectory: child, current: filepath.Join(r.current, name),
+		swapPath: r.swapPath, replacement: r.replacement,
+	}, nil
+}
+
+func (r *agentSwapRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if r.current == r.swapPath && name == "." {
+		return agentSwapFile{RootedFile: file, replacement: r.replacement}, nil
+	}
+	return file, nil
+}
+
+type agentSwapFile struct {
+	platform.RootedFile
+	replacement os.FileInfo
+}
+
+func (f agentSwapFile) Stat() (os.FileInfo, error) { return f.replacement, nil }

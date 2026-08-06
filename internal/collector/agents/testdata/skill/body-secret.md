@@ -1,0 +1,4 @@
+---
+name: safe-name
+---
+ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456
