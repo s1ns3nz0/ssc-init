@@ -70,6 +70,79 @@ type approvedCatalogTarget struct {
 	Status      model.TargetStatus
 }
 
+type approvedTargetCoverage struct {
+	Collector string
+	Target    model.TargetCoverage
+}
+
+var unsupportedTargetErrors = []model.CoverageError{{Code: "unsupported_target", Message: "target is not supported"}}
+
+var approvedHostileCoverage = [...]approvedTargetCoverage{
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.claude.plugins", Status: model.TargetNotPresent}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.claude.skills", Status: model.TargetNotPresent}},
+	{Collector: "agents", Target: model.TargetCoverage{
+		TargetID: "agents.codex.plugins", Status: model.TargetPartial, Assets: 1, Observations: 1,
+		Errors: []model.CoverageError{
+			{Code: "symlink_rejected", Message: "symbolic link was not followed"},
+			{Code: "manifest_invalid", Message: "agent manifest is invalid"},
+			{Code: "identity_rejected", Message: "agent identity was rejected"},
+		},
+	}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.codex.skills", Status: model.TargetNotPresent}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.cursor.plugins", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.cursor.skills", Status: model.TargetNotPresent}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.custom-roots", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.dynamic-api", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.environment-relocated", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.remote-host", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "agents", Target: model.TargetCoverage{TargetID: "agents.windsurf.plugins", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.cursor.extensions", Status: model.TargetNotPresent}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.custom-roots", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.dev-container", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.environment-relocated", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.jetbrains.plugins", Status: model.TargetNotPresent}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.remote-ssh", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.remote-wsl", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.service-api", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.vscode-insiders.extensions", Status: model.TargetNotPresent}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.vscode-oss.extensions", Status: model.TargetNotPresent}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.vscode.extensions", Status: model.TargetNotPresent}},
+	{Collector: "ide", Target: model.TargetCoverage{TargetID: "ide.windsurf.extensions", Status: model.TargetNotPresent}},
+
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.claude-code.legacy-user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.claude-code.user", Status: model.TargetComplete, Assets: 1, Observations: 1}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.claude-desktop.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.codex.project", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.codex.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.cursor.project", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.cursor.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.dev-container", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.dynamic-api", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.environment-relocated", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.github-copilot.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.profile-specific", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.remote-user", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.service-managed", Status: model.TargetUnsupported, Errors: unsupportedTargetErrors}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.shared.project", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.vscode-insiders.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.vscode.project", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.vscode.user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.windsurf.legacy-user", Status: model.TargetNotPresent}},
+	{Collector: "mcp", Target: model.TargetCoverage{TargetID: "mcp.windsurf.user", Status: model.TargetNotPresent}},
+
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.cargo", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.docker", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.go", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.homebrew", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.npm", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.pip", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.pipx", Status: model.TargetSkipped}},
+	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.uv", Status: model.TargetSkipped}},
+
+	{Collector: "projects", Target: model.TargetCoverage{TargetID: "projects.root", InstanceRef: "$HOME/Projects", Status: model.TargetNotPresent}},
+}
+
 var approvedHappyCatalog = [...]approvedCatalogTarget{
 	{Spec: model.TargetSpec{ID: "agents.claude.plugins", Collector: "agents", Host: "claude", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
 	{Spec: model.TargetSpec{ID: "agents.claude.skills", Collector: "agents", Host: "claude", Scope: model.ScopeUser, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, Status: model.TargetNotPresent},
@@ -161,6 +234,27 @@ func TestApprovedCatalogOracleIsExact(t *testing.T) {
 	}
 }
 
+func TestApprovedHostileCoverageOracleIsExact(t *testing.T) {
+	if len(approvedHostileCoverage) != 52 {
+		t.Fatalf("approved hostile coverage instances=%d want=52", len(approvedHostileCoverage))
+	}
+	seen := map[string]struct{}{}
+	partial := 0
+	for _, approved := range approvedHostileCoverage {
+		key := approved.Collector + "\x00" + approved.Target.TargetID + "\x00" + approved.Target.InstanceRef
+		if _, duplicate := seen[key]; duplicate {
+			t.Fatalf("approved hostile coverage contains duplicate %q", key)
+		}
+		seen[key] = struct{}{}
+		if approved.Target.Status == model.TargetPartial {
+			partial++
+		}
+	}
+	if partial != 1 {
+		t.Fatalf("approved hostile partial targets=%d want=1", partial)
+	}
+}
+
 func TestOfficialCatalogMatrixIsTruthful(t *testing.T) {
 	unconfiguredHome := t.TempDir()
 	writeMatrixFile(t, filepath.Join(unconfiguredHome, ".claude.json"), `{"mcpServers":{"`+unconfiguredHomeSentinel+`":{"url":"https://unconfigured.invalid/mcp"}}}`)
@@ -193,6 +287,65 @@ func TestScopedCollectorsUseOnlyTheInjectedFilesystemForHostReads(t *testing.T) 
 			}
 			assertSourceHasNoDirectHostFilesystemCalls(t, filepath.Join(directory, entry.Name()))
 		}
+	}
+}
+
+func TestDirectHostFilesystemReferenceAudit(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		source string
+		want   []string
+	}{
+		{
+			name: "direct call", source: `package fixture
+import "path/filepath"
+func scan() { _ = filepath.WalkDir(".", nil) }`,
+			want: []string{"path/filepath.WalkDir"},
+		},
+		{
+			name: "function value alias", source: `package fixture
+import "os"
+var open = os.OpenRoot`,
+			want: []string{"os.OpenRoot"},
+		},
+		{
+			name: "aliased import", source: `package fixture
+import host "os"
+var filesystem = host.DirFS(".")`,
+			want: []string{"os.DirFS"},
+		},
+		{
+			name: "exact removed primitive", source: `package fixture
+import "os"
+func scan() { _, _ = os.OpenRoot(".") }`,
+			want: []string{"os.OpenRoot"},
+		},
+		{
+			name: "dot import", source: `package fixture
+import . "os"
+var open = OpenRoot`,
+			want: []string{"dot-import:os"},
+		},
+		{
+			name: "harmless references", source: `package fixture
+import (
+  "os"
+  "path/filepath"
+)
+var _ os.FileInfo
+var _ = os.SameFile
+var _ = filepath.Join`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := directHostFilesystemReferences("fixture.go", []byte(testCase.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, testCase.want) {
+				t.Fatalf("references=%q want=%q", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -483,58 +636,7 @@ func TestHostileMalformedAndSymlinkSiblingsRemainPartialWithoutLosingSafeInvento
 	}
 
 	result := runIsolatedBaseline(t, baselineOptions{home: home, externalProbes: false})
-	target := requireMatrixTarget(t, result.Scan.Coverage, "agents", "agents.codex.plugins", "")
-	if target.Status != model.TargetPartial {
-		t.Fatalf("hostile sibling target=%+v", target)
-	}
-	codes := make(map[string]bool)
-	for _, issue := range target.Errors {
-		codes[issue.Code] = true
-	}
-	for _, code := range []string{"identity_rejected", "manifest_invalid", "symlink_rejected"} {
-		if !codes[code] {
-			t.Fatalf("hostile sibling target errors=%+v missing %q", target.Errors, code)
-		}
-	}
-	implementedTargets := map[string]bool{}
-	for _, approved := range approvedHappyCatalog {
-		implementedTargets[approved.Spec.Collector+"\x00"+approved.Spec.ID] = approved.Implemented
-	}
-	supportedCount := 0
-	partialSupported := []string{}
-	hostileCodes := map[string]bool{"identity_rejected": true, "manifest_invalid": true, "symlink_rejected": true}
-	for _, collectorResult := range result.Scan.Coverage {
-		for _, covered := range collectorResult.Targets {
-			key := collectorResult.Collector + "\x00" + covered.TargetID
-			if !implementedTargets[key] {
-				continue
-			}
-			supportedCount++
-			wantStatus := model.TargetNotPresent
-			switch {
-			case covered.TargetID == "agents.codex.plugins":
-				wantStatus = model.TargetPartial
-				partialSupported = append(partialSupported, key)
-			case covered.TargetID == "mcp.claude-code.user":
-				wantStatus = model.TargetComplete
-			case collectorResult.Collector == "packages":
-				wantStatus = model.TargetSkipped
-			}
-			if covered.Status != wantStatus {
-				t.Fatalf("hostile fixture changed unrelated supported target %q/%q: status=%q want=%q", covered.TargetID, covered.InstanceRef, covered.Status, wantStatus)
-			}
-			if covered.TargetID != "agents.codex.plugins" {
-				for _, issue := range covered.Errors {
-					if hostileCodes[issue.Code] {
-						t.Fatalf("hostile error %q contaminated unrelated target %q/%q", issue.Code, covered.TargetID, covered.InstanceRef)
-					}
-				}
-			}
-		}
-	}
-	if supportedCount != 34 || !reflect.DeepEqual(partialSupported, []string{"agents\x00agents.codex.plugins"}) {
-		t.Fatalf("hostile supported targets=%d partial=%q", supportedCount, partialSupported)
-	}
+	assertApprovedHostileCoverage(t, result.Scan.Coverage)
 	wantAssets := map[string]bool{
 		"agent-plugin:codex:safe-fixture@1.0.0": false,
 		"mcp:claude-code:safe-sibling":          false,
@@ -813,6 +915,23 @@ func assertEveryApplicableTargetInstanceReportedOnce(t *testing.T, result isolat
 	}
 }
 
+func assertApprovedHostileCoverage(t *testing.T, coverage []model.CollectorResult) {
+	t.Helper()
+	got := make([]approvedTargetCoverage, 0, len(approvedHostileCoverage))
+	for _, collectorResult := range coverage {
+		if collectorResult.LocalTargets != nil {
+			t.Fatalf("collector %q retained raw local targets", collectorResult.Collector)
+		}
+		for _, target := range collectorResult.Targets {
+			got = append(got, approvedTargetCoverage{Collector: collectorResult.Collector, Target: target})
+		}
+	}
+	want := approvedHostileCoverage[:]
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("hostile target coverage drifted from the literal oracle:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func assertImplementedFixtureTargetsComplete(t *testing.T, result isolatedBaseline) {
 	t.Helper()
 	for _, pair := range []struct{ collector, target, instance string }{
@@ -923,11 +1042,26 @@ func matrixRepositoryRoot(t *testing.T) string {
 
 func assertSourceHasNoDirectHostFilesystemCalls(t *testing.T, sourcePath string) {
 	t.Helper()
-	parsed, err := parser.ParseFile(token.NewFileSet(), sourcePath, nil, parser.ImportsOnly)
+	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	references, err := directHostFilesystemReferences(sourcePath, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reference := range references {
+		t.Errorf("%s directly references %s; scoped collection must use Environment.FS", sourcePath, reference)
+	}
+}
+
+func directHostFilesystemReferences(filename string, source []byte) ([]string, error) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), filename, source, 0)
+	if err != nil {
+		return nil, err
+	}
 	importPaths := map[string]string{}
+	references := map[string]struct{}{}
 	for _, imported := range parsed.Imports {
 		path := strings.Trim(imported.Path.Value, `"`)
 		if path != "os" && path != "path/filepath" {
@@ -938,27 +1072,23 @@ func assertSourceHasNoDirectHostFilesystemCalls(t *testing.T, sourcePath string)
 			name = imported.Name.Name
 		}
 		if name == "." {
-			t.Fatalf("%s dot-imports %q, bypassing the injected filesystem audit", sourcePath, path)
+			references["dot-import:"+path] = struct{}{}
+			continue
+		}
+		if name == "_" {
+			continue
 		}
 		importPaths[name] = path
 	}
-	parsed, err = parser.ParseFile(token.NewFileSet(), sourcePath, nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostReadCalls := map[string]map[string]bool{
+	directHostReferences := map[string]map[string]bool{
 		"os": {
-			"Open": true, "OpenFile": true, "ReadDir": true, "ReadFile": true,
-			"Readlink": true, "Lstat": true, "Stat": true,
+			"DirFS": true, "Open": true, "OpenFile": true, "OpenRoot": true,
+			"ReadDir": true, "ReadFile": true, "Readlink": true, "Lstat": true, "Stat": true,
 		},
 		"path/filepath": {"Glob": true, "Walk": true, "WalkDir": true},
 	}
 	ast.Inspect(parsed, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
+		selector, ok := node.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
@@ -967,11 +1097,20 @@ func assertSourceHasNoDirectHostFilesystemCalls(t *testing.T, sourcePath string)
 			return true
 		}
 		importPath := importPaths[packageName.Name]
-		if hostReadCalls[importPath][selector.Sel.Name] {
-			t.Errorf("%s directly calls %s.%s; scoped collection must use Environment.FS", sourcePath, packageName.Name, selector.Sel.Name)
+		if directHostReferences[importPath][selector.Sel.Name] {
+			references[importPath+"."+selector.Sel.Name] = struct{}{}
 		}
 		return true
 	})
+	if len(references) == 0 {
+		return nil, nil
+	}
+	result := make([]string, 0, len(references))
+	for reference := range references {
+		result = append(result, reference)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func assertRunnerAndInspectorUnused(t *testing.T, result isolatedBaseline) {
@@ -1421,6 +1560,13 @@ func (f *matrixFileSystem) Stat(name string) (os.FileInfo, error) {
 		return nil, fs.ErrPermission
 	}
 	return f.OSFileSystem.Stat(name)
+}
+
+func (f *matrixFileSystem) Lstat(name string) (os.FileInfo, error) {
+	if !f.allows(name) {
+		return nil, fs.ErrPermission
+	}
+	return f.OSFileSystem.Lstat(name)
 }
 
 func (f *matrixFileSystem) WalkDir(root string, walk fs.WalkDirFunc) error {
