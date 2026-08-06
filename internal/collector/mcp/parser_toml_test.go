@@ -76,6 +76,28 @@ func TestParseTOMLKeepsValidSiblingAndReportsOnlyServerUnknownFields(t *testing.
 	)
 }
 
+func TestParseTOMLIsolatesNonTableServerEntry(t *testing.T) {
+	got, err := ParseTOML([]byte(`
+[mcp_servers]
+bad = "not-a-table"
+
+[mcp_servers.safe]
+command = "node"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantServer := ServerConfig{Name: "safe", Command: "node", Transport: "stdio"}
+	if len(got.Servers) != 1 || !reflect.DeepEqual(got.Servers[0], wantServer) {
+		t.Fatalf("servers=%+v want=%+v", got.Servers, wantServer)
+	}
+	wantIssues := []ParseIssue{{Code: "invalid_server"}}
+	if !reflect.DeepEqual(got.Issues, wantIssues) {
+		t.Fatalf("issues=%+v want=%+v", got.Issues, wantIssues)
+	}
+	assertTOMLJSONExcludes(t, got, "not-a-table", "bad")
+}
+
 func TestParseTOMLIgnoresUnrelatedTopLevelTables(t *testing.T) {
 	got, err := ParseTOML([]byte(`
 model = "gpt-example"

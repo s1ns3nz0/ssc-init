@@ -13,7 +13,7 @@ var knownTOMLServerFields = map[string]struct{}{
 }
 
 type tomlDocument struct {
-	MCPServers map[string]map[string]any `toml:"mcp_servers"`
+	MCPServers map[string]any `toml:"mcp_servers"`
 }
 
 // ParseTOML strictly normalizes the official Codex mcp_servers table. Values
@@ -39,7 +39,12 @@ func ParseTOML(contents []byte) (ParseResult, error) {
 
 	result := ParseResult{Servers: make([]ServerConfig, 0, len(names))}
 	for _, name := range names {
-		server, unknown, ok := normalizeTOMLServer(name, document.MCPServers[name])
+		fields, table := document.MCPServers[name].(map[string]any)
+		if !table {
+			result.Issues = append(result.Issues, ParseIssue{Code: "invalid_server"})
+			continue
+		}
+		server, unknown, ok := normalizeTOMLServer(name, fields)
 		if !ok {
 			result.Issues = append(result.Issues, ParseIssue{Code: "invalid_server"})
 			continue
