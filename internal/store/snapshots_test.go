@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -152,6 +153,74 @@ func TestObservationAndScopeRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snapshot, model.Snapshot{Scan: scan, Inventory: inventory}) {
 		t.Fatalf("snapshot=%#v want=%#v", snapshot, model.Snapshot{Scan: scan, Inventory: inventory})
+	}
+}
+
+func TestLatestSnapshotPreservesCoverageNilAndEmptyShapes(t *testing.T) {
+	s := openTestStore(t)
+	nilShape, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "nil-shape", Collector: "packages", Scope: model.ScopeUser, LocationRef: "$HOME/bin/nil-shape",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyShape, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "empty-shape", Collector: "packages", Scope: model.ScopeUser, LocationRef: "$HOME/bin/empty-shape",
+		Consumers: []string{}, Metadata: map[string]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyShape.Consumers = []string{}
+	emptyShape.Metadata = map[string]string{}
+
+	scan := testScan("coverage-shapes", time.Unix(2, 0).UTC())
+	scan.Coverage = []model.CollectorResult{
+		{Collector: "agents", Status: model.CoverageComplete},
+		{
+			Collector: "packages",
+			Status:    model.CoveragePartial,
+			Assets: []model.Asset{
+				{ID: "nil-shape", Type: model.AssetTool},
+				{ID: "empty-shape", Type: model.AssetTool, Metadata: map[string]string{}},
+			},
+			Relationships: []model.Relationship{},
+			Errors:        []model.CoverageError{},
+			Targets: []model.TargetCoverage{
+				{TargetID: "nil-errors", Status: model.TargetComplete},
+				{TargetID: "empty-errors", Status: model.TargetComplete, Errors: []model.CoverageError{}},
+			},
+			Observations: []model.Observation{nilShape, emptyShape},
+			LocalTargets: []model.LocalTarget{{TargetID: "must-not-persist", Path: "$HOME/private-runtime-path"}},
+		},
+		{
+			Collector:     "projects",
+			Status:        model.CoverageComplete,
+			Assets:        []model.Asset{},
+			Relationships: []model.Relationship{},
+			Errors:        []model.CoverageError{},
+			Targets:       []model.TargetCoverage{},
+			Observations:  []model.Observation{},
+			LocalTargets:  []model.LocalTarget{},
+		},
+	}
+	wantScan := scan
+	wantScan.Coverage = append([]model.CollectorResult(nil), scan.Coverage...)
+	wantScan.Coverage[1].LocalTargets = nil
+	wantScan.Coverage[2].LocalTargets = nil
+	if err := s.SaveScan(context.Background(), scan, model.Inventory{}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.LatestSnapshot(context.Background())
+	if err != nil || !ok || !reflect.DeepEqual(got.Scan, wantScan) {
+		t.Fatalf("ok=%v\n got=%#v\nwant=%#v\nerr=%v", ok, got.Scan, wantScan, err)
+	}
+	var encoded []byte
+	if err := s.db.QueryRow(`SELECT result_json FROM coverage WHERE scan_id = ? AND collector = ?`, scan.ScanID, "packages").Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("must-not-persist")) || bytes.Contains(encoded, []byte("private-runtime-path")) {
+		t.Fatalf("coverage JSON persisted local target: %s", encoded)
 	}
 }
 

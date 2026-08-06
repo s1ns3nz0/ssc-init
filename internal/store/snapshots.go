@@ -80,7 +80,7 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 		}
 	}
 	for _, result := range scan.Coverage {
-		encoded, marshalErr := json.Marshal(result)
+		encoded, marshalErr := encodeCoverage(result)
 		if marshalErr != nil {
 			return fmt.Errorf("encode coverage %q: %w", result.Collector, marshalErr)
 		}
@@ -235,10 +235,11 @@ func loadCoverage(ctx context.Context, db *sql.DB, scanID string) ([]model.Colle
 		if err := rows.Scan(&collector, &encoded); err != nil {
 			return nil, fmt.Errorf("scan coverage for scan %q: %w", scanID, err)
 		}
-		var result model.CollectorResult
-		if err := decodeJSON(encoded, &result); err != nil {
+		var persisted persistedCollectorResult
+		if err := decodeJSON(encoded, &persisted); err != nil {
 			return nil, fmt.Errorf("decode coverage %q for scan %q: %w", collector, scanID, err)
 		}
+		result := persisted.modelValue()
 		if collector == "" || result.Collector != collector {
 			return nil, fmt.Errorf("validate coverage %q for scan %q: JSON collector %q does not match row", collector, scanID, result.Collector)
 		}
@@ -248,6 +249,138 @@ func loadCoverage(ctx context.Context, db *sql.DB, scanID string) ([]model.Colle
 		return nil, fmt.Errorf("iterate coverage for scan %q: %w", scanID, err)
 	}
 	return coverage, nil
+}
+
+// persistedCollectorResult is deliberately separate from the public JSON
+// representation. Database snapshots must distinguish nil from non-nil empty
+// slices and maps, while report JSON may continue omitting empty values.
+// LocalTargets is runtime-only and intentionally has no persistence field.
+type persistedCollectorResult struct {
+	Collector     string                    `json:"collector"`
+	Status        model.CoverageStatus      `json:"status"`
+	Assets        []persistedAsset          `json:"assets"`
+	Relationships []model.Relationship      `json:"relationships"`
+	Errors        []model.CoverageError     `json:"errors"`
+	Targets       []persistedTargetCoverage `json:"targets"`
+	Observations  []persistedObservation    `json:"observations"`
+}
+
+type persistedAsset struct {
+	ID         string            `json:"id"`
+	Type       model.AssetType   `json:"type"`
+	Name       string            `json:"name"`
+	Version    string            `json:"version,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	Source     string            `json:"source,omitempty"`
+	SHA256     string            `json:"sha256,omitempty"`
+	ObservedAt time.Time         `json:"observedAt,omitempty,omitzero"`
+	Metadata   map[string]string `json:"metadata"`
+}
+
+type persistedTargetCoverage struct {
+	TargetID     string                `json:"targetId"`
+	InstanceRef  string                `json:"instanceRef,omitempty"`
+	Status       model.TargetStatus    `json:"status"`
+	Assets       int                   `json:"assets"`
+	Observations int                   `json:"observations"`
+	Errors       []model.CoverageError `json:"errors"`
+}
+
+type persistedObservation struct {
+	ID          string                 `json:"id"`
+	AssetID     string                 `json:"assetId"`
+	Collector   string                 `json:"collector"`
+	Host        string                 `json:"host,omitempty"`
+	Consumers   []string               `json:"consumers"`
+	Scope       model.ObservationScope `json:"scope"`
+	LocationRef string                 `json:"locationRef"`
+	ProjectID   string                 `json:"projectId,omitempty"`
+	Source      string                 `json:"source,omitempty"`
+	Metadata    map[string]string      `json:"metadata"`
+}
+
+func encodeCoverage(result model.CollectorResult) ([]byte, error) {
+	return json.Marshal(newPersistedCollectorResult(result))
+}
+
+func newPersistedCollectorResult(result model.CollectorResult) persistedCollectorResult {
+	persisted := persistedCollectorResult{
+		Collector:     result.Collector,
+		Status:        result.Status,
+		Relationships: result.Relationships,
+		Errors:        result.Errors,
+	}
+	if result.Assets != nil {
+		persisted.Assets = make([]persistedAsset, len(result.Assets))
+		for index, asset := range result.Assets {
+			persisted.Assets[index] = persistedAsset{
+				ID: asset.ID, Type: asset.Type, Name: asset.Name, Version: asset.Version,
+				Path: asset.Path, Source: asset.Source, SHA256: asset.SHA256,
+				ObservedAt: asset.ObservedAt, Metadata: asset.Metadata,
+			}
+		}
+	}
+	if result.Targets != nil {
+		persisted.Targets = make([]persistedTargetCoverage, len(result.Targets))
+		for index, target := range result.Targets {
+			persisted.Targets[index] = persistedTargetCoverage{
+				TargetID: target.TargetID, InstanceRef: target.InstanceRef, Status: target.Status,
+				Assets: target.Assets, Observations: target.Observations, Errors: target.Errors,
+			}
+		}
+	}
+	if result.Observations != nil {
+		persisted.Observations = make([]persistedObservation, len(result.Observations))
+		for index, observation := range result.Observations {
+			persisted.Observations[index] = persistedObservation{
+				ID: observation.ID, AssetID: observation.AssetID, Collector: observation.Collector,
+				Host: observation.Host, Consumers: observation.Consumers, Scope: observation.Scope,
+				LocationRef: observation.LocationRef, ProjectID: observation.ProjectID,
+				Source: observation.Source, Metadata: observation.Metadata,
+			}
+		}
+	}
+	return persisted
+}
+
+func (persisted persistedCollectorResult) modelValue() model.CollectorResult {
+	result := model.CollectorResult{
+		Collector:     persisted.Collector,
+		Status:        persisted.Status,
+		Relationships: persisted.Relationships,
+		Errors:        persisted.Errors,
+	}
+	if persisted.Assets != nil {
+		result.Assets = make([]model.Asset, len(persisted.Assets))
+		for index, asset := range persisted.Assets {
+			result.Assets[index] = model.Asset{
+				ID: asset.ID, Type: asset.Type, Name: asset.Name, Version: asset.Version,
+				Path: asset.Path, Source: asset.Source, SHA256: asset.SHA256,
+				ObservedAt: asset.ObservedAt, Metadata: asset.Metadata,
+			}
+		}
+	}
+	if persisted.Targets != nil {
+		result.Targets = make([]model.TargetCoverage, len(persisted.Targets))
+		for index, target := range persisted.Targets {
+			result.Targets[index] = model.TargetCoverage{
+				TargetID: target.TargetID, InstanceRef: target.InstanceRef, Status: target.Status,
+				Assets: target.Assets, Observations: target.Observations, Errors: target.Errors,
+			}
+		}
+	}
+	if persisted.Observations != nil {
+		result.Observations = make([]model.Observation, len(persisted.Observations))
+		for index, observation := range persisted.Observations {
+			result.Observations[index] = model.Observation{
+				ID: observation.ID, AssetID: observation.AssetID, Collector: observation.Collector,
+				Host: observation.Host, Consumers: observation.Consumers, Scope: observation.Scope,
+				LocationRef: observation.LocationRef, ProjectID: observation.ProjectID,
+				Source: observation.Source, Metadata: observation.Metadata,
+			}
+		}
+	}
+	return result
 }
 
 func loadAssets(ctx context.Context, db *sql.DB, scanID string) ([]model.Asset, error) {
