@@ -15,8 +15,167 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 )
+
+func TestMigrationFourAddsScopeAndObservationSchema(t *testing.T) {
+	path := createDatabaseAtMigration(t, 3)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, table := range []string{"observations", "observation_state"} {
+		assertTableExists(t, s.db, table)
+	}
+	assertColumnExists(t, s.db, "scans", "scope_json")
+	assertColumnExists(t, s.db, "inventory_state", "observations_nil")
+	assertColumnExists(t, s.db, "inventory_state", "observation_count")
+}
+
+func TestMigrationFourRollsBackAsOneTransaction(t *testing.T) {
+	path := createDatabaseAtMigration(t, 3)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE observations (conflict TEXT)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path); err == nil {
+		reopened.Close()
+		t.Fatal("conflicting migration unexpectedly opened")
+	}
+
+	db, err = sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var applied int
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 3 {
+		t.Fatalf("applied migration=%d want=3", applied)
+	}
+	assertColumnMissing(t, db, "scans", "scope_json")
+	assertColumnMissing(t, db, "inventory_state", "observations_nil")
+}
+
+func TestMigrationFourPreservesLegacyV1Snapshot(t *testing.T) {
+	path := createDatabaseAtMigration(t, 3)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO scans(id, schema_version, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`,
+		"legacy", "ssc-init.scan.v1", "complete", formatTime(time.Unix(1, 0)), formatTime(time.Unix(2, 0))); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count) VALUES (?, 1, 1, 1, 0, 0, 0)`, "legacy"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got, ok, err := s.LatestSnapshot(context.Background())
+	want := model.Snapshot{
+		Scan: model.ScanResult{
+			SchemaVersion: "ssc-init.scan.v1",
+			ScanID:        "legacy",
+			Status:        "complete",
+			StartedAt:     time.Unix(1, 0).UTC(),
+			FinishedAt:    time.Unix(2, 0).UTC(),
+		},
+		Inventory: model.Inventory{},
+	}
+	if err != nil || !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ok=%v\n got=%#v\nwant=%#v\nerr=%v", ok, got, want, err)
+	}
+}
+
+func TestObservationAndScopeRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	scan := testScan("v2", time.Unix(2, 0).UTC())
+	scan.SchemaVersion = "ssc-init.scan.v2"
+	scan.Scope = model.ScanScope{Platform: "darwin", CatalogVersion: "ssc-init.catalog.v1", ProjectRoots: []string{"$HOME/Projects"}}
+	scan.Coverage = []model.CollectorResult{{
+		Collector: "packages",
+		Status:    model.CoveragePartial,
+		Targets: []model.TargetCoverage{{
+			TargetID:     "packages.user-bin",
+			InstanceRef:  "$HOME/bin",
+			Status:       model.TargetComplete,
+			Assets:       1,
+			Observations: 2,
+		}},
+	}}
+	first, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "a", Collector: "packages", Scope: model.ScopeToolEnvironment, LocationRef: "$HOME/bin/a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "a", Collector: "packages", Scope: model.ScopeToolEnvironment, LocationRef: "$HOME/bin/alias-a", Metadata: map[string]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Consumers = []string{}
+	inventory := model.Inventory{
+		Assets:        []model.Asset{{ID: "a", Type: model.AssetTool, Name: "a"}},
+		Observations:  []model.Observation{second, first},
+		Relationships: []model.Relationship{},
+		Errors:        []model.CoverageError{},
+	}
+	if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok, err := s.LatestSnapshot(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(snapshot, model.Snapshot{Scan: scan, Inventory: inventory}) {
+		t.Fatalf("snapshot=%#v want=%#v", snapshot, model.Snapshot{Scan: scan, Inventory: inventory})
+	}
+}
+
+func TestObservationInventoryShapeRoundTrip(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		observations []model.Observation
+	}{
+		{name: "nil"},
+		{name: "empty", observations: []model.Observation{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			inventory := model.Inventory{Observations: tt.observations}
+			if err := s.SaveScan(context.Background(), testScan("shape-"+tt.name, time.Unix(2, 0).UTC()), inventory); err != nil {
+				t.Fatal(err)
+			}
+			got, ok, err := s.LatestSnapshot(context.Background())
+			if err != nil || !ok || !reflect.DeepEqual(got.Inventory, inventory) {
+				t.Fatalf("ok=%v got=%#v want=%#v err=%v", ok, got.Inventory, inventory, err)
+			}
+		})
+	}
+}
 
 func TestSaveAndLoadLatestInventory(t *testing.T) {
 	s, err := Open(filepath.Join(privateTempDir(t), "state.db"))
@@ -210,6 +369,19 @@ func TestCorruptAssetJSONReturnsError(t *testing.T) {
 	}
 }
 
+func TestLatestSnapshotRejectsNonObjectScopeJSON(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SaveScan(context.Background(), testScan("corrupt-scope", time.Unix(2, 0).UTC()), model.Inventory{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE scans SET scope_json = 'null' WHERE id = 'corrupt-scope'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.LatestSnapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestCorruptSnapshotStateReturnsError(t *testing.T) {
 	t.Run("missing asset state", func(t *testing.T) {
 		s := openTestStore(t)
@@ -235,6 +407,125 @@ func TestCorruptSnapshotStateReturnsError(t *testing.T) {
 			t.Fatal("inconsistent nil shape unexpectedly loaded")
 		}
 	})
+}
+
+func TestObservationCorruptionReturnsError(t *testing.T) {
+	mutations := []struct {
+		name       string
+		statements []string
+		want       string
+	}{
+		{name: "missing state", statements: []string{`DELETE FROM observation_state WHERE scan_id = 'corrupt-observation'`}, want: "missing observation state"},
+		{name: "mismatched JSON id", statements: []string{`UPDATE observations SET observation_json = replace(observation_json, 'observation:sha256:', 'wrong:sha256:') WHERE scan_id = 'corrupt-observation'`}, want: "does not match row"},
+		{name: "orphan asset id", statements: []string{`PRAGMA foreign_keys=OFF`, `UPDATE observations SET asset_id = 'missing' WHERE scan_id = 'corrupt-observation'`, `PRAGMA foreign_keys=ON`}, want: "missing asset"},
+		{name: "invalid index", statements: []string{`UPDATE observation_state SET observation_index = 1 WHERE scan_id = 'corrupt-observation'`}, want: "got index 1, want 0"},
+		{name: "row count mismatch", statements: []string{`UPDATE inventory_state SET observation_count = 2 WHERE scan_id = 'corrupt-observation'`}, want: "observation row count mismatch"},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			s := openTestStore(t)
+			observation, err := identity.FinalizeObservation(model.Observation{
+				AssetID: "asset", Collector: "packages", Scope: model.ScopeUser, LocationRef: "$HOME/.tool",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory := model.Inventory{
+				Assets:       []model.Asset{{ID: "asset", Type: model.AssetTool}},
+				Observations: []model.Observation{observation},
+			}
+			if err := s.SaveScan(context.Background(), testScan("corrupt-observation", time.Unix(2, 0).UTC()), inventory); err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range mutation.statements {
+				if _, err := s.db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := s.LatestSnapshot(context.Background()); err == nil || !strings.Contains(err.Error(), mutation.want) {
+				t.Fatalf("error=%v want substring %q", err, mutation.want)
+			}
+		})
+	}
+}
+
+func TestObservationAndTargetValidationHappensBeforeTransaction(t *testing.T) {
+	validObservation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "asset", Collector: "packages", Scope: model.ScopeUser, LocationRef: "$HOME/.tool", Consumers: []string{"codex", "vscode"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		mutate    func(*model.ScanResult, *model.Inventory)
+		wantError string
+	}{
+		{name: "duplicate id", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations = append(inventory.Observations, inventory.Observations[0])
+		}, wantError: "duplicate inventory observation id"},
+		{name: "missing asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].AssetID = "missing"
+		}, wantError: "references missing asset"},
+		{name: "invalid scope", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Scope = "invalid"
+		}, wantError: "invalid observation scope"},
+		{name: "unsorted consumers", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Consumers = []string{"vscode", "codex"}
+		}, wantError: "sorted and unique"},
+		{name: "duplicate consumers", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Consumers = []string{"codex", "codex"}
+		}, wantError: "sorted and unique"},
+		{name: "sensitive observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].Source = "SERVICE_TOKEN=raw-value"
+		}, wantError: ErrSensitiveSnapshot.Error()},
+		{name: "invalid target status", mutate: func(scan *model.ScanResult, _ *model.Inventory) {
+			scan.Coverage = []model.CollectorResult{{Collector: "packages", Status: model.CoverageComplete, Targets: []model.TargetCoverage{{TargetID: "target", Status: "invalid"}}}}
+		}, wantError: "invalid target status"},
+		{name: "negative target assets", mutate: func(scan *model.ScanResult, _ *model.Inventory) {
+			scan.Coverage = []model.CollectorResult{{Collector: "packages", Status: model.CoverageComplete, Targets: []model.TargetCoverage{{TargetID: "target", Status: model.TargetComplete, Assets: -1}}}}
+		}, wantError: "invalid target counts"},
+		{name: "negative target observations", mutate: func(scan *model.ScanResult, _ *model.Inventory) {
+			scan.Coverage = []model.CollectorResult{{Collector: "packages", Status: model.CoverageComplete, Targets: []model.TargetCoverage{{TargetID: "target", Status: model.TargetComplete, Observations: -1}}}}
+		}, wantError: "invalid target counts"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			scan := testScan("invalid-observation", time.Unix(2, 0).UTC())
+			inventory := model.Inventory{Assets: []model.Asset{{ID: "asset"}}, Observations: []model.Observation{validObservation}}
+			tt.mutate(&scan, &inventory)
+			if err := s.SaveScan(context.Background(), scan, inventory); err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error=%v want substring %q", err, tt.wantError)
+			}
+			assertNoSnapshotRows(t, s)
+		})
+	}
+}
+
+func TestObservationSnapshotRowFailureRollsBackEveryTable(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_inventory_state BEFORE INSERT ON inventory_state BEGIN SELECT RAISE(ABORT, 'forced failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "asset", Collector: "packages", Scope: model.ScopeUser, LocationRef: "$HOME/.tool",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := testScan("atomic", time.Unix(2, 0).UTC())
+	scan.Coverage = []model.CollectorResult{{Collector: "packages", Status: model.CoverageComplete}}
+	inventory := model.Inventory{
+		Assets:        []model.Asset{{ID: "asset"}},
+		Observations:  []model.Observation{observation},
+		Relationships: []model.Relationship{{From: "asset", Kind: "uses", To: "asset"}},
+		Errors:        []model.CoverageError{{Code: "safe", Message: "safe"}},
+	}
+	if err := s.SaveScan(context.Background(), scan, inventory); err == nil {
+		t.Fatal("forced row failure unexpectedly succeeded")
+	}
+	assertNoSnapshotRows(t, s)
 }
 
 func TestOpenAppliesMigrationsAndPragmas(t *testing.T) {
@@ -617,6 +908,7 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 		{name: "missing table", mutate: `DROP TABLE coverage`},
 		{name: "extra column", mutate: `ALTER TABLE coverage ADD COLUMN unexpected TEXT`},
 		{name: "wrong index order", mutate: `DROP INDEX scans_latest_idx; CREATE INDEX scans_latest_idx ON scans(id, finished_at)`},
+		{name: "unexpected observation index", mutate: `CREATE INDEX unexpected_observation_idx ON observations(asset_id)`},
 		{name: "unexpected trigger", mutate: `CREATE TRIGGER unexpected_scan_trigger AFTER INSERT ON scans BEGIN SELECT 1; END`},
 	}
 	for _, tt := range tests {
@@ -647,6 +939,9 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 		{name: "wrong primary key order", table: "relationships", old: "PRIMARY KEY (scan_id, from_id, kind, to_id)", replacement: "PRIMARY KEY (from_id, scan_id, kind, to_id)"},
 		{name: "wrong foreign key", table: "coverage", old: "REFERENCES scans(id)", replacement: "REFERENCES scans(status)"},
 		{name: "wrong check", table: "asset_state", old: "CHECK (asset_index >= 0)", replacement: "CHECK (asset_index >= -1)"},
+		{name: "wrong observation default", table: "inventory_state", old: "observations_nil INTEGER NOT NULL DEFAULT 1", replacement: "observations_nil INTEGER NOT NULL DEFAULT 0"},
+		{name: "wrong observation check", table: "observation_state", old: "CHECK (consumers_nil IN (0, 1))", replacement: "CHECK (consumers_nil IN (0, 2))"},
+		{name: "wrong observation foreign key", table: "observations", old: "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)", replacement: "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(asset_id, scan_id)"},
 		{name: "split composite foreign key", table: "asset_state", old: "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)", replacement: "FOREIGN KEY (asset_id) REFERENCES assets(asset_id), FOREIGN KEY (scan_id) REFERENCES assets(scan_id)"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -681,7 +976,7 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 
 func assertNoSnapshotRows(t *testing.T, s *Store) {
 	t.Helper()
-	for _, table := range []string{"scans", "assets", "relationships", "coverage", "inventory_errors", "inventory_state"} {
+	for _, table := range []string{"scans", "assets", "observations", "observation_state", "relationships", "coverage", "inventory_errors", "inventory_state"} {
 		var count int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -690,6 +985,95 @@ func assertNoSnapshotRows(t *testing.T, s *Store) {
 			t.Fatalf("%s contains %d rows", table, count)
 		}
 	}
+}
+
+func createDatabaseAtMigration(t *testing.T, version int) string {
+	t.Helper()
+	if version < 1 || version > len(migrations) {
+		t.Fatalf("invalid migration version %d", version)
+	}
+	path := filepath.Join(privateTempDir(t), "state.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, statement := range migrations[:version] {
+		tx, err := db.Begin()
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(statement); err != nil {
+			_ = tx.Rollback()
+			db.Close()
+			t.Fatalf("apply migration %d: %v", index+1, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)`, index+1, formatTime(time.Unix(int64(index+1), 0))); err != nil {
+			_ = tx.Rollback()
+			db.Close()
+			t.Fatalf("record migration %d: %v", index+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			db.Close()
+			t.Fatalf("commit migration %d: %v", index+1, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertTableExists(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("table %q does not exist", table)
+	}
+}
+
+func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
+	t.Helper()
+	if !columnExists(t, db, table, column) {
+		t.Fatalf("column %q does not exist in table %q", column, table)
+	}
+}
+
+func assertColumnMissing(t *testing.T, db *sql.DB, table, column string) {
+	t.Helper()
+	if columnExists(t, db, table, column) {
+		t.Fatalf("column %q unexpectedly exists in table %q", column, table)
+	}
+}
+
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info("` + strings.ReplaceAll(table, `"`, `""`) + `")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
 }
 
 func openTestStore(t *testing.T) *Store {

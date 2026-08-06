@@ -30,6 +30,19 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	if scan.StartedAt.IsZero() || scan.FinishedAt.IsZero() || scan.FinishedAt.Before(scan.StartedAt) {
 		return errors.New("invalid scan timestamps")
 	}
+	for field, value := range map[string]string{
+		"scan scope platform":        scan.Scope.Platform,
+		"scan scope catalog version": scan.Scope.CatalogVersion,
+	} {
+		if err := validateOptionalString(field, value); err != nil {
+			return err
+		}
+	}
+	for _, projectRoot := range scan.Scope.ProjectRoots {
+		if err := validateOptionalString("scan scope project root", projectRoot); err != nil {
+			return err
+		}
+	}
 
 	assetIDs := make(map[string]struct{}, len(inventory.Assets))
 	for _, asset := range inventory.Assets {
@@ -61,6 +74,19 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 		if err := validateCoverageError(inventoryError); err != nil {
 			return err
 		}
+	}
+	observationIDs := make(map[string]struct{}, len(inventory.Observations))
+	for _, observation := range inventory.Observations {
+		if err := validateObservation(observation); err != nil {
+			return err
+		}
+		if _, ok := assetIDs[observation.AssetID]; !ok {
+			return errors.New("inventory observation references missing asset")
+		}
+		if _, duplicate := observationIDs[observation.ID]; duplicate {
+			return errors.New("duplicate inventory observation id")
+		}
+		observationIDs[observation.ID] = struct{}{}
 	}
 
 	collectors := make(map[string]struct{}, len(scan.Coverage))
@@ -100,6 +126,38 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 				return err
 			}
 		}
+		resultObservationIDs := make(map[string]struct{}, len(result.Observations))
+		for _, observation := range result.Observations {
+			if err := validateObservation(observation); err != nil {
+				return err
+			}
+			if _, ok := resultAssets[observation.AssetID]; !ok {
+				return errors.New("coverage observation references missing asset")
+			}
+			if _, duplicate := resultObservationIDs[observation.ID]; duplicate {
+				return errors.New("duplicate coverage observation id")
+			}
+			resultObservationIDs[observation.ID] = struct{}{}
+		}
+		for _, target := range result.Targets {
+			if err := validateRequiredString("target id", target.TargetID); err != nil {
+				return err
+			}
+			if err := validateOptionalString("target instance reference", target.InstanceRef); err != nil {
+				return err
+			}
+			if !validTargetStatus(target.Status) {
+				return errors.New("invalid target status")
+			}
+			if target.Assets < 0 || target.Observations < 0 {
+				return errors.New("invalid target counts")
+			}
+			for _, targetError := range target.Errors {
+				if err := validateCoverageError(targetError); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -116,8 +174,47 @@ func validateAsset(asset model.Asset) error {
 			return err
 		}
 	}
-	for key, value := range asset.Metadata {
-		if err := validateOptionalString("asset metadata key", key); err != nil {
+	return validateMetadata("asset", asset.Metadata)
+}
+
+func validateObservation(observation model.Observation) error {
+	for field, value := range map[string]string{
+		"observation id":           observation.ID,
+		"observation asset id":     observation.AssetID,
+		"observation collector":    observation.Collector,
+		"observation scope":        string(observation.Scope),
+		"observation location ref": observation.LocationRef,
+	} {
+		if err := validateRequiredString(field, value); err != nil {
+			return err
+		}
+	}
+	if !validObservationScope(observation.Scope) {
+		return errors.New("invalid observation scope")
+	}
+	for field, value := range map[string]string{
+		"observation host":       observation.Host,
+		"observation project id": observation.ProjectID,
+		"observation source":     observation.Source,
+	} {
+		if err := validateOptionalString(field, value); err != nil {
+			return err
+		}
+	}
+	for index, consumer := range observation.Consumers {
+		if err := validateOptionalString("observation consumer", consumer); err != nil {
+			return err
+		}
+		if index > 0 && observation.Consumers[index-1] >= consumer {
+			return errors.New("observation consumers must be sorted and unique")
+		}
+	}
+	return validateMetadata("observation", observation.Metadata)
+}
+
+func validateMetadata(owner string, metadata map[string]string) error {
+	for key, value := range metadata {
+		if err := validateOptionalString(owner+" metadata key", key); err != nil {
 			return err
 		}
 		if safeListMetadataKey(key) {
@@ -127,7 +224,7 @@ func validateAsset(asset model.Asset) error {
 		} else if metadataKeyCarriesSecret(key) && value != "" && !privacy.IsRedactedPlaceholder(value) {
 			return ErrSensitiveSnapshot
 		}
-		if err := validateOptionalString("asset metadata value", value); err != nil {
+		if err := validateOptionalString(owner+" metadata value", value); err != nil {
 			return err
 		}
 	}
@@ -224,6 +321,24 @@ func validateSafeKeyList(value string) error {
 func validCoverageStatus(status model.CoverageStatus) bool {
 	switch status {
 	case model.CoverageComplete, model.CoveragePartial, model.CoverageSkipped, model.CoverageUnavailable, model.CoverageFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validObservationScope(scope model.ObservationScope) bool {
+	switch scope {
+	case model.ScopeUser, model.ScopeProject, model.ScopeIDEProfile, model.ScopeToolEnvironment, model.ScopeSystem:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTargetStatus(status model.TargetStatus) bool {
+	switch status {
+	case model.TargetComplete, model.TargetNotPresent, model.TargetPartial, model.TargetUnavailable, model.TargetUnsupported, model.TargetSkipped:
 		return true
 	default:
 		return false

@@ -80,3 +80,9 @@ type ScanResult struct {
 	Coverage      []CollectorResult `json:"coverage"`
 	Scope         ScanScope         `json:"scope,omitempty,omitzero"`
 }
+
+// Snapshot combines a persisted scan result with its immutable inventory.
+type Snapshot struct {
+	Scan      ScanResult `json:"scan"`
+	Inventory Inventory  `json:"inventory"`
+}

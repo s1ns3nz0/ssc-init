@@ -20,6 +20,10 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 	if err := validateSnapshot(scan, inventory); err != nil {
 		return err
 	}
+	encodedScope, err := json.Marshal(scan.Scope)
+	if err != nil {
+		return fmt.Errorf("encode scan scope: %w", err)
+	}
 	db, guard, release, err := s.beginOperation()
 	if err != nil {
 		return err
@@ -35,8 +39,8 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 		}
 	}()
 
-	if _, err = tx.ExecContext(ctx, `INSERT INTO scans(id, schema_version, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`,
-		scan.ScanID, scan.SchemaVersion, scan.Status, formatTime(scan.StartedAt), formatTime(scan.FinishedAt)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scans(id, schema_version, status, started_at, finished_at, scope_json) VALUES (?, ?, ?, ?, ?, ?)`,
+		scan.ScanID, scan.SchemaVersion, scan.Status, formatTime(scan.StartedAt), formatTime(scan.FinishedAt), encodedScope); err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
 	for index, asset := range inventory.Assets {
@@ -49,6 +53,20 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_state(scan_id, asset_id, asset_index, metadata_nil) VALUES (?, ?, ?, ?)`, scan.ScanID, asset.ID, index, boolInt(asset.Metadata == nil)); err != nil {
 			return fmt.Errorf("insert asset state %q: %w", asset.ID, err)
+		}
+	}
+	for index, observation := range inventory.Observations {
+		encoded, marshalErr := json.Marshal(observation)
+		if marshalErr != nil {
+			return fmt.Errorf("encode observation %q: %w", observation.ID, marshalErr)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO observations(scan_id, observation_id, asset_id, observation_json) VALUES (?, ?, ?, ?)`,
+			scan.ScanID, observation.ID, observation.AssetID, encoded); err != nil {
+			return fmt.Errorf("insert observation %q: %w", observation.ID, err)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO observation_state(scan_id, observation_id, observation_index, metadata_nil, consumers_nil) VALUES (?, ?, ?, ?, ?)`,
+			scan.ScanID, observation.ID, index, boolInt(observation.Metadata == nil), boolInt(observation.Consumers == nil)); err != nil {
+			return fmt.Errorf("insert observation state %q: %w", observation.ID, err)
 		}
 	}
 	for index, relationship := range inventory.Relationships {
@@ -79,9 +97,9 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 			return fmt.Errorf("insert inventory error %d: %w", index, err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		scan.ScanID, boolInt(inventory.Assets == nil), boolInt(inventory.Relationships == nil), boolInt(inventory.Errors == nil),
-		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors)); err != nil {
+		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors), boolInt(inventory.Observations == nil), len(inventory.Observations)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -90,72 +108,146 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 	return secureSQLiteFiles(s.path, guard)
 }
 
-// LatestInventory loads the newest inventory by finished time, breaking ties by scan ID.
+// LatestInventory loads the inventory from the newest complete snapshot.
 func (s *Store) LatestInventory(ctx context.Context) (model.Inventory, bool, error) {
+	snapshot, ok, err := s.LatestSnapshot(ctx)
+	return snapshot.Inventory, ok, err
+}
+
+// LatestSnapshot loads the newest scan and inventory by finished time,
+// breaking ties by scan ID.
+func (s *Store) LatestSnapshot(ctx context.Context) (model.Snapshot, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return model.Inventory{}, false, err
+		return model.Snapshot{}, false, err
 	}
 	db, _, release, err := s.beginOperation()
 	if err != nil {
-		return model.Inventory{}, false, err
+		return model.Snapshot{}, false, err
 	}
 	defer release()
-	var scanID string
-	err = db.QueryRowContext(ctx, `SELECT id FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&scanID)
+	var scan model.ScanResult
+	var startedAt, finishedAt string
+	var encodedScope []byte
+	err = db.QueryRowContext(ctx, `SELECT id, schema_version, status, started_at, finished_at, scope_json FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).
+		Scan(&scan.ScanID, &scan.SchemaVersion, &scan.Status, &startedAt, &finishedAt, &encodedScope)
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Inventory{}, false, nil
+		return model.Snapshot{}, false, nil
 	}
 	if err != nil {
-		return model.Inventory{}, false, fmt.Errorf("select latest scan: %w", err)
+		return model.Snapshot{}, false, fmt.Errorf("select latest scan: %w", err)
+	}
+	if scan.StartedAt, err = parseTime(startedAt); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("decode started time for scan %q: %w", scan.ScanID, err)
+	}
+	if scan.FinishedAt, err = parseTime(finishedAt); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("decode finished time for scan %q: %w", scan.ScanID, err)
+	}
+	trimmedScope := bytes.TrimSpace(encodedScope)
+	if len(trimmedScope) < 2 || trimmedScope[0] != '{' || trimmedScope[len(trimmedScope)-1] != '}' {
+		return model.Snapshot{}, false, fmt.Errorf("decode scope for scan %q: scope must be a JSON object", scan.ScanID)
+	}
+	if err := decodeJSON(trimmedScope, &scan.Scope); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("decode scope for scan %q: %w", scan.ScanID, err)
+	}
+	if scan.Coverage, err = loadCoverage(ctx, db, scan.ScanID); err != nil {
+		return model.Snapshot{}, false, err
 	}
 
-	var assetsNil, relationshipsNil, errorsNil, assetCount, relationshipCount, errorCount int
-	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count FROM inventory_state WHERE scan_id = ?`, scanID).
-		Scan(&assetsNil, &relationshipsNil, &errorsNil, &assetCount, &relationshipCount, &errorCount); err != nil {
-		return model.Inventory{}, false, fmt.Errorf("load inventory state for scan %q: %w", scanID, err)
+	var assetsNil, relationshipsNil, errorsNil, observationsNil int
+	var assetCount, relationshipCount, errorCount, observationCount int
+	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, observations_nil, asset_count, relationship_count, error_count, observation_count FROM inventory_state WHERE scan_id = ?`, scan.ScanID).
+		Scan(&assetsNil, &relationshipsNil, &errorsNil, &observationsNil, &assetCount, &relationshipCount, &errorCount, &observationCount); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("load inventory state for scan %q: %w", scan.ScanID, err)
 	}
-	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil); err != nil {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: %w", scanID, err)
+	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil, observationsNil); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: %w", scan.ScanID, err)
 	}
 
 	inventory := model.Inventory{}
-	assets, err := loadAssets(ctx, db, scanID)
+	assets, err := loadAssets(ctx, db, scan.ScanID)
 	if err != nil {
-		return model.Inventory{}, false, err
+		return model.Snapshot{}, false, err
 	}
 	if assetCount < 0 || len(assets) != assetCount {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: asset row count mismatch", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: asset row count mismatch", scan.ScanID)
 	}
 	if assetsNil == 0 {
 		inventory.Assets = assets
 	} else if len(assets) != 0 {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: assets marked nil but rows exist", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: assets marked nil but rows exist", scan.ScanID)
 	}
-	relationships, err := loadRelationships(ctx, db, scanID)
+	assetIDs := make(map[string]struct{}, len(assets))
+	for _, asset := range assets {
+		assetIDs[asset.ID] = struct{}{}
+	}
+	observations, err := loadObservations(ctx, db, scan.ScanID, assetIDs)
 	if err != nil {
-		return model.Inventory{}, false, err
+		return model.Snapshot{}, false, err
+	}
+	if observationCount < 0 || len(observations) != observationCount {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: observation row count mismatch", scan.ScanID)
+	}
+	if observationsNil == 0 {
+		inventory.Observations = observations
+	} else if len(observations) != 0 {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: observations marked nil but rows exist", scan.ScanID)
+	}
+	relationships, err := loadRelationships(ctx, db, scan.ScanID)
+	if err != nil {
+		return model.Snapshot{}, false, err
 	}
 	if relationshipCount < 0 || len(relationships) != relationshipCount {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: relationship row count mismatch", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: relationship row count mismatch", scan.ScanID)
 	}
 	if relationshipsNil == 0 {
 		inventory.Relationships = relationships
 	} else if len(relationships) != 0 {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: relationships marked nil but rows exist", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: relationships marked nil but rows exist", scan.ScanID)
 	}
-	inventoryErrors, err := loadInventoryErrors(ctx, db, scanID)
+	inventoryErrors, err := loadInventoryErrors(ctx, db, scan.ScanID)
 	if err != nil {
-		return model.Inventory{}, false, err
+		return model.Snapshot{}, false, err
 	}
 	if errorCount < 0 || len(inventoryErrors) != errorCount {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: error row count mismatch", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: error row count mismatch", scan.ScanID)
 	}
 	if errorsNil == 0 {
 		inventory.Errors = inventoryErrors
 	} else if len(inventoryErrors) != 0 {
-		return model.Inventory{}, false, fmt.Errorf("validate inventory state for scan %q: errors marked nil but rows exist", scanID)
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: errors marked nil but rows exist", scan.ScanID)
 	}
-	return inventory, true, nil
+	if err := validateSnapshot(scan, inventory); err != nil {
+		return model.Snapshot{}, false, fmt.Errorf("validate snapshot for scan %q: %w", scan.ScanID, err)
+	}
+	return model.Snapshot{Scan: scan, Inventory: inventory}, true, nil
+}
+
+func loadCoverage(ctx context.Context, db *sql.DB, scanID string) ([]model.CollectorResult, error) {
+	rows, err := db.QueryContext(ctx, `SELECT collector, result_json FROM coverage WHERE scan_id = ? ORDER BY collector`, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("query coverage for scan %q: %w", scanID, err)
+	}
+	defer rows.Close()
+	var coverage []model.CollectorResult
+	for rows.Next() {
+		var collector string
+		var encoded []byte
+		if err := rows.Scan(&collector, &encoded); err != nil {
+			return nil, fmt.Errorf("scan coverage for scan %q: %w", scanID, err)
+		}
+		var result model.CollectorResult
+		if err := decodeJSON(encoded, &result); err != nil {
+			return nil, fmt.Errorf("decode coverage %q for scan %q: %w", collector, scanID, err)
+		}
+		if collector == "" || result.Collector != collector {
+			return nil, fmt.Errorf("validate coverage %q for scan %q: JSON collector %q does not match row", collector, scanID, result.Collector)
+		}
+		coverage = append(coverage, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate coverage for scan %q: %w", scanID, err)
+	}
+	return coverage, nil
 }
 
 func loadAssets(ctx context.Context, db *sql.DB, scanID string) ([]model.Asset, error) {
@@ -205,6 +297,68 @@ WHERE a.scan_id = ? ORDER BY st.asset_index`, scanID)
 		return nil, fmt.Errorf("iterate assets for scan %q: %w", scanID, err)
 	}
 	return assets, nil
+}
+
+func loadObservations(ctx context.Context, db *sql.DB, scanID string, assetIDs map[string]struct{}) ([]model.Observation, error) {
+	rows, err := db.QueryContext(ctx, `SELECT o.observation_id, o.asset_id, o.observation_json,
+       st.observation_index, st.metadata_nil, st.consumers_nil
+FROM observations o LEFT JOIN observation_state st
+ON st.scan_id = o.scan_id AND st.observation_id = o.observation_id
+WHERE o.scan_id = ? ORDER BY st.observation_index`, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("query observations for scan %q: %w", scanID, err)
+	}
+	defer rows.Close()
+	observations := make([]model.Observation, 0)
+	expectedIndex := 0
+	for rows.Next() {
+		var observationID, assetID string
+		var encoded []byte
+		var index, metadataNil, consumersNil sql.NullInt64
+		if err := rows.Scan(&observationID, &assetID, &encoded, &index, &metadataNil, &consumersNil); err != nil {
+			return nil, fmt.Errorf("scan observation for scan %q: %w", scanID, err)
+		}
+		if !index.Valid || !metadataNil.Valid || !consumersNil.Valid {
+			return nil, fmt.Errorf("validate observation %q for scan %q: missing observation state", observationID, scanID)
+		}
+		if index.Int64 != int64(expectedIndex) {
+			return nil, fmt.Errorf("validate observations for scan %q: got index %d, want %d", scanID, index.Int64, expectedIndex)
+		}
+		if _, ok := assetIDs[assetID]; !ok {
+			return nil, fmt.Errorf("validate observation %q for scan %q: row references missing asset %q", observationID, scanID, assetID)
+		}
+		var observation model.Observation
+		if err := decodeJSON(encoded, &observation); err != nil {
+			return nil, fmt.Errorf("decode observation %q for scan %q: %w", observationID, scanID, err)
+		}
+		if observationID == "" || observation.ID != observationID {
+			return nil, fmt.Errorf("validate observation %q for scan %q: JSON id %q does not match row", observationID, scanID, observation.ID)
+		}
+		if assetID == "" || observation.AssetID != assetID {
+			return nil, fmt.Errorf("validate observation %q for scan %q: JSON asset id %q does not match row", observationID, scanID, observation.AssetID)
+		}
+		if err := validateBoolInt64(metadataNil.Int64, consumersNil.Int64); err != nil {
+			return nil, fmt.Errorf("validate observation %q for scan %q: %w", observationID, scanID, err)
+		}
+		if metadataNil.Int64 == 1 && observation.Metadata != nil {
+			return nil, fmt.Errorf("validate observation %q for scan %q: metadata marked nil but JSON contains metadata", observationID, scanID)
+		}
+		if metadataNil.Int64 == 0 && observation.Metadata == nil {
+			observation.Metadata = map[string]string{}
+		}
+		if consumersNil.Int64 == 1 && observation.Consumers != nil {
+			return nil, fmt.Errorf("validate observation %q for scan %q: consumers marked nil but JSON contains consumers", observationID, scanID)
+		}
+		if consumersNil.Int64 == 0 && observation.Consumers == nil {
+			observation.Consumers = []string{}
+		}
+		observations = append(observations, observation)
+		expectedIndex++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate observations for scan %q: %w", scanID, err)
+	}
+	return observations, nil
 }
 
 func loadRelationships(ctx context.Context, db *sql.DB, scanID string) ([]model.Relationship, error) {
@@ -296,6 +450,15 @@ func validateBoolInts(values ...int) error {
 	return nil
 }
 
+func validateBoolInt64(values ...int64) error {
+	for _, value := range values {
+		if value != 0 && value != 1 {
+			return fmt.Errorf("invalid boolean value %d", value)
+		}
+	}
+	return nil
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1
@@ -305,4 +468,12 @@ func boolInt(value bool) int {
 
 func formatTime(value time.Time) string {
 	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
+func parseTime(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.UTC(), nil
 }

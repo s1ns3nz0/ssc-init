@@ -83,6 +83,28 @@ UPDATE inventory_state SET
     relationship_count = (SELECT count(*) FROM relationships WHERE relationships.scan_id = inventory_state.scan_id),
     error_count = (SELECT count(*) FROM inventory_errors WHERE inventory_errors.scan_id = inventory_state.scan_id);
 CREATE INDEX scans_latest_idx ON scans(finished_at DESC, id DESC);`,
+	`ALTER TABLE scans ADD COLUMN scope_json BLOB NOT NULL DEFAULT '{}';
+ALTER TABLE inventory_state ADD COLUMN observations_nil INTEGER NOT NULL DEFAULT 1 CHECK (observations_nil IN (0, 1));
+ALTER TABLE inventory_state ADD COLUMN observation_count INTEGER NOT NULL DEFAULT 0 CHECK (observation_count >= 0);
+CREATE TABLE observations (
+    scan_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    observation_json BLOB NOT NULL,
+    PRIMARY KEY (scan_id, observation_id),
+    FOREIGN KEY (scan_id) REFERENCES scans(id),
+    FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)
+);
+CREATE TABLE observation_state (
+    scan_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    observation_index INTEGER NOT NULL CHECK (observation_index >= 0),
+    metadata_nil INTEGER NOT NULL CHECK (metadata_nil IN (0, 1)),
+    consumers_nil INTEGER NOT NULL CHECK (consumers_nil IN (0, 1)),
+    PRIMARY KEY (scan_id, observation_id),
+    UNIQUE (scan_id, observation_index),
+    FOREIGN KEY (scan_id, observation_id) REFERENCES observations(scan_id, observation_id)
+);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -143,12 +165,14 @@ type columnSpec struct {
 
 var requiredColumns = map[string][]columnSpec{
 	"schema_migrations":  {{"version", "INTEGER", "", 0, 1, false}, {"applied_at", "TEXT", "", 1, 0, false}},
-	"scans":              {{"id", "TEXT", "", 0, 1, false}, {"schema_version", "TEXT", "", 1, 0, false}, {"status", "TEXT", "", 1, 0, false}, {"started_at", "TEXT", "", 1, 0, false}, {"finished_at", "TEXT", "", 1, 0, false}},
+	"scans":              {{"id", "TEXT", "", 0, 1, false}, {"schema_version", "TEXT", "", 1, 0, false}, {"status", "TEXT", "", 1, 0, false}, {"started_at", "TEXT", "", 1, 0, false}, {"finished_at", "TEXT", "", 1, 0, false}, {"scope_json", "BLOB", "'{}'", 1, 0, true}},
 	"assets":             {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_json", "BLOB", "", 1, 0, false}},
 	"relationships":      {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}},
 	"coverage":           {{"scan_id", "TEXT", "", 1, 1, false}, {"collector", "TEXT", "", 1, 2, false}, {"result_json", "BLOB", "", 1, 0, false}},
-	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}},
+	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}},
 	"asset_state":        {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}},
+	"observations":       {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"asset_id", "TEXT", "", 1, 0, false}, {"observation_json", "BLOB", "", 1, 0, false}},
+	"observation_state":  {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"observation_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"consumers_nil", "INTEGER", "", 1, 0, false}},
 	"relationship_state": {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}, {"relationship_index", "INTEGER", "", 1, 0, false}},
 	"inventory_errors":   {{"scan_id", "TEXT", "", 1, 1, false}, {"error_index", "INTEGER", "", 1, 2, false}, {"error_json", "BLOB", "", 1, 0, false}},
 }
@@ -199,8 +223,9 @@ func normalizeType(value string) string {
 }
 
 var requiredChecks = map[string][]string{
-	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)"},
+	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)"},
 	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
+	"observation_state":  {"check(observation_index>=0)", "check(metadata_nilin(0,1))", "check(consumers_nilin(0,1))"},
 	"relationship_state": {"check(relationship_index>=0)"},
 	"inventory_errors":   {"check(error_index>=0)"},
 }
@@ -239,6 +264,8 @@ var requiredForeignKeys = map[string][]foreignKeyGroup{
 	"coverage":           {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 	"inventory_state":    {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 	"asset_state":        {{"assets", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"asset_id", "asset_id"}}}},
+	"observations":       {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}, {"assets", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"asset_id", "asset_id"}}}},
+	"observation_state":  {{"observations", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"observation_id", "observation_id"}}}},
 	"relationship_state": {{"relationships", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"from_id", "from_id"}, {"kind", "kind"}, {"to_id", "to_id"}}}},
 	"inventory_errors":   {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 }
@@ -302,6 +329,8 @@ var requiredIndexFingerprints = map[string][]string{
 	"coverage":           {"pk:1:scan_id,collector"},
 	"inventory_state":    {"pk:1:scan_id"},
 	"asset_state":        {"pk:1:scan_id,asset_id", "u:1:scan_id,asset_index"},
+	"observations":       {"pk:1:scan_id,observation_id"},
+	"observation_state":  {"pk:1:scan_id,observation_id", "u:1:scan_id,observation_index"},
 	"relationship_state": {"pk:1:scan_id,from_id,kind,to_id", "u:1:scan_id,relationship_index"},
 	"inventory_errors":   {"pk:1:scan_id,error_index"},
 }
