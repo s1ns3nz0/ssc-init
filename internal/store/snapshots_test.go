@@ -1059,6 +1059,21 @@ func TestValidateSnapshotAllowsApprovedReferencesAndLegitimateNonPathValues(t *t
 		{name: "command basename", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
 			inventory.Assets[0].Metadata["command"] = "python3"
 		}},
+		{name: "safe JSON args", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["args"] = `["--root","$HOME/Projects","https://example.test/Volumes/safe","pkg:npm/example@1.0.0"]`
+		}},
+		{name: "safe nested JSON refs", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["args"] = `{"config":{"entry":"dist/extension.js","ref":"external-ide/path-sha256:` + strings.Repeat("b", 64) + `"}}`
+		}},
+		{name: "HTTPS location reference", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Observations[0].LocationRef = "https://example.test/Volumes/tool?root=/Volumes/safe"
+		}},
+		{name: "PURL with path-shaped qualifier", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["entry_point"] = "pkg:npm/example@1.0.0?root=/Volumes/safe"
+		}},
+		{name: "unrelated metadata", mutate: func(_ *model.ScanResult, inventory *model.Inventory) {
+			inventory.Assets[0].Metadata["publisher"] = "/Volumes/private-is-a-publisher"
+		}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			scan, inventory := persistenceSafePathFixture()
@@ -1368,6 +1383,57 @@ func persistedRawPathCases() []persistedPathCase {
 		{name: "inventory observation args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
 			inventory.Observations[0].Metadata["args"] = "--root=" + raw
 		}},
+		{name: "inventory observation command basename metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["command_basename"] = raw
+		}},
+		{name: "inventory observation probe source metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["probe_source"] = raw
+		}},
+		{name: "inventory observation command prefix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["command_alias"] = raw
+		}},
+		{name: "inventory observation command suffix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["resolved_command"] = raw
+		}},
+		{name: "inventory observation args suffix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["runtime_args"] = `["--root","` + raw + `"]`
+		}},
+		{name: "inventory observation source suffix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["runtime_source"] = raw
+		}},
+		{name: "inventory observation path prefix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["path_hint"] = raw
+		}},
+		{name: "inventory observation ref prefix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["ref_value"] = raw
+		}},
+		{name: "inventory observation entrypoint suffix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["extension_entry_point"] = raw
+		}},
+		{name: "inventory observation symlink suffix metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["runtime_symlink"] = raw
+		}},
+		{name: "inventory observation JSON args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = `["--root","` + raw + `"]`
+		}},
+		{name: "inventory observation JSON string args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = `"` + raw + `"`
+		}},
+		{name: "inventory observation nested JSON args metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["args"] = `{"config":{"argv":["--root","` + raw + `"]}}`
+		}},
+		{name: "inventory observation punctuated command metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["command"] = `("--root":"` + raw + `")`
+		}},
+		{name: "inventory observation malformed PURL metadata", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].Metadata["entry_point"] = "pkg:" + raw
+		}},
+		{name: "inventory observation file URI location", storage: "inventory-observation", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Observations[0].LocationRef = "file://" + raw
+		}},
+		{name: "inventory asset localhost file URI path", storage: "inventory-asset", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) {
+			inventory.Assets[0].Path = "file://localhost" + raw
+		}},
 		{name: "inventory error path", storage: "inventory-error", mutate: func(_ *model.ScanResult, inventory *model.Inventory, raw string) { inventory.Errors[0].Path = raw }},
 		{name: "coverage asset path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Coverage[0].Assets[0].Path = raw }},
 		{name: "coverage asset metadata", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
@@ -1382,6 +1448,15 @@ func persistedRawPathCases() []persistedPathCase {
 		{name: "coverage result error path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) { scan.Coverage[0].Errors[0].Path = raw }},
 		{name: "coverage target instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
 			scan.Coverage[0].Targets[0].InstanceRef = raw
+		}},
+		{name: "coverage target short file URI instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = "file:" + raw
+		}},
+		{name: "coverage target uppercase file URI instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = "FILE://" + raw
+		}},
+		{name: "coverage target encoded file URI instance", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
+			scan.Coverage[0].Targets[0].InstanceRef = "file:" + strings.ReplaceAll(raw, "/", "%2F")
 		}},
 		{name: "coverage target error path", storage: "coverage", mutate: func(scan *model.ScanResult, _ *model.Inventory, raw string) {
 			scan.Coverage[0].Targets[0].Errors[0].Path = raw

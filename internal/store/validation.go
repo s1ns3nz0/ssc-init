@@ -1,8 +1,10 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
@@ -279,54 +281,123 @@ func validatePersistenceSafePath(field, value string) error {
 func metadataKeyCarriesPath(key string) bool {
 	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(key))
 	switch normalized {
-	case "args", "command", "entry_point", "path", "ref", "symlink_chain":
+	case "args", "command", "command_basename", "cwd_ref", "entry_point", "manifest_path", "path", "probe_source", "ref", "root_ref", "symlink_chain":
 		return true
 	default:
-		return strings.HasSuffix(normalized, "_path") || strings.HasSuffix(normalized, "_paths") ||
-			strings.HasSuffix(normalized, "_ref") || strings.HasSuffix(normalized, "_refs")
+		return metadataKeyHasSemanticAffix(normalized, "args") ||
+			metadataKeyHasSemanticAffix(normalized, "command") ||
+			metadataKeyHasSemanticAffix(normalized, "entry_point") ||
+			metadataKeyHasSemanticAffix(normalized, "path") ||
+			metadataKeyHasSemanticAffix(normalized, "paths") ||
+			metadataKeyHasSemanticAffix(normalized, "ref") ||
+			metadataKeyHasSemanticAffix(normalized, "refs") ||
+			metadataKeyHasSemanticAffix(normalized, "symlink") ||
+			metadataKeyHasSemanticAffix(normalized, "symlink_chain") ||
+			strings.HasSuffix(normalized, "_source") || strings.HasPrefix(normalized, "probe_source_")
 	}
+}
+
+func metadataKeyHasSemanticAffix(key, semantic string) bool {
+	return strings.HasPrefix(key, semantic+"_") || strings.HasSuffix(key, "_"+semantic)
 }
 
 func containsRawPOSIXAbsolutePath(value string) bool {
-	for _, token := range strings.FieldsFunc(value, func(character rune) bool {
-		return character == '\x1f' || character == '\n' || character == '\r' || character == '\t' || character == ' '
-	}) {
-		if tokenCarriesRawPOSIXAbsolutePath(token) {
-			return true
+	var structured any
+	if json.Valid([]byte(value)) && json.Unmarshal([]byte(value), &structured) == nil {
+		switch structured.(type) {
+		case string, []any, map[string]any:
+			return structuredValueCarriesRawPOSIXAbsolutePath(structured)
+		}
+	}
+	return textCarriesRawPOSIXAbsolutePath(value)
+}
+
+func structuredValueCarriesRawPOSIXAbsolutePath(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return textCarriesRawPOSIXAbsolutePath(typed)
+	case []any:
+		for _, item := range typed {
+			if structuredValueCarriesRawPOSIXAbsolutePath(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if structuredValueCarriesRawPOSIXAbsolutePath(item) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func tokenCarriesRawPOSIXAbsolutePath(token string) bool {
-	token = strings.TrimLeft(token, `"'([{`)
-	if token == "" || hasReferenceScheme(token) {
+func textCarriesRawPOSIXAbsolutePath(value string) bool {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'()[]{}<>`)
+	if value == "" || approvedRemoteOrPackageReference(value) {
 		return false
 	}
-	if strings.HasPrefix(token, "/") {
+	if containsLocalFileReference(value) {
 		return true
 	}
-	if _, assigned, found := strings.Cut(token, "="); found {
-		return tokenCarriesRawPOSIXAbsolutePath(assigned)
-	}
-	return false
-}
-
-func hasReferenceScheme(value string) bool {
-	colon := strings.IndexByte(value, ':')
-	if colon < 1 {
+	parts := strings.FieldsFunc(value, pathCompositeBoundary)
+	if len(parts) > 1 || len(parts) == 1 && parts[0] != value {
+		for _, part := range parts {
+			if textCarriesRawPOSIXAbsolutePath(part) {
+				return true
+			}
+		}
 		return false
 	}
-	for index, character := range value[:colon] {
-		if index == 0 && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
-			return false
-		}
-		if index > 0 && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') &&
-			(character < '0' || character > '9') && character != '+' && character != '-' && character != '.' {
-			return false
-		}
+	return strings.HasPrefix(value, "/")
+}
+
+func pathCompositeBoundary(character rune) bool {
+	if character == '\x1f' || character == '\n' || character == '\r' || character == '\t' || character == ' ' {
+		return true
 	}
-	return true
+	return strings.ContainsRune(`="'()[]{}<>,:;|`, character)
+}
+
+func approvedRemoteOrPackageReference(value string) bool {
+	if approvedPackageReference(value) {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "git", "http", "https", "ssh", "ws", "wss":
+		return true
+	default:
+		return false
+	}
+}
+
+func approvedPackageReference(value string) bool {
+	if !strings.HasPrefix(strings.ToLower(value), "pkg:") || strings.ContainsAny(value, " \t\r\n\x1f") {
+		return false
+	}
+	packageType, name, found := strings.Cut(value[len("pkg:"):], "/")
+	return found && packageType != "" && name != "" && !strings.HasPrefix(name, "/")
+}
+
+func containsLocalFileReference(value string) bool {
+	lower := strings.ToLower(value)
+	for offset := 0; offset < len(lower); {
+		index := strings.Index(lower[offset:], "file:")
+		if index < 0 {
+			return false
+		}
+		index += offset
+		if index == 0 || pathCompositeBoundary(rune(lower[index-1])) {
+			return true
+		}
+		offset = index + len("file:")
+	}
+	return false
 }
 
 func validateRequiredString(field, value string) error {
