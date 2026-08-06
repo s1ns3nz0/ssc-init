@@ -137,7 +137,7 @@ func TestBaselineBuildsAndPersistsV2ScopeAndDropsLocalTargets(t *testing.T) {
 	if !reflect.DeepEqual(collectedScope, wantScope) {
 		t.Fatalf("collector scope=%+v want=%+v", collectedScope, wantScope)
 	}
-	if len(result.Coverage) != 1 || result.Coverage[0].Collector != "evidence" {
+	if len(result.Coverage) != 2 || result.Coverage[0].Collector != "evidence" || result.Coverage[1].Collector != "mcp" {
 		t.Fatalf("coverage=%+v", result.Coverage)
 	}
 	if len(snapshots.saved) != 1 || !reflect.DeepEqual(snapshots.saved[0].Scope, wantScope) {
@@ -314,6 +314,47 @@ func TestBaselineFollowsProjectMCPAssetsAndReplacesInitialMCPResult(t *testing.T
 	found := false
 	for _, asset := range inventory.Assets {
 		if asset.ID == "mcp:vscode:fixture" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("inventory=%+v", inventory)
+	}
+}
+
+func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
+	home := t.TempDir()
+	userConfig := filepath.Join(home, ".cursor", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userConfig, []byte(`{"mcpServers":{"user-only":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete}},
+	}}
+	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
+	service := NewService(orchestrator, &memorySnapshots{}, fixedTime, func() string {
+		return "00000000-0000-4000-8000-000000000001"
+	}, env)
+
+	result, inventory, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpResults := 0
+	for _, coverage := range result.Coverage {
+		if coverage.Collector == "mcp" {
+			mcpResults++
+		}
+	}
+	if mcpResults != 1 {
+		t.Fatalf("mcp coverage count=%d coverage=%+v", mcpResults, result.Coverage)
+	}
+	found := false
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:cursor:user-only" {
 			found = true
 		}
 	}

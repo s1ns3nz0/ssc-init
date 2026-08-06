@@ -140,9 +140,6 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 			}
 		}
 	}
-	if len(projectAssets) == 0 {
-		return results
-	}
 	followUp := collector.Orchestrator{
 		Collectors:    []collector.Collector{mcp.New(projectAssets...)},
 		Timeout:       s.orchestrator.Timeout,

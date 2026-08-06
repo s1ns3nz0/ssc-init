@@ -160,9 +160,84 @@ func TestOrchestratorAppliesTargetContractOnlyToTargetedCollectors(t *testing.T)
 	}
 }
 
+func TestOrchestratorAppliesTargetContractToContainedFailures(t *testing.T) {
+	const secretMarker = "targeted-secret-marker"
+	tests := []struct {
+		name      string
+		collector Collector
+		wantCode  string
+		wantMsg   string
+	}{
+		{
+			name: "error",
+			collector: targetedCollectorWithResult{
+				fakeCollector: fakeCollector{name: "error", err: fmt.Errorf("failed: %s", secretMarker)},
+				specs:         oneTargetSpec("error"),
+			},
+			wantCode: "collector_error",
+			wantMsg:  "collector failed",
+		},
+		{
+			name: "timeout",
+			collector: targetedCollectorFunc{
+				collectorFunc: collectorFunc{name: "timeout", fn: func(ctx context.Context, _ Environment) (model.CollectorResult, error) {
+					<-ctx.Done()
+					return model.CollectorResult{}, ctx.Err()
+				}},
+				specs: oneTargetSpec("timeout"),
+			},
+			wantCode: "collector_timeout",
+			wantMsg:  "collector deadline exceeded",
+		},
+		{
+			name: "panic",
+			collector: targetedCollectorFunc{
+				collectorFunc: collectorFunc{name: "panic", fn: func(context.Context, Environment) (model.CollectorResult, error) {
+					panic(secretMarker)
+				}},
+				specs: oneTargetSpec("panic"),
+			},
+			wantCode: "collector_panic",
+			wantMsg:  "collector panicked",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := (Orchestrator{Timeout: 10 * time.Millisecond, Collectors: []Collector{testCase.collector}}).Collect(context.Background(), Environment{})
+			if len(got) != 1 || got[0].Status != model.CoverageFailed {
+				t.Fatalf("got=%+v", got)
+			}
+			result := got[0]
+			if len(result.Errors) != 1 || result.Errors[0].Code != testCase.wantCode || result.Errors[0].Message != testCase.wantMsg || strings.Contains(fmt.Sprintf("%+v", result), secretMarker) {
+				t.Fatalf("errors=%+v result=%+v", result.Errors, result)
+			}
+			if len(result.Targets) != 1 || result.Targets[0].TargetID != testCase.name+".user" || result.Targets[0].Status != model.TargetUnsupported {
+				t.Fatalf("targets=%+v", result.Targets)
+			}
+			if len(result.Targets[0].Errors) != 1 || result.Targets[0].Errors[0].Code != "target_not_reported" {
+				t.Fatalf("target errors=%+v", result.Targets[0].Errors)
+			}
+		})
+	}
+}
+
 type targetedCollectorWithResult struct {
 	fakeCollector
 	specs []model.TargetSpec
 }
 
 func (c targetedCollectorWithResult) Targets() []model.TargetSpec { return c.specs }
+
+type targetedCollectorFunc struct {
+	collectorFunc
+	specs []model.TargetSpec
+}
+
+func (c targetedCollectorFunc) Targets() []model.TargetSpec { return c.specs }
+
+func oneTargetSpec(collectorName string) []model.TargetSpec {
+	return []model.TargetSpec{{
+		ID: collectorName + ".user", Collector: collectorName, Platform: "darwin",
+		Scope: model.ScopeUser, Method: model.TargetFile,
+	}}
+}

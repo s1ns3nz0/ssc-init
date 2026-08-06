@@ -14,6 +14,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/doctor"
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/scan"
 )
 
@@ -124,7 +125,9 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 		cliCollector{name: "docker", err: errors.New("daemon unavailable")},
 	}}
 	env := collector.Environment{
+		Home:     t.TempDir(),
 		Platform: "darwin",
+		FS:       platform.OSFileSystem{},
 		Scope: model.ScanScope{
 			ProjectRoots: []string{"$HOME/Projects"},
 		},

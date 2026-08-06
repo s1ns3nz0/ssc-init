@@ -73,14 +73,25 @@ func (o Orchestrator) Collect(ctx context.Context, env Environment) []model.Coll
 
 func (o Orchestrator) collectOne(parent context.Context, env Environment, c Collector) (result model.CollectorResult) {
 	name := ""
+	targeted, hasTargetContract := c.(TargetedCollector)
+	var specs []model.TargetSpec
+	applyContract := func(result model.CollectorResult) model.CollectorResult {
+		if !hasTargetContract {
+			return result
+		}
+		return ApplyTargetContract(name, specs, result)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			result = failedResult(name, "collector_panic", "collector panicked")
+			result = applyContract(failedResult(name, "collector_panic", "collector panicked"))
 		}
 	}()
 
 	name = c.Name()
 	result.Collector = name
+	if hasTargetContract {
+		specs = targeted.Targets()
+	}
 
 	ctx := parent
 	cancel := func() {}
@@ -92,15 +103,12 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 	result, err := c.Collect(ctx, env)
 	result.Collector = name
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
-		return failedResult(name, "collector_timeout", "collector deadline exceeded")
+		return applyContract(failedResult(name, "collector_timeout", "collector deadline exceeded"))
 	}
 	if err != nil {
-		return failedResult(name, "collector_error", "collector failed")
+		return applyContract(failedResult(name, "collector_error", "collector failed"))
 	}
-	if targeted, ok := c.(TargetedCollector); ok {
-		result = ApplyTargetContract(name, targeted.Targets(), result)
-	}
-	return result
+	return applyContract(result)
 }
 
 func failedResult(name, code, message string) model.CollectorResult {
