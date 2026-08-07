@@ -185,6 +185,53 @@ func TestSnapshotV3EvidenceCoverageShapeRoundTrip(t *testing.T) {
 	})
 }
 
+func TestSnapshotV3RequiresEvidenceCoverageAndEvidenceInventory(t *testing.T) {
+	t.Run("missing evidence coverage is rejected without rows", func(t *testing.T) {
+		s := openTestStore(t)
+		scan, inventory := validV3Snapshot(t, "v3-no-coverage")
+		scan.EvidenceCoverage = model.EvidenceCoverage{}
+		if err := s.SaveScan(context.Background(), scan, inventory); err == nil {
+			t.Fatal("SaveScan error=nil")
+		}
+		assertNoSnapshotRows(t, s)
+	})
+	t.Run("nil evidence inventory is rejected without rows", func(t *testing.T) {
+		s := openTestStore(t)
+		scan := testScan("v3-nil-evidence", time.Unix(2, 0).UTC())
+		scan.SchemaVersion = "ssc-init.scan.v3"
+		scan.EvidenceCoverage = model.EvidenceCoverage{Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{}}
+		if err := s.SaveScan(context.Background(), scan, model.Inventory{}); err == nil {
+			t.Fatal("SaveScan error=nil")
+		}
+		assertNoSnapshotRows(t, s)
+	})
+	t.Run("v3 with empty evidence and complete empty coverage saves", func(t *testing.T) {
+		s := openTestStore(t)
+		scan := testScan("v3-empty-evidence", time.Unix(2, 0).UTC())
+		scan.SchemaVersion = "ssc-init.scan.v3"
+		scan.EvidenceCoverage = model.EvidenceCoverage{Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{}}
+		if err := s.SaveScan(context.Background(), scan, model.Inventory{Evidence: []model.ContentEvidence{}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("legacy versions keep saving without coverage", func(t *testing.T) {
+		s := openTestStore(t)
+		if err := s.SaveScan(context.Background(), testScan("legacy-no-coverage", time.Unix(2, 0).UTC()), model.Inventory{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("deleted v3 coverage row fails the load", func(t *testing.T) {
+		s := openTestStore(t)
+		saveValidV3Snapshot(t, s, "v3-coverage-deleted")
+		if _, err := s.db.Exec(`DELETE FROM evidence_coverage`); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.LatestSnapshot(context.Background()); err == nil {
+			t.Fatal("LatestSnapshot error=nil")
+		}
+	})
+}
+
 func TestSnapshotV3EvidenceValidationHappensBeforeTransaction(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -15,6 +15,7 @@ import (
 	"github.com/ssc-init/ssc-init/internal/cli"
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/evidence"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
@@ -255,6 +256,27 @@ func TestScanConfigurationLeavesInspectorUnwiredWhenExternalProbesAreDisabled(t 
 	}
 	if environment.Scope.ExternalProbes || environment.Inspector != nil {
 		t.Fatalf("environment=%+v", environment)
+	}
+}
+
+func TestDefaultStoreSupportsAutomaticEvidenceCacheWiring(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openStoreForRun(filepath.Join(parent, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if _, ok := opened.(evidence.LeafCache); !ok {
+		t.Fatalf("store %T does not provide the evidence leaf cache", opened)
+	}
+	if _, ok := opened.(evidence.CacheWriter); !ok {
+		t.Fatalf("store %T does not provide the evidence cache writer", opened)
 	}
 }
 
