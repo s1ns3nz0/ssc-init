@@ -27,7 +27,14 @@ func TestBindCollectorResultIssuesSiblingTargetsUntilRuntimeClear(t *testing.T) 
 	secondValue.TargetID = "fixture.second"
 	secondValue.ObservationID = secondObservation.ID
 	first := issuer.Issue(firstValue, Anchor{})
-	second := issuer.Issue(secondValue, Anchor{})
+	rebound := BindCollectorResult(&result)
+	if rebound != issuer {
+		t.Fatalf("active issuer was replaced: first=%p rebound=%p", issuer, rebound)
+	}
+	if _, _, ok := verifyIssuedTarget(first, rebound); !ok {
+		t.Fatal("already-issued sibling stopped verifying after repeated bind")
+	}
+	second := rebound.Issue(secondValue, Anchor{})
 	result.LocalEvidenceTargets = []model.LocalEvidenceTarget{first, second}
 
 	if result.LocalEvidenceIssuer != issuer {
@@ -48,6 +55,37 @@ func TestBindCollectorResultIssuesSiblingTargetsUntilRuntimeClear(t *testing.T) 
 	if issuer.Issue(firstValue, Anchor{}).Provenance != nil {
 		t.Fatal("cleared bound issuer issued another target")
 	}
+}
+
+type foreignRuntimeClearer struct{ calls int }
+
+func (value *foreignRuntimeClearer) ClearRuntimeEvidence() { value.calls++ }
+
+func TestBindCollectorResultFailsClosedForInactiveOrForeignLifecycle(t *testing.T) {
+	t.Run("inactive issuer", func(t *testing.T) {
+		result := model.CollectorResult{}
+		inactive := BindCollectorResult(&result)
+		inactive.ClearRuntimeEvidence()
+
+		if got := BindCollectorResult(&result); got != nil {
+			t.Fatalf("inactive lifecycle was silently replaced: %p", got)
+		}
+		if result.LocalEvidenceIssuer != inactive {
+			t.Fatal("failed bind mutated the existing inactive lifecycle")
+		}
+	})
+
+	t.Run("foreign clearer", func(t *testing.T) {
+		foreign := &foreignRuntimeClearer{}
+		result := model.CollectorResult{LocalEvidenceIssuer: foreign}
+
+		if got := BindCollectorResult(&result); got != nil {
+			t.Fatalf("foreign lifecycle was silently replaced: %p", got)
+		}
+		if result.LocalEvidenceIssuer != foreign || foreign.calls != 0 {
+			t.Fatalf("failed bind changed foreign lifecycle: hook=%T calls=%d", result.LocalEvidenceIssuer, foreign.calls)
+		}
+	})
 }
 
 func TestIssuerRejectsIdenticalTargetProofFromUnexpectedIssuer(t *testing.T) {

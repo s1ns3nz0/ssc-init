@@ -230,6 +230,12 @@ func safeRelativePath(value string, allowEmpty bool) bool {
 }
 
 func assetRelativePath(assetPath, rootRelative string, allowAssetRoot bool) (string, bool, bool) {
+	if rootRelative == "" {
+		if allowAssetRoot && assetPath == "" {
+			return "", true, true
+		}
+		return "", false, false
+	}
 	if !safeRelativePath(rootRelative, false) {
 		return "", false, false
 	}

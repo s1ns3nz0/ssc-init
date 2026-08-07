@@ -3,7 +3,8 @@ package model
 import "time"
 
 // RuntimeEvidenceClearer removes non-serializable evidence state at the end
-// of a collection pass. Implementations must be pointer-backed and idempotent.
+// of a collection pass. Implementations must be idempotent because the same
+// hook may be reached through more than one runtime slot.
 type RuntimeEvidenceClearer interface {
 	ClearRuntimeEvidence()
 }

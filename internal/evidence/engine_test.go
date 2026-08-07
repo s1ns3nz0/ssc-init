@@ -369,6 +369,76 @@ func TestEngineSupportsFileTargetWhoseAssetIsTheCatalogRoot(t *testing.T) {
 	}
 }
 
+func TestEngineHashesExactTreeRootForSameRootAsset(t *testing.T) {
+	fixture := newEngineFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.root, "root-only.txt"), []byte("root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootFingerprint := fileFingerprint(t, fixture.root)
+	issuer := NewIssuer()
+	target := issuer.Issue(model.LocalEvidenceTarget{
+		TargetID: "fixture.tree-root", AssetID: fixture.assetID, ObservationID: fixture.observation.ID,
+		Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree,
+		RootPath: fixture.root, RelativePath: "",
+	}, Anchor{Root: rootFingerprint, AssetRoot: rootFingerprint})
+	recorder := &recordingSessionFS{delegate: platform.OSFileSystem{}}
+
+	got := (Engine{}).Collect(context.Background(), collector.Environment{FS: recorder}, fixture.inventory(), []model.CollectorResult{{
+		Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+
+	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceComplete || !lowercaseSHA256(got.Evidence[0].Digest) || got.Evidence[0].Files != 3 || got.Evidence[0].Directories != 2 {
+		t.Fatalf("collection=%+v", got)
+	}
+	if !recorder.allClosed() {
+		t.Fatalf("unclosed descriptors=%v", recorder.closeState())
+	}
+}
+
+func TestEngineRejectsEmptyTargetOutsideExactTreeRoot(t *testing.T) {
+	fixture := newEngineFixture(t)
+	tests := []struct {
+		name   string
+		value  model.LocalEvidenceTarget
+		anchor Anchor
+	}{
+		{
+			name: "tree for non-root asset",
+			value: model.LocalEvidenceTarget{
+				TargetID: "fixture.tree", AssetID: fixture.assetID, ObservationID: fixture.observation.ID,
+				Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, RootPath: fixture.root,
+			},
+			anchor: fixture.anchorWithoutContent(),
+		},
+		{
+			name: "file for same-root asset",
+			value: model.LocalEvidenceTarget{
+				TargetID: "fixture.manifest", AssetID: fixture.assetID, ObservationID: fixture.observation.ID,
+				Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest, RootPath: fixture.root,
+			},
+			anchor: func() Anchor {
+				anchor := fixture.anchor
+				anchor.AssetRoot = anchor.Root
+				anchor.AssetRelativePath = ""
+				return anchor
+			}(),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			issuer := NewIssuer()
+			target := issuer.Issue(test.value, test.anchor)
+			recorder := &recordingSessionFS{}
+			got := (Engine{}).Collect(context.Background(), collector.Environment{FS: recorder}, fixture.inventory(), []model.CollectorResult{{
+				Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+			}})
+			if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceUnavailable || !hasEvidenceError(got.Evidence[0], "path_invalid") || recorder.absoluteOpenCount() != 0 {
+				t.Fatalf("collection=%+v opens=%v", got, recorder.opened())
+			}
+		})
+	}
+}
+
 func TestEngineRejectsInvalidSameRootAssetBindingsBeforeOpen(t *testing.T) {
 	fixture := newEngineFixture(t)
 	tests := []struct {
@@ -573,6 +643,48 @@ func TestEngineBoundsBlockedSemanticHasherAndClearsRuntimeState(t *testing.T) {
 		t.Fatalf("collection=%+v", got)
 	}
 	assertRuntimeCleared(t, results, full, issuer, proof)
+}
+
+func TestEngineReusesInjectedCallbackSlotAfterTimedOutCallbackReturns(t *testing.T) {
+	fixture := newEngineFixture(t)
+	limiter := newCallbackLimiter(1)
+	releaseFirst := make(chan struct{})
+	firstReturned := make(chan struct{})
+	var calls atomic.Int32
+	hasher := func(context.Context, model.Observation) (string, error) {
+		if calls.Add(1) == 1 {
+			<-releaseFirst
+			close(firstReturned)
+			return strings.Repeat("a", 64), nil
+		}
+		return strings.Repeat("b", 64), nil
+	}
+	collect := func(timeout time.Duration) Collection {
+		issuer := NewIssuer()
+		value, anchor := fixture.semanticTarget("fixture.semantic")
+		target := issuer.Issue(value, anchor)
+		return (Engine{TargetTimeout: timeout, ContextSemanticHasher: hasher, callbackLimiter: limiter}).Collect(
+			context.Background(), collector.Environment{}, fixture.inventory(), []model.CollectorResult{{
+				Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+			}},
+		)
+	}
+
+	first := collect(10 * time.Millisecond)
+	close(releaseFirst)
+	select {
+	case <-firstReturned:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out callback did not return")
+	}
+	second := collect(time.Second)
+
+	if len(first.Evidence) != 1 || first.Evidence[0].Status != model.EvidenceUnavailable || !hasEvidenceError(first.Evidence[0], "time_limit") {
+		t.Fatalf("first collection=%+v", first)
+	}
+	if calls.Load() != 2 || len(second.Evidence) != 1 || second.Evidence[0].Status != model.EvidenceComplete || second.Evidence[0].Digest != strings.Repeat("b", 64) {
+		t.Fatalf("calls=%d second collection=%+v", calls.Load(), second)
+	}
 }
 
 func TestEngineDeepClonesSemanticObservationAndRecoversPanic(t *testing.T) {

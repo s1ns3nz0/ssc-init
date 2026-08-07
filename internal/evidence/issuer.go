@@ -51,10 +51,18 @@ func NewIssuer() *Issuer {
 }
 
 // BindCollectorResult creates the one-shot issuer for a fresh collector result
-// and records the typed runtime lifecycle hook. Collectors may use the returned
-// issuer for every sibling target owned by that result.
+// and records the typed runtime lifecycle hook. Repeated binds reuse an active
+// issuer so already-issued sibling proofs remain valid. A result holding an
+// inactive or foreign lifecycle fails closed and must be cleared before reuse.
 func BindCollectorResult(result *model.CollectorResult) *Issuer {
 	if result == nil {
+		return nil
+	}
+	if result.LocalEvidenceIssuer != nil {
+		issuer, ok := result.LocalEvidenceIssuer.(*Issuer)
+		if ok && issuer != nil && issuer.active {
+			return issuer
+		}
 		return nil
 	}
 	issuer := NewIssuer()
