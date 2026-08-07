@@ -224,6 +224,93 @@ func TestMCPDanglingCredentialFlagsAreQuarantinedBeforeObservationFinalization(t
 	}
 }
 
+func TestMCPChainedCredentialFlagsAreQuarantinedBeforeObservationFinalization(t *testing.T) {
+	servers := map[string]any{
+		"safe":              map[string]any{"command": "node", "args": []string{"--auth", "ordinary-marker"}},
+		"exact-chain":       map[string]any{"command": "node", "args": []string{"--auth", "--token", "hunter-marker"}},
+		"empty-chain":       map[string]any{"command": "node", "args": []string{"--auth:", "--token=", "empty-marker"}},
+		"header-chain":      map[string]any{"command": "node", "args": []string{"Authorization:", "--header", "header-marker"}},
+		"proxy-chain":       map[string]any{"command": "node", "args": []string{"Proxy-Authorization:", "Bearer proxy-marker"}},
+		"bare-bearer-chain": map[string]any{"command": "node", "args": []string{"--auth", "Bearer", "bearer-marker"}},
+		"short-chain":       map[string]any{"command": "node", "args": []string{"-H", "-e", "short-marker"}},
+		"dangling-chain":    map[string]any{"command": "node", "args": []string{"Authorization:", "Proxy-Authorization:"}},
+	}
+	contents, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, collection := collectMCPConfigEvidence(t, string(contents))
+	target := assertTarget(t, result.Targets, "mcp.cursor.user", "")
+	if target.Status != model.TargetPartial || target.Assets != 1 || target.Observations != 1 || !hasErrorCode(target.Errors, "rejected_metadata") {
+		t.Fatalf("target=%+v", target)
+	}
+	if len(result.Assets) != 1 || len(result.Observations) != 1 || result.Observations[0].AssetID != "mcp:cursor:safe" || result.Observations[0].Metadata["args"] != "--auth\x1f[redacted]" || len(result.LocalEvidenceTargets) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+	assertJSONExcludes(t, result, "ordinary-marker", "hunter-marker", "empty-marker", "header-marker", "proxy-marker", "bearer-marker", "short-marker")
+	assertJSONExcludes(t, collection, "ordinary-marker", "hunter-marker", "empty-marker", "header-marker", "proxy-marker", "bearer-marker", "short-marker")
+}
+
+func TestMCPCollectorCanonicalizesPrivacyPlaceholderVariantsBeforeSemanticEvidence(t *testing.T) {
+	var baseline map[string]string
+	for _, variant := range []string{"[redacted]", "[REDACTED]", "[ReDaCtEd]", "redacted"} {
+		t.Run(variant, func(t *testing.T) {
+			contents, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
+				"local": map[string]any{
+					"command": variant,
+					"args":    []string{variant, "Authorization: " + variant},
+					"cwd":     variant,
+				},
+				"remote": map[string]any{"url": variant},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, collection := collectMCPConfigEvidence(t, string(contents))
+			target := assertTarget(t, result.Targets, "mcp.cursor.user", "")
+			if target.Status != model.TargetComplete || target.Assets != 2 || target.Observations != 2 || len(result.LocalEvidenceTargets) != 2 {
+				t.Fatalf("target=%+v result=%+v", target, result)
+			}
+			digests := make(map[string]string, 2)
+			for _, observation := range result.Observations {
+				switch observation.AssetID {
+				case "mcp:cursor:local":
+					if observation.Metadata["command"] != "[redacted]" || observation.Metadata["args"] != "[redacted]\x1fAuthorization: [redacted]" || observation.Metadata["cwd_ref"] != "[redacted]" {
+						t.Fatalf("local metadata=%+v", observation.Metadata)
+					}
+				case "mcp:cursor:remote":
+					if observation.Metadata["url_shape"] != "[redacted]" {
+						t.Fatalf("remote metadata=%+v", observation.Metadata)
+					}
+				default:
+					t.Fatalf("unexpected observation=%+v", observation)
+				}
+			}
+			if len(collection.Evidence) != 2 {
+				t.Fatalf("collection=%+v", collection)
+			}
+			for _, item := range collection.Evidence {
+				if item.Status != model.EvidenceComplete || item.Digest == "" {
+					t.Fatalf("evidence=%+v", item)
+				}
+				digests[item.AssetID] = item.Digest
+			}
+			if baseline == nil {
+				baseline = digests
+			} else if !reflect.DeepEqual(digests, baseline) {
+				t.Fatalf("digests=%v baseline=%v", digests, baseline)
+			}
+			if variant != "[redacted]" && variant != "redacted" {
+				assertJSONExcludes(t, result, variant)
+				assertJSONExcludes(t, collection, variant)
+			}
+		})
+	}
+}
+
 func TestMCPInvalidSemanticListItemsAreQuarantinedBeforeObservationFinalization(t *testing.T) {
 	config := `{"mcpServers":{
 "safe":{"command":"node","env":{"API_TOKEN":"secret"},"headers":{"Authorization":"secret"},"enabledTools":["read_file","tool-name","tool.name"],"disabledTools":["delete_file"]},

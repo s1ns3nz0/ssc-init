@@ -576,6 +576,9 @@ func sanitizeCommand(home, command string) string {
 	if command == "" {
 		return ""
 	}
+	if privacy.IsRedactedPlaceholder(command) {
+		return redactedValue
+	}
 	fields := strings.Fields(command)
 	for _, field := range fields {
 		key := field
@@ -664,8 +667,15 @@ func sanitizeArgs(home string, args []string) ([]string, bool) {
 	redactNext := false
 	for index, arg := range args {
 		if redactNext {
+			if credentialShapedArgument(arg) {
+				return nil, false
+			}
 			result[index] = redactedValue
 			redactNext = false
+			continue
+		}
+		if privacy.IsRedactedPlaceholder(arg) {
+			result[index] = redactedValue
 			continue
 		}
 		if prefix, ok := sensitiveTextPrefix(arg); ok {
@@ -719,9 +729,26 @@ func sanitizeArgs(home string, args []string) ([]string, bool) {
 	return result, true
 }
 
+func credentialShapedArgument(value string) bool {
+	if _, _, sensitive := combinedCredentialFlag(value); sensitive {
+		return true
+	}
+	if credentialFlag(value) {
+		return true
+	}
+	if _, sensitive := sensitiveTextPrefix(value); sensitive {
+		return true
+	}
+	trimmed := strings.TrimSpace(value)
+	return strings.EqualFold(trimmed, "bearer") || strings.EqualFold(trimmed, "authorization") || strings.EqualFold(trimmed, "proxy-authorization")
+}
+
 func sanitizeURLShape(raw string) string {
 	if raw == "" {
 		return ""
+	}
+	if privacy.IsRedactedPlaceholder(raw) {
+		return redactedValue
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || !safeMCPURLPath(parsed) {
@@ -805,6 +832,9 @@ func safeMCPURLQueryKey(value string) bool {
 func sanitizeCWD(home, cwd string) string {
 	if cwd == "" {
 		return ""
+	}
+	if privacy.IsRedactedPlaceholder(cwd) {
+		return redactedValue
 	}
 	if filepath.IsAbs(cwd) {
 		return identity.SafeLocationRef(home, cwd, "external-cwd")
