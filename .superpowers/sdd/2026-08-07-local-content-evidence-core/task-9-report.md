@@ -1,7 +1,7 @@
 # Task 9 — Secret-free semantic MCP evidence
 
 Base: `161ffd4c761d6a7ecfae7599d245694e5b19dbda`
-Product commit: pending (corrected in the follow-up report-only commit)
+Product commit: `20ce4f2e9392038e2f579244355c748aaac83703`
 
 ## Delivered
 
