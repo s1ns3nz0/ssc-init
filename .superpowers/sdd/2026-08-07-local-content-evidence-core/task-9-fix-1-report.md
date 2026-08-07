@@ -84,7 +84,7 @@ expectations and the release build's intentional dirty-worktree guard.
 
 ## Implementation commit
 
-Implementation commit hash: pending report-only correction.
+Implementation commit hash: `2ef551369c41e6d1c4fe359ac1c766a7431b9953`.
 
 ## Concerns
 
