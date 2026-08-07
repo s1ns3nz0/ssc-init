@@ -241,6 +241,10 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		s.digest.Symlinks++
 		target, readErr := root.Readlink(name)
 		if readErr != nil {
+			if s.ctx.Err() != nil {
+				s.addPartial("time")
+				return
+			}
 			s.addPartial("read")
 			return
 		}

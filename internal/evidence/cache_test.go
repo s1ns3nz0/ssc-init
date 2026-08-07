@@ -403,6 +403,40 @@ func TestTreeCacheCancellationDuringChildOpenClearsWritesAndReportsTimeLimit(t *
 	}
 }
 
+func TestTreeCacheCancellationDuringReadlinkClearsWritesAndReportsTimeLimit(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cache trust is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "first"), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(rootPath, "link")); err != nil {
+		t.Fatal(err)
+	}
+	cache := newRecordingLeafCache()
+	root, local := openCacheTestRoot(t, rootPath, localityKnownLocal, cache)
+	defer root.Close()
+	blocking := &blockingReadlinkRoot{
+		RootedDirectory: local, target: "link",
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan cancellationTreeResult, 1)
+	go func() {
+		digest, status, errs, writes := HashTreeForTarget(ctx, cacheTargetFixture("observation"), blocking, "", DefaultTreeLimits, cache)
+		results <- cancellationTreeResult{digest: digest, status: status, errs: errs, writes: writes}
+	}()
+	waitForSignal(t, blocking.started, "Readlink did not block")
+	cancel()
+	close(blocking.release)
+	result := waitForCancellationResult(t, results)
+	if result.status != model.EvidencePartial || countTreeError(result.errs, "time_limit") != 1 || hasTreeError(result.errs, "read_unavailable") || result.digest.Cache != "miss" || len(result.writes) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestTreeCachePreservesCompleteLeafWritesForNonCancellationPartialSibling(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cache trust is Darwin-specific")
@@ -653,6 +687,22 @@ type blockingChildOpenRoot struct {
 	target  string
 	started chan struct{}
 	release chan struct{}
+}
+
+type blockingReadlinkRoot struct {
+	platform.RootedDirectory
+	target  string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingReadlinkRoot) Readlink(name string) (string, error) {
+	if name == r.target {
+		close(r.started)
+		<-r.release
+		return "", errors.New("controlled blocked Readlink failure")
+	}
+	return r.RootedDirectory.Readlink(name)
 }
 
 func (r *blockingChildOpenRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
