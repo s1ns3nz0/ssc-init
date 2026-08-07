@@ -87,7 +87,7 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 
 	for _, probe := range probes() {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return abortPackageCollection(&result, err)
 		}
 		target := model.TargetCoverage{TargetID: probe.targetID, Status: model.TargetComplete}
 		if env.Inspector == nil {
@@ -97,7 +97,7 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 		}
 		evidence, err := env.Inspector.Inspect(ctx, env.Home, probe.command)
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, ctxErr
+			return abortPackageCollection(&result, ctxErr)
 		}
 		if err != nil {
 			if executableMissing(err) {
@@ -121,13 +121,13 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 		commandResult, runErr := env.Runner.Run(ctx, evidence.Path, probe.args...)
 		verifyErr := env.Inspector.Verify(evidence)
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, ctxErr
+			return abortPackageCollection(&result, ctxErr)
 		}
 		if verifyErr != nil {
 			appendPackageIssue(&result, &target, model.TargetPartial, "executable_replaced", "package probe executable identity changed")
 		}
 		if runErr != nil || commandResult.ExitCode != 0 {
-			if verifyErr == nil && probe.targetID == "packages.docker" && dockerDaemonUnavailable(commandResult, runErr) {
+			if verifyErr == nil && probe.targetID == dockerProbeTargetID && dockerDaemonUnavailable(commandResult, runErr) {
 				appendPackageIssue(&result, &target, model.TargetUnavailable, "docker_unavailable", "Docker image inventory is unavailable")
 			} else {
 				appendPackageIssue(&result, &target, model.TargetPartial, "probe_failed", probe.ecosystem+" package probe failed")
@@ -137,13 +137,15 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 		}
 		assets, parseErr := probe.parse(ctx, env, commandResult.Stdout)
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return abortPackageCollection(&result, err)
 		}
 		for _, asset := range assets {
 			if err := ctx.Err(); err != nil {
-				return result, err
+				return abortPackageCollection(&result, err)
 			}
-			appendPackageEvidence(&result, &target, env, probe, evidence, executableObservation, asset)
+			if err := appendPackageEvidence(ctx, &result, &target, env, probe, evidence, executableObservation, asset); err != nil {
+				return abortPackageCollection(&result, err)
+			}
 		}
 		if parseErr != nil {
 			if errors.Is(parseErr, errFilesystemAccess) {
@@ -220,10 +222,10 @@ func appendExecutableEvidence(result *model.CollectorResult, target *model.Targe
 	return observation, true
 }
 
-func appendPackageEvidence(result *model.CollectorResult, target *model.TargetCoverage, env collector.Environment, probe commandProbe, evidence platform.ExecutableEvidence, executableObservation model.Observation, candidate model.Asset) {
+func appendPackageEvidence(ctx context.Context, result *model.CollectorResult, target *model.TargetCoverage, env collector.Environment, probe commandProbe, evidence platform.ExecutableEvidence, executableObservation model.Observation, candidate model.Asset) error {
 	if !safePackageIdentity(candidate) {
 		appendPackageIssue(result, target, model.TargetPartial, "identity_rejected", "package identity was rejected")
-		return
+		return nil
 	}
 	locationRef := "probe-target:" + probe.targetID
 	if candidate.Path != "" {
@@ -238,7 +240,7 @@ func appendPackageEvidence(result *model.CollectorResult, target *model.TargetCo
 		"probe_target_id":           probe.targetID,
 		"executable_observation_id": executableObservation.ID,
 	}
-	if probe.targetID == "packages.docker" {
+	if probe.targetID == dockerProbeTargetID {
 		metadata["locality"] = "unknown"
 	}
 	observation, err := identity.FinalizeObservation(model.Observation{
@@ -248,12 +250,16 @@ func appendPackageEvidence(result *model.CollectorResult, target *model.TargetCo
 	})
 	if err != nil {
 		appendPackageIssue(result, target, model.TargetPartial, "identity_rejected", "package identity was rejected")
-		return
+		return nil
 	}
 	result.Assets = append(result.Assets, candidate)
 	result.Observations = append(result.Observations, observation)
 	target.Assets++
 	target.Observations++
+	if candidate.Type != model.AssetPackage {
+		return nil
+	}
+	return issuePackageArtifactEvidence(ctx, result, probe, observation)
 }
 
 func validExecutableEvidence(probe commandProbe, evidence platform.ExecutableEvidence) bool {
