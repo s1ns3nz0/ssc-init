@@ -335,6 +335,74 @@ func TestTreeCacheCancellationClearsEarlierLeafWrites(t *testing.T) {
 	}
 }
 
+func TestTreeCacheCancellationDuringNestedReadDirClearsWritesAndReportsTimeLimit(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cache trust is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "first"), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := newRecordingLeafCache()
+	root, local := openCacheTestRoot(t, rootPath, localityKnownLocal, cache)
+	defer root.Close()
+	blocking := &blockingNestedReadRoot{
+		RootedDirectory: local, target: "nested",
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan cancellationTreeResult, 1)
+	go func() {
+		digest, status, errs, writes := HashTreeForTarget(ctx, cacheTargetFixture("observation"), blocking, "", DefaultTreeLimits, cache)
+		results <- cancellationTreeResult{digest: digest, status: status, errs: errs, writes: writes}
+	}()
+	waitForSignal(t, blocking.started, "nested ReadDir did not block")
+	cancel()
+	close(blocking.release)
+	result := waitForCancellationResult(t, results)
+	if result.status != model.EvidencePartial || countTreeError(result.errs, "time_limit") != 1 || hasTreeError(result.errs, "read_unavailable") || result.digest.Cache != "miss" || len(result.writes) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestTreeCacheCancellationDuringChildOpenClearsWritesAndReportsTimeLimit(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cache trust is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "first"), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := newRecordingLeafCache()
+	root, local := openCacheTestRoot(t, rootPath, localityKnownLocal, cache)
+	defer root.Close()
+	blocking := &blockingChildOpenRoot{
+		RootedDirectory: local, target: "nested",
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan cancellationTreeResult, 1)
+	go func() {
+		digest, status, errs, writes := HashTreeForTarget(ctx, cacheTargetFixture("observation"), blocking, "", DefaultTreeLimits, cache)
+		results <- cancellationTreeResult{digest: digest, status: status, errs: errs, writes: writes}
+	}()
+	waitForSignal(t, blocking.started, "child root open did not block")
+	cancel()
+	close(blocking.release)
+	result := waitForCancellationResult(t, results)
+	if result.status != model.EvidencePartial || countTreeError(result.errs, "time_limit") != 1 || hasTreeError(result.errs, "read_unavailable") || result.digest.Cache != "miss" || len(result.writes) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestTreeCachePreservesCompleteLeafWritesForNonCancellationPartialSibling(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cache trust is Darwin-specific")
@@ -353,6 +421,43 @@ func TestTreeCachePreservesCompleteLeafWritesForNonCancellationPartialSibling(t 
 	if status != model.EvidencePartial || !hasTreeError(errs, "symlink_rejected") || digest.Cache != "miss" || len(writes) != 1 {
 		t.Fatalf("digest=%+v status=%s errors=%+v writes=%+v", digest, status, errs, writes)
 	}
+}
+
+type cancellationTreeResult struct {
+	digest TreeDigest
+	status model.EvidenceStatus
+	errs   []model.EvidenceError
+	writes []CacheWrite
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func waitForCancellationResult(t *testing.T, results <-chan cancellationTreeResult) cancellationTreeResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatal("tree hash did not return after cancellation")
+		return cancellationTreeResult{}
+	}
+}
+
+func countTreeError(errs []model.EvidenceError, code string) int {
+	count := 0
+	for _, err := range errs {
+		if err.Code == code {
+			count++
+		}
+	}
+	return count
 }
 
 func TestTreeCacheRejectsSizeAndMTimePreservingReplacement(t *testing.T) {
@@ -494,6 +599,69 @@ type blockingSecondLookupCache struct {
 	started chan struct{}
 	release chan struct{}
 	calls   int
+}
+
+type blockingNestedReadRoot struct {
+	platform.RootedDirectory
+	target  string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingNestedReadRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == r.target {
+		return &blockingReadRoot{RootedDirectory: child, started: r.started, release: r.release}, nil
+	}
+	return child, nil
+}
+
+type blockingReadRoot struct {
+	platform.RootedDirectory
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingReadRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == "." {
+		return &blockingReadFile{RootedFile: file, started: r.started, release: r.release}, nil
+	}
+	return file, nil
+}
+
+type blockingReadFile struct {
+	platform.RootedFile
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingReadFile) ReadDir(int) ([]os.DirEntry, error) {
+	close(f.started)
+	<-f.release
+	return nil, errors.New("controlled blocked ReadDir failure")
+}
+
+type blockingChildOpenRoot struct {
+	platform.RootedDirectory
+	target  string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingChildOpenRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	if name == r.target {
+		close(r.started)
+		<-r.release
+		return nil, context.Canceled
+	}
+	return r.RootedDirectory.OpenRoot(name)
 }
 
 func (c *blockingSecondLookupCache) Lookup(_ context.Context, _ CacheKey) (CacheEntry, bool, error) {

@@ -435,6 +435,10 @@ func (s *treeState) expired() bool {
 }
 
 func (s *treeState) addOpenError(err error) {
+	if s.ctx.Err() != nil {
+		s.addPartial("time")
+		return
+	}
 	if errors.Is(err, platform.ErrUnsafeRootedPath) {
 		s.addError(model.EvidenceError{Code: "identity_changed", Message: "evidence tree identity changed"}, false)
 		return
@@ -448,11 +452,28 @@ func (s *treeState) addOpenError(err error) {
 
 func (s *treeState) addPartial(kind string) {
 	if kind == "time" {
-		s.timeLimited = true
+		s.markTimeLimit()
+		return
 	}
 	s.addError(treeError(kind), false)
 }
 func (s *treeState) addOversize(kind string) { s.addError(treeError(kind), true) }
+
+func (s *treeState) markTimeLimit() {
+	s.timeLimited = true
+	s.partial = true
+	for _, err := range s.errors {
+		if err.Code == "time_limit" {
+			return
+		}
+	}
+	err := treeError("time")
+	if len(s.errors) < s.limits.MaxErrors || len(s.errors) == 0 {
+		s.errors = append(s.errors, err)
+		return
+	}
+	s.errors[len(s.errors)-1] = err
+}
 
 func (s *treeState) addError(err model.EvidenceError, oversize bool) {
 	if s.stopped {
@@ -514,6 +535,9 @@ func (s *treeState) writeHeader() {
 }
 
 func (s *treeState) result() (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
+	if s.ctx.Err() != nil {
+		s.markTimeLimit()
+	}
 	if s.timeLimited {
 		s.writes = nil
 	}
