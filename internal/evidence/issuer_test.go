@@ -1,12 +1,54 @@
 package evidence
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
+
+func TestBindCollectorResultIssuesSiblingTargetsUntilRuntimeClear(t *testing.T) {
+	result := model.CollectorResult{Collector: "fixture"}
+	issuer := BindCollectorResult(&result)
+	firstObservation, err := identity.FinalizeObservation(model.Observation{AssetID: "asset", Collector: "fixture", Scope: model.ScopeUser, LocationRef: "$HOME/fixture/first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondObservation, err := identity.FinalizeObservation(model.Observation{AssetID: "asset", Collector: "fixture", Scope: model.ScopeUser, LocationRef: "$HOME/fixture/second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstValue := model.LocalEvidenceTarget{TargetID: "fixture.first", AssetID: "asset", ObservationID: firstObservation.ID, Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectMCPDeclaration}
+	secondValue := firstValue
+	secondValue.TargetID = "fixture.second"
+	secondValue.ObservationID = secondObservation.ID
+	first := issuer.Issue(firstValue, Anchor{})
+	second := issuer.Issue(secondValue, Anchor{})
+	result.LocalEvidenceTargets = []model.LocalEvidenceTarget{first, second}
+
+	if result.LocalEvidenceIssuer != issuer {
+		t.Fatal("issuer was not bound to collector result")
+	}
+	if _, _, ok := verifyIssuedTarget(first, issuer); !ok {
+		t.Fatal("first sibling did not verify")
+	}
+	if _, _, ok := verifyIssuedTarget(second, issuer); !ok {
+		t.Fatal("second sibling did not verify")
+	}
+	got := (Engine{SemanticHasher: func(model.Observation) (string, error) { return strings.Repeat("a", 64), nil }}).Collect(context.Background(), collector.Environment{}, model.Inventory{
+		Assets: []model.Asset{{ID: "asset"}}, Observations: []model.Observation{firstObservation, secondObservation},
+	}, []model.CollectorResult{result})
+	if len(got.Evidence) != 2 || got.Evidence[0].Status != model.EvidenceComplete || got.Evidence[1].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", got)
+	}
+	if issuer.Issue(firstValue, Anchor{}).Provenance != nil {
+		t.Fatal("cleared bound issuer issued another target")
+	}
+}
 
 func TestIssuerRejectsIdenticalTargetProofFromUnexpectedIssuer(t *testing.T) {
 	target := model.LocalEvidenceTarget{

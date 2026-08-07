@@ -47,7 +47,7 @@ func finalizeRecord(target model.LocalEvidenceTarget, value model.ContentEvidenc
 		}
 		value.Metadata = controlledMetadata(target.Kind, value.Metadata, "complete")
 	case model.EvidencePartial, model.EvidenceOversize:
-		if !validDiagnosticDigest(value.Algorithm, value.Digest) || (value.Digest != "" && target.Kind != model.EvidenceTreeSHA256) {
+		if len(value.Errors) == 0 || !validSubsetDigest(target.Kind, value.Algorithm, value.Digest) {
 			return model.ContentEvidence{}, errors.New("diagnostic evidence digest rejected")
 		}
 		value.Metadata = controlledMetadata(target.Kind, nil, "observed-subset")
@@ -67,11 +67,25 @@ func finalizeRecord(target model.LocalEvidenceTarget, value model.ContentEvidenc
 
 func validKindStatus(kind model.EvidenceKind, status model.EvidenceStatus) bool {
 	if kind == model.EvidencePackageContent || kind == model.EvidenceContainerIdentity {
-		return status == model.EvidenceUnsupported
+		return status == model.EvidenceUnsupported || status == model.EvidenceSkipped
+	}
+	if status == model.EvidencePartial || status == model.EvidenceOversize {
+		return kind == model.EvidenceFileSHA256 || kind == model.EvidenceTreeSHA256
 	}
 	switch status {
 	case model.EvidenceComplete, model.EvidencePartial, model.EvidenceOversize, model.EvidenceUnavailable, model.EvidenceUnsupported, model.EvidenceSkipped:
 		return true
+	default:
+		return false
+	}
+}
+
+func validSubsetDigest(kind model.EvidenceKind, algorithm, digest string) bool {
+	switch kind {
+	case model.EvidenceTreeSHA256:
+		return algorithm == "sha256" && lowercaseSHA256(digest)
+	case model.EvidenceFileSHA256:
+		return validDiagnosticDigest(algorithm, digest)
 	default:
 		return false
 	}

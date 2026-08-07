@@ -39,20 +39,29 @@ func uniqueAssets(values []model.Asset) map[string]model.Asset {
 
 func uniqueObservations(values []model.Observation) map[string]model.Observation {
 	result := make(map[string]model.Observation, len(values))
-	duplicates := make(map[string]struct{})
+	rejected := make(map[string]struct{})
 	for _, value := range values {
 		if value.ID == "" {
 			continue
 		}
-		if _, duplicate := duplicates[value.ID]; duplicate {
+		storedID := value.ID
+		if _, invalid := rejected[storedID]; invalid {
 			continue
 		}
-		if _, exists := result[value.ID]; exists {
-			delete(result, value.ID)
-			duplicates[value.ID] = struct{}{}
+		detached := cloneObservation(value)
+		detached.ID = ""
+		finalized, err := identity.FinalizeObservation(detached)
+		if err != nil || finalized.ID != storedID {
+			delete(result, storedID)
+			rejected[storedID] = struct{}{}
 			continue
 		}
-		result[value.ID] = value
+		if _, exists := result[storedID]; exists {
+			delete(result, storedID)
+			rejected[storedID] = struct{}{}
+			continue
+		}
+		result[storedID] = finalized
 	}
 	return result
 }
@@ -164,7 +173,7 @@ func validKindSubject(kind model.EvidenceKind, subject string) bool {
 
 func validPresetShape(target model.LocalEvidenceTarget, anchor Anchor) bool {
 	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
-		return target.PresetStatus == model.EvidenceUnsupported && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.PresetStatus != "" {
 		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
@@ -176,7 +185,14 @@ func validPresetShape(target model.LocalEvidenceTarget, anchor Anchor) bool {
 }
 
 func validFilesystemShape(target model.LocalEvidenceTarget, anchor Anchor) bool {
-	if !safeAbsolutePath(target.RootPath) || !safeRelativePath(anchor.AssetRelativePath, false) || !nonzeroFingerprint(anchor.Root) || !nonzeroFingerprint(anchor.AssetRoot) || sameFileIdentity(anchor.Root, anchor.AssetRoot) {
+	if !safeAbsolutePath(target.RootPath) || !safeRelativePath(anchor.AssetRelativePath, true) || !nonzeroFingerprint(anchor.Root) || !nonzeroFingerprint(anchor.AssetRoot) {
+		return false
+	}
+	if anchor.AssetRelativePath == "" {
+		if anchor.AssetRoot != anchor.Root {
+			return false
+		}
+	} else if sameFileIdentity(anchor.Root, anchor.AssetRoot) {
 		return false
 	}
 	hasContent := anchor.RelativePath != "" || anchor.Digest != "" || anchor.Size != 0 || anchor.Mode != 0 || nonzeroFingerprint(anchor.Fingerprint)

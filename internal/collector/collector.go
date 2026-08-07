@@ -30,15 +30,30 @@ type Collector interface {
 // ClearLocalEvidenceTargets removes runtime-only paths and provenance from
 // collector results and their backing arrays. It is safe to call repeatedly.
 func ClearLocalEvidenceTargets(results []model.CollectorResult) {
+	cleared := make(map[model.RuntimeEvidenceClearer]struct{})
+	clearRuntime := func(value model.RuntimeEvidenceClearer) {
+		if value == nil {
+			return
+		}
+		if _, seen := cleared[value]; seen {
+			return
+		}
+		cleared[value] = struct{}{}
+		value.ClearRuntimeEvidence()
+	}
 	for index := range results {
 		targets := results[index].LocalEvidenceTargets
 		if cap(targets) > 0 {
 			full := targets[:cap(targets)]
 			for targetIndex := range full {
+				if clearer, ok := full[targetIndex].Provenance.(model.RuntimeEvidenceClearer); ok {
+					clearRuntime(clearer)
+				}
 				full[targetIndex] = model.LocalEvidenceTarget{}
 			}
 		}
 		results[index].LocalEvidenceTargets = nil
+		clearRuntime(results[index].LocalEvidenceIssuer)
 		results[index].LocalEvidenceIssuer = nil
 	}
 }

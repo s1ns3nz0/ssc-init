@@ -16,17 +16,23 @@ const (
 	targetDeadline     = 30 * time.Second
 )
 
-// SemanticHasher derives a safe semantic digest from an already-normalized
-// observation. Implementations receive a private deep copy and a per-target
-// bounded context.
-type SemanticHasher func(context.Context, model.Observation) (string, error)
+// SemanticHasher is the Task 9-compatible semantic digest hook. The engine
+// invokes it with a private normalized observation copy behind the shared
+// callback limiter.
+type SemanticHasher func(model.Observation) (string, error)
+
+// ContextSemanticHasher is the optional context-aware semantic digest hook.
+// When both hooks are installed, this hook takes precedence.
+type ContextSemanticHasher func(context.Context, model.Observation) (string, error)
 
 // Engine collects sealed runtime targets into public evidence records.
 type Engine struct {
-	Limits         TreeLimits
-	Cache          LeafCache
-	SemanticHasher SemanticHasher
-	TargetTimeout  time.Duration
+	Limits                TreeLimits
+	Cache                 LeafCache
+	SemanticHasher        SemanticHasher
+	ContextSemanticHasher ContextSemanticHasher
+	TargetTimeout         time.Duration
+	callbackLimiter       *callbackLimiter
 }
 
 // Collection is the result of one bounded local evidence pass.
@@ -273,38 +279,73 @@ type semanticResult struct {
 }
 
 func (engine Engine) collectSemantic(ctx context.Context, source model.Observation) model.ContentEvidence {
-	if engine.SemanticHasher == nil {
+	contextHasher := engine.ContextSemanticHasher
+	simpleHasher := engine.SemanticHasher
+	if contextHasher != nil {
+		simpleHasher = nil
+	}
+	if contextHasher == nil && simpleHasher == nil {
 		return model.ContentEvidence{Status: model.EvidenceUnsupported}
 	}
 	if ctx.Err() != nil {
 		return unavailableRecord("time_limit", "evidence target deadline exceeded")
 	}
+	limiter := engine.callbackGate()
+	if !limiter.acquire(ctx) {
+		return unavailableRecord("time_limit", "evidence target deadline exceeded")
+	}
+	if ctx.Err() != nil {
+		limiter.release()
+		return unavailableRecord("time_limit", "evidence target deadline exceeded")
+	}
 	observation := cloneObservation(source)
 	result := make(chan semanticResult, 1)
-	hasher := engine.SemanticHasher
 	safeContext, cancelSafe := safeCacheContext(ctx)
 	go func(value model.Observation) {
+		got := semanticResult{}
 		defer func() {
 			clear(value.Consumers)
 			clear(value.Metadata)
 			if recover() != nil {
-				result <- semanticResult{err: errors.New("semantic hasher panicked")}
+				got = semanticResult{err: errors.New("semantic hasher panicked")}
 			}
+			limiter.release()
+			result <- got
 		}()
-		digest, err := hasher(safeContext, value)
-		result <- semanticResult{digest: digest, err: err}
+		if contextHasher != nil {
+			got.digest, got.err = contextHasher(safeContext, value)
+		} else {
+			got.digest, got.err = simpleHasher(value)
+		}
 	}(observation)
+	got, waitErr := awaitSemanticResult(ctx, result)
+	cancelSafe()
+	if waitErr != nil {
+		return unavailableRecord("time_limit", "evidence target deadline exceeded")
+	}
+	if got.err != nil || !lowercaseSHA256(got.digest) {
+		return unavailableRecord("read_unavailable", "evidence collection is unavailable")
+	}
+	return model.ContentEvidence{Status: model.EvidenceComplete, Algorithm: "sha256", Digest: got.digest}
+}
+
+func awaitSemanticResult(ctx context.Context, result <-chan semanticResult) (semanticResult, error) {
 	select {
 	case <-ctx.Done():
-		cancelSafe()
-		return unavailableRecord("time_limit", "evidence target deadline exceeded")
+		return semanticResult{}, ctx.Err()
 	case got := <-result:
-		cancelSafe()
-		if got.err != nil || !lowercaseSHA256(got.digest) {
-			return unavailableRecord("read_unavailable", "evidence collection is unavailable")
+		if ctx.Err() != nil {
+			return semanticResult{}, ctx.Err()
 		}
-		return model.ContentEvidence{Status: model.EvidenceComplete, Algorithm: "sha256", Digest: got.digest}
+		return got, nil
 	}
+}
+
+func (engine Engine) callbackGate() *callbackLimiter {
+	if engine.callbackLimiter != nil {
+		return engine.callbackLimiter
+	}
+	return processCallbackLimiter
 }
 
 func cloneObservation(source model.Observation) model.Observation {

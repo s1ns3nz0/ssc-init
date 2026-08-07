@@ -2,6 +2,12 @@ package model
 
 import "time"
 
+// RuntimeEvidenceClearer removes non-serializable evidence state at the end
+// of a collection pass. Implementations must be pointer-backed and idempotent.
+type RuntimeEvidenceClearer interface {
+	ClearRuntimeEvidence()
+}
+
 // CoverageStatus describes a collector's coverage outcome.
 type CoverageStatus string
 
@@ -22,16 +28,16 @@ type CoverageError struct {
 
 // CollectorResult contains the discovery output for one collector.
 type CollectorResult struct {
-	Collector            string                `json:"collector"`
-	Status               CoverageStatus        `json:"status"`
-	Assets               []Asset               `json:"assets,omitempty"`
-	Relationships        []Relationship        `json:"relationships,omitempty"`
-	Errors               []CoverageError       `json:"errors,omitempty"`
-	Targets              []TargetCoverage      `json:"targets,omitempty"`
-	Observations         []Observation         `json:"observations,omitempty"`
-	LocalEvidenceIssuer  any                   `json:"-"`
-	LocalEvidenceTargets []LocalEvidenceTarget `json:"-"`
-	LocalTargets         []LocalTarget         `json:"-"`
+	Collector            string                 `json:"collector"`
+	Status               CoverageStatus         `json:"status"`
+	Assets               []Asset                `json:"assets,omitempty"`
+	Relationships        []Relationship         `json:"relationships,omitempty"`
+	Errors               []CoverageError        `json:"errors,omitempty"`
+	Targets              []TargetCoverage       `json:"targets,omitempty"`
+	Observations         []Observation          `json:"observations,omitempty"`
+	LocalEvidenceIssuer  RuntimeEvidenceClearer `json:"-"`
+	LocalEvidenceTargets []LocalEvidenceTarget  `json:"-"`
+	LocalTargets         []LocalTarget          `json:"-"`
 }
 
 // Inventory is a normalized asset graph.

@@ -50,6 +50,18 @@ func NewIssuer() *Issuer {
 	return issuer
 }
 
+// BindCollectorResult creates the one-shot issuer for a fresh collector result
+// and records the typed runtime lifecycle hook. Collectors may use the returned
+// issuer for every sibling target owned by that result.
+func BindCollectorResult(result *model.CollectorResult) *Issuer {
+	if result == nil {
+		return nil
+	}
+	issuer := NewIssuer()
+	result.LocalEvidenceIssuer = issuer
+	return issuer
+}
+
 // Issue attaches a runtime-only provenance proof. No part of the proof has a
 // JSON representation through LocalEvidenceTarget.
 func (issuer *Issuer) Issue(target model.LocalEvidenceTarget, anchor Anchor) model.LocalEvidenceTarget {
@@ -149,6 +161,10 @@ func (issuer *Issuer) clearRuntime() {
 	}
 }
 
+// ClearRuntimeEvidence permanently deactivates this one-shot issuer and wipes
+// its private nonce. It implements model.RuntimeEvidenceClearer.
+func (issuer *Issuer) ClearRuntimeEvidence() { issuer.clearRuntime() }
+
 func (proof *issuedTargetProof) clearRuntime() {
 	if proof == nil {
 		return
@@ -158,6 +174,10 @@ func (proof *issuedTargetProof) clearRuntime() {
 	clear(proof.seal[:])
 	proof.anchor = Anchor{}
 }
+
+// ClearRuntimeEvidence drops every runtime proof reference and cryptographic
+// byte array. It implements model.RuntimeEvidenceClearer.
+func (proof *issuedTargetProof) ClearRuntimeEvidence() { proof.clearRuntime() }
 
 func writeTargetField(w io.Writer, value []byte) {
 	var length [4]byte

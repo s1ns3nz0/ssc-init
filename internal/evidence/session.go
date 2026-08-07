@@ -25,12 +25,15 @@ func (engine Engine) collectFilesystem(ctx context.Context, env collector.Enviro
 	if !descriptorMatches(root, candidate.anchor.Root) {
 		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
 	}
-	assetComponents, _ := filePathComponents(candidate.anchor.AssetRelativePath)
-	asset, err := platform.OpenVerifiedRoot(ctx, root, assetComponents...)
-	if err != nil {
-		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+	asset := root
+	if candidate.anchor.AssetRelativePath != "" {
+		assetComponents, _ := filePathComponents(candidate.anchor.AssetRelativePath)
+		asset, err = platform.OpenVerifiedRoot(ctx, root, assetComponents...)
+		if err != nil {
+			return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+		}
+		defer asset.Close()
 	}
-	defer asset.Close()
 	if !descriptorMatches(asset, candidate.anchor.AssetRoot) || !verifyContentAnchor(ctx, asset, candidate) {
 		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
 	}
@@ -55,7 +58,7 @@ func (engine Engine) collectFilesystem(ctx context.Context, env collector.Enviro
 	if ctx.Err() != nil {
 		return unavailableRecord("time_limit", "evidence target deadline exceeded"), nil
 	}
-	if !descriptorMatches(root, candidate.anchor.Root) || !descriptorMatches(asset, candidate.anchor.AssetRoot) || !verifyContentAnchor(ctx, asset, candidate) {
+	if !descriptorMatches(root, candidate.anchor.Root) || !descriptorMatches(asset, candidate.anchor.AssetRoot) || !verifyContentAnchor(ctx, asset, candidate) || !freshPathBindingMatches(ctx, rooted, candidate) {
 		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
 	}
 	if value.Status != model.EvidenceComplete {
@@ -64,11 +67,35 @@ func (engine Engine) collectFilesystem(ctx context.Context, env collector.Enviro
 	return value, writes
 }
 
+func freshPathBindingMatches(ctx context.Context, rooted platform.RootedFileSystem, candidate *issuedCandidate) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	root, err := rooted.OpenRoot(candidate.target.RootPath)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	if !descriptorMatches(root, candidate.anchor.Root) {
+		return false
+	}
+	if candidate.anchor.AssetRelativePath == "" {
+		return candidate.anchor.AssetRoot == candidate.anchor.Root
+	}
+	assetComponents, _ := filePathComponents(candidate.anchor.AssetRelativePath)
+	asset, err := platform.OpenVerifiedRoot(ctx, root, assetComponents...)
+	if err != nil {
+		return false
+	}
+	defer asset.Close()
+	return descriptorMatches(asset, candidate.anchor.AssetRoot)
+}
+
 func (engine Engine) boundedCache() LeafCache {
 	if engine.Cache == nil || disabledLeafCache(engine.Cache) {
 		return DisabledLeafCache{}
 	}
-	return boundedLeafCache{base: engine.Cache}
+	return boundedLeafCache{base: engine.Cache, limiter: engine.callbackGate()}
 }
 
 func (engine Engine) treeLimits() TreeLimits {
@@ -134,7 +161,8 @@ func anchoredFileInfo(ctx context.Context, root platform.RootedDirectory, relati
 }
 
 type boundedLeafCache struct {
-	base LeafCache
+	base    LeafCache
+	limiter *callbackLimiter
 }
 
 type cacheLookupResult struct {
@@ -147,24 +175,47 @@ func (cache boundedLeafCache) Lookup(ctx context.Context, key CacheKey) (CacheEn
 	if cache.base == nil {
 		return CacheEntry{}, false, nil
 	}
+	limiter := cache.limiter
+	if limiter == nil {
+		limiter = processCallbackLimiter
+	}
+	if !limiter.acquire(ctx) {
+		return CacheEntry{}, false, ctx.Err()
+	}
+	if ctx.Err() != nil {
+		limiter.release()
+		return CacheEntry{}, false, ctx.Err()
+	}
 	safeContext, cancel := safeCacheContext(ctx)
 	result := make(chan cacheLookupResult, 1)
 	go func() {
+		got := cacheLookupResult{}
 		defer func() {
 			if recover() != nil {
-				result <- cacheLookupResult{err: context.Canceled}
+				got = cacheLookupResult{err: context.Canceled}
 			}
+			limiter.release()
+			result <- got
 		}()
-		entry, found, err := cache.base.Lookup(safeContext, key)
-		result <- cacheLookupResult{entry: entry, found: found, err: err}
+		got.entry, got.found, got.err = cache.base.Lookup(safeContext, key)
 	}()
+	got, waitErr := awaitCacheResult(ctx, result)
+	cancel()
+	if waitErr != nil {
+		return CacheEntry{}, false, waitErr
+	}
+	return got.entry, got.found, got.err
+}
+
+func awaitCacheResult(ctx context.Context, result <-chan cacheLookupResult) (cacheLookupResult, error) {
 	select {
 	case <-ctx.Done():
-		cancel()
-		return CacheEntry{}, false, ctx.Err()
+		return cacheLookupResult{}, ctx.Err()
 	case got := <-result:
-		cancel()
-		return got.entry, got.found, got.err
+		if ctx.Err() != nil {
+			return cacheLookupResult{}, ctx.Err()
+		}
+		return got, nil
 	}
 }
 

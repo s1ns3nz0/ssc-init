@@ -35,11 +35,56 @@ func TestFinalizeRecordPreservesValidPartialDiagnosticDigest(t *testing.T) {
 	}
 }
 
-func TestFinalizeRecordAllowsAbsentPartialDiagnosticDigest(t *testing.T) {
+func TestFinalizeRecordRejectsTreeSubsetWithoutDiagnosticDigest(t *testing.T) {
 	target := recordTarget(model.EvidenceTreeSHA256, model.EvidenceSubjectPayloadTree)
-	got, err := finalizeRecord(target, model.ContentEvidence{Status: model.EvidenceOversize, Size: 4, Errors: []model.EvidenceError{{Code: "byte_limit", Message: "evidence tree exceeds the byte limit"}}})
-	if err != nil || got.Algorithm != "" || got.Digest != "" || got.Metadata["completeness"] != "observed-subset" {
-		t.Fatalf("record=%+v err=%v", got, err)
+	if got, err := finalizeRecord(target, model.ContentEvidence{Status: model.EvidenceOversize, Size: 4, Errors: []model.EvidenceError{{Code: "byte_limit", Message: "evidence tree exceeds the byte limit"}}}); err == nil {
+		t.Fatalf("accepted=%+v", got)
+	}
+}
+
+func TestFinalizeRecordEnforcesSubsetContractsByEvidenceKind(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	tests := []struct {
+		name    string
+		target  model.LocalEvidenceTarget
+		value   model.ContentEvidence
+		wantErr bool
+	}{
+		{name: "tree-partial", target: recordTarget(model.EvidenceTreeSHA256, model.EvidenceSubjectPayloadTree), value: model.ContentEvidence{Status: model.EvidencePartial, Algorithm: "sha256", Digest: digest, Files: 1, Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}}},
+		{name: "tree-oversize", target: recordTarget(model.EvidenceTreeSHA256, model.EvidenceSubjectPayloadTree), value: model.ContentEvidence{Status: model.EvidenceOversize, Algorithm: "sha256", Digest: digest, Size: 4, Errors: []model.EvidenceError{{Code: "byte_limit", Message: "evidence tree exceeds the byte limit"}}}},
+		{name: "tree-missing-error", target: recordTarget(model.EvidenceTreeSHA256, model.EvidenceSubjectPayloadTree), value: model.ContentEvidence{Status: model.EvidencePartial, Algorithm: "sha256", Digest: digest}, wantErr: true},
+		{name: "file-partial-without-diagnostic", target: recordTarget(model.EvidenceFileSHA256, model.EvidenceSubjectManifest), value: model.ContentEvidence{Status: model.EvidencePartial, Size: 3, Errors: []model.EvidenceError{{Code: "read_unavailable", Message: "evidence file is unavailable"}}}},
+		{name: "file-oversize-without-diagnostic", target: recordTarget(model.EvidenceFileSHA256, model.EvidenceSubjectManifest), value: model.ContentEvidence{Status: model.EvidenceOversize, Errors: []model.EvidenceError{{Code: "byte_limit", Message: "evidence file exceeds the byte limit"}}}},
+		{name: "file-valid-diagnostic", target: recordTarget(model.EvidenceFileSHA256, model.EvidenceSubjectManifest), value: model.ContentEvidence{Status: model.EvidencePartial, Algorithm: "sha256", Digest: digest, Errors: []model.EvidenceError{{Code: "read_unavailable", Message: "evidence file is unavailable"}}}},
+		{name: "file-missing-error", target: recordTarget(model.EvidenceFileSHA256, model.EvidenceSubjectManifest), value: model.ContentEvidence{Status: model.EvidencePartial}, wantErr: true},
+		{name: "semantic-partial", target: recordTarget(model.EvidenceSemanticSHA256, model.EvidenceSubjectMCPDeclaration), value: model.ContentEvidence{Status: model.EvidencePartial, Errors: []model.EvidenceError{{Code: "read_unavailable", Message: "evidence collection is unavailable"}}}, wantErr: true},
+		{name: "package-oversize", target: recordTarget(model.EvidencePackageContent, model.EvidenceSubjectPackageContent), value: model.ContentEvidence{Status: model.EvidenceOversize, Errors: []model.EvidenceError{{Code: "byte_limit", Message: "evidence file exceeds the byte limit"}}}, wantErr: true},
+		{name: "container-partial", target: recordTarget(model.EvidenceContainerIdentity, model.EvidenceSubjectContainerImage), value: model.ContentEvidence{Status: model.EvidencePartial, Errors: []model.EvidenceError{{Code: "read_unavailable", Message: "evidence collection is unavailable"}}}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := finalizeRecord(test.target, test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("record=%+v err=%v wantErr=%v", got, err, test.wantErr)
+			}
+			if err == nil && got.Metadata["completeness"] != "observed-subset" {
+				t.Fatalf("record=%+v", got)
+			}
+		})
+	}
+}
+
+func TestFinalizeRecordAllowsPayloadFreePackageAndContainerPresets(t *testing.T) {
+	for _, target := range []model.LocalEvidenceTarget{
+		recordTarget(model.EvidencePackageContent, model.EvidenceSubjectPackageContent),
+		recordTarget(model.EvidenceContainerIdentity, model.EvidenceSubjectContainerImage),
+	} {
+		for _, status := range []model.EvidenceStatus{model.EvidenceUnsupported, model.EvidenceSkipped} {
+			got, err := finalizeRecord(target, model.ContentEvidence{Status: status, Algorithm: "sha256", Digest: strings.Repeat("a", 64), Size: 1})
+			if err != nil || got.Status != status || got.Algorithm != "" || got.Digest != "" || got.Size != 0 {
+				t.Fatalf("record=%+v err=%v", got, err)
+			}
+		}
 	}
 }
 
@@ -93,7 +138,7 @@ func TestFinalizeRecordStripsForbiddenPayloadAndSortsFixedErrors(t *testing.T) {
 		})
 	}
 	target := recordTarget(model.EvidenceTreeSHA256, model.EvidenceSubjectPayloadTree)
-	got, err := finalizeRecord(target, model.ContentEvidence{Status: model.EvidencePartial, Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}, {Code: "identity_changed", Message: "evidence tree identity changed"}}})
+	got, err := finalizeRecord(target, model.ContentEvidence{Status: model.EvidencePartial, Algorithm: "sha256", Digest: strings.Repeat("a", 64), Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}, {Code: "identity_changed", Message: "evidence tree identity changed"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
