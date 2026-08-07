@@ -26,3 +26,15 @@ type Collector interface {
 	Name() string
 	Collect(context.Context, Environment) (model.CollectorResult, error)
 }
+
+// ClearLocalEvidenceTargets removes runtime-only paths and provenance from
+// collector results and their backing arrays. It is safe to call repeatedly.
+func ClearLocalEvidenceTargets(results []model.CollectorResult) {
+	for index := range results {
+		targets := results[index].LocalEvidenceTargets
+		for targetIndex := range targets {
+			targets[targetIndex] = model.LocalEvidenceTarget{}
+		}
+		results[index].LocalEvidenceTargets = nil
+	}
+}

@@ -22,14 +22,15 @@ type CoverageError struct {
 
 // CollectorResult contains the discovery output for one collector.
 type CollectorResult struct {
-	Collector     string           `json:"collector"`
-	Status        CoverageStatus   `json:"status"`
-	Assets        []Asset          `json:"assets,omitempty"`
-	Relationships []Relationship   `json:"relationships,omitempty"`
-	Errors        []CoverageError  `json:"errors,omitempty"`
-	Targets       []TargetCoverage `json:"targets,omitempty"`
-	Observations  []Observation    `json:"observations,omitempty"`
-	LocalTargets  []LocalTarget    `json:"-"`
+	Collector            string                `json:"collector"`
+	Status               CoverageStatus        `json:"status"`
+	Assets               []Asset               `json:"assets,omitempty"`
+	Relationships        []Relationship        `json:"relationships,omitempty"`
+	Errors               []CoverageError       `json:"errors,omitempty"`
+	Targets              []TargetCoverage      `json:"targets,omitempty"`
+	Observations         []Observation         `json:"observations,omitempty"`
+	LocalEvidenceTargets []LocalEvidenceTarget `json:"-"`
+	LocalTargets         []LocalTarget         `json:"-"`
 }
 
 // Inventory is a normalized asset graph.
