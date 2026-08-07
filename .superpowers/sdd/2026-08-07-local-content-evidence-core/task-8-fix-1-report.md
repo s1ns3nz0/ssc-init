@@ -37,7 +37,7 @@ The full suite passed `internal/collector/ide`, `internal/evidence`, and all oth
 
 ## Implementation commit
 
-Pending commit hash; recorded by the report-only follow-up commit.
+Implementation commit hash: `cfde0000adf416bddfa74352678e4ca03f266da8`.
 
 ## Concerns
 
