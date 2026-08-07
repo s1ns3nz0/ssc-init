@@ -9,7 +9,10 @@ import (
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
-const maxIDEEntrypointBytes = 64 << 20
+const (
+	maxIDEEntrypointBytes        = 64 << 20
+	invalidIDEEntrypointRelative = "invalid\x00entrypoint"
+)
 
 // ideEvidenceAnchor holds only runtime provenance for a verified extension
 // directory and its manifest. It is sealed by evidence.Issuer before return.
@@ -71,7 +74,10 @@ func (c *ideCollector) issueIDEManifestTargets(rootPath string, declaration targ
 		if entry.value == "" {
 			continue
 		}
-		relative, _ := canonicalIDEEntrypointPath(anchor.assetRelative, entry.value)
+		relative, valid := canonicalIDEEntrypointPath(anchor.assetRelative, entry.value)
+		if !valid {
+			relative = invalidIDEEntrypointRelative
+		}
 		entryAnchor := anchor.manifest
 		entryAnchor.MaxBytes = maxIDEEntrypointBytes
 		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(model.LocalEvidenceTarget{

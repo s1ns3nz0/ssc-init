@@ -144,6 +144,70 @@ func TestIDESecondaryBrowserInvalidPathsAreTerminalWithoutOutsideOpen(t *testing
 	}
 }
 
+func TestIDEWhitespaceEntrypointsUsePathInvalidSentinelWithoutOpeningSpacedFile(t *testing.T) {
+	for _, test := range []struct {
+		name, manifest, raw, subject, publicEntry string
+		wantSubjects                              []string
+	}{
+		{
+			name: "legacy-selected-main", raw: " main.js ", subject: model.EvidenceSubjectEntrypointMain, publicEntry: "main.js",
+			manifest:     `{"name":"fixture","publisher":"acme","version":"1.0.0","main":" main.js "}`,
+			wantSubjects: []string{"entrypoint-main", "manifest", "payload-tree"},
+		},
+		{
+			name: "secondary-browser", raw: " web.js ", subject: model.EvidenceSubjectEntrypointBrowser, publicEntry: "main.js",
+			manifest:     `{"name":"fixture","publisher":"acme","version":"1.0.0","main":"main.js","browser":" web.js "}`,
+			wantSubjects: []string{"entrypoint-browser", "entrypoint-main", "manifest", "payload-tree"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := fixtureVSCodeExtension(t, test.manifest)
+			base := filepath.Join(home, ".vscode", "extensions", "fixture")
+			if test.name == "secondary-browser" {
+				writeIDEFile(t, filepath.Join(base, "main.js"), "main")
+			}
+			spaced := filepath.Join(base, test.raw)
+			writeIDEFile(t, spaced, "must not be read")
+			recorder := &recordingIDEFileSystem{forbidden: spaced}
+			env := testutil.Environment(t, home)
+			env.FS = recorder
+			result, err := New().Collect(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Assets) != 1 || len(result.Observations) != 1 {
+				t.Fatalf("assets=%+v observations=%+v", result.Assets, result.Observations)
+			}
+			if result.Observations[0].Metadata["entry_point"] != test.publicEntry {
+				t.Fatalf("entry_point=%q want=%q", result.Observations[0].Metadata["entry_point"], test.publicEntry)
+			}
+			if subjects := ideEvidenceSubjects(result.LocalEvidenceTargets); !reflect.DeepEqual(subjects, test.wantSubjects) {
+				t.Fatalf("subjects=%v want=%v", subjects, test.wantSubjects)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte(test.raw)) {
+				t.Fatalf("raw declaration leaked: raw=%q json=%s", test.raw, encoded)
+			}
+			entryOnly := result
+			entryOnly.LocalEvidenceTargets = nil
+			for _, target := range result.LocalEvidenceTargets {
+				if target.Subject == test.subject {
+					entryOnly.LocalEvidenceTargets = append(entryOnly.LocalEvidenceTargets, target)
+				}
+			}
+			collection := (evidence.Engine{}).Collect(context.Background(), env, inventory.Build([]model.CollectorResult{result}), []model.CollectorResult{entryOnly})
+			assertIDERecordSet(t, result, collection, map[string]model.EvidenceStatus{test.subject: model.EvidenceUnavailable})
+			assertIDEOnlyError(t, collection, test.subject, "path_invalid")
+			if recorder.forbiddenOpens != 0 {
+				t.Fatalf("spaced file opens=%d collection=%+v", recorder.forbiddenOpens, collection)
+			}
+		})
+	}
+}
+
 func TestIDELegacyRejectedSelectedEntrypointEmitsNoPublicRecords(t *testing.T) {
 	for _, entry := range []string{"dist/\x00bad.js", "dist/\x01bad.js", strings.Repeat("x", maxMetadataLength+1)} {
 		t.Run(entry[:min(len(entry), 16)], func(t *testing.T) {
