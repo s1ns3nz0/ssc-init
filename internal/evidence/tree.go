@@ -181,7 +181,11 @@ func (s *treeState) readDirectory(directory platform.RootedFile) ([]os.DirEntry,
 		if s.expired() {
 			return nil, s.ctx.Err()
 		}
-		request := min(treeReadDirBatchSize, remaining+1-len(entries))
+		room := remaining - len(entries)
+		request := treeReadDirBatchSize
+		if room < treeReadDirBatchSize {
+			request = room + 1
+		}
 		chunk, err := directory.ReadDir(request)
 		entries = append(entries, chunk...)
 		if len(entries) > remaining {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"testing"
 	"time"
@@ -208,6 +210,39 @@ func TestTreeLimitReadsDirectoryInBoundedChunks(t *testing.T) {
 	_, status, errs, _ := HashTree(context.Background(), wrapped, "", limits, nil)
 	if status != model.EvidenceOversize || !hasTreeError(errs, "file_limit") || wrapped.largestRequest > wrapped.maxRequest {
 		t.Fatalf("status=%s errors=%+v largest-request=%d", status, errs, wrapped.largestRequest)
+	}
+}
+
+func TestTreeLimitMaxIntNeverRequestsUnboundedRead(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wrapped := &boundedReadRoot{RootedDirectory: root, maxRequest: treeReadDirBatchSize}
+	limits := DefaultTreeLimits
+	limits.MaxEntries = math.MaxInt
+	_, status, errs, _ := HashTree(context.Background(), wrapped, "", limits, nil)
+	if status != model.EvidenceComplete || len(errs) != 0 || wrapped.nonPositiveRequest {
+		t.Fatalf("status=%s errors=%+v non-positive-request=%t", status, errs, wrapped.nonPositiveRequest)
+	}
+}
+
+func TestHashTreeSortsNamesAcrossPerturbedReadDirBatches(t *testing.T) {
+	rootPath := t.TempDir()
+	for index := range treeReadDirBatchSize + 44 {
+		writeTreeFile(t, rootPath, fmt.Sprintf("entry-%03d", index), "x", 0o600)
+	}
+	want := hashTreeFixture(t, rootPath, DefaultTreeLimits)
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	got, status, errs, _ := HashTree(context.Background(), perturbedBatchRoot{RootedDirectory: root}, "", DefaultTreeLimits, nil)
+	if status != model.EvidenceComplete || len(errs) != 0 || got.Digest != want.Digest {
+		t.Fatalf("got=%+v want=%+v status=%s errors=%+v", got, want, status, errs)
 	}
 }
 
@@ -443,8 +478,9 @@ func (r readlinkErrorRoot) Readlink(string) (string, error) {
 
 type boundedReadRoot struct {
 	platform.RootedDirectory
-	maxRequest     int
-	largestRequest int
+	maxRequest         int
+	largestRequest     int
+	nonPositiveRequest bool
 }
 
 func (r *boundedReadRoot) Open(name string) (platform.RootedFile, error) {
@@ -464,6 +500,9 @@ type boundedReadFile struct {
 }
 
 func (f *boundedReadFile) ReadDir(n int) ([]os.DirEntry, error) {
+	if n <= 0 {
+		f.owner.nonPositiveRequest = true
+	}
 	if n > f.owner.largestRequest {
 		f.owner.largestRequest = n
 	}
@@ -471,6 +510,47 @@ func (f *boundedReadFile) ReadDir(n int) ([]os.DirEntry, error) {
 		return nil, errors.New("unbounded ReadDir request")
 	}
 	return f.RootedFile.ReadDir(n)
+}
+
+type perturbedBatchRoot struct{ platform.RootedDirectory }
+
+func (r perturbedBatchRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == "." {
+		return &perturbedBatchFile{RootedFile: file}, nil
+	}
+	return file, nil
+}
+
+type perturbedBatchFile struct {
+	platform.RootedFile
+	entries []os.DirEntry
+	offset  int
+}
+
+func (f *perturbedBatchFile) ReadDir(n int) ([]os.DirEntry, error) {
+	if f.entries == nil {
+		entries, err := f.RootedFile.ReadDir(-1)
+		if err != nil {
+			return nil, err
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		split := treeReadDirBatchSize
+		f.entries = append(entries[split:], entries[:split]...)
+	}
+	if f.offset >= len(f.entries) {
+		return nil, io.EOF
+	}
+	end := min(f.offset+n, len(f.entries))
+	chunk := f.entries[f.offset:end]
+	f.offset = end
+	if f.offset == len(f.entries) {
+		return chunk, io.EOF
+	}
+	return chunk, nil
 }
 
 type mutateOnSecondLstatRoot struct {
