@@ -158,15 +158,13 @@ func (engine Engine) Collect(ctx context.Context, env collector.Environment, inv
 	seenIssuers = nil
 	collector.ClearLocalEvidenceTargets(results)
 
-	targetCounts := make(map[string]int, len(allCandidates))
 	evidenceCounts := make(map[string]int, len(allCandidates))
 	for _, candidate := range allCandidates {
-		targetCounts[candidate.target.TargetID]++
 		evidenceCounts[candidate.evidenceID]++
 	}
 	candidates = make([]issuedCandidate, 0, len(allCandidates))
 	for _, candidate := range allCandidates {
-		if targetCounts[candidate.target.TargetID] != 1 || evidenceCounts[candidate.evidenceID] != 1 {
+		if evidenceCounts[candidate.evidenceID] != 1 {
 			collection.Coverage.Errors = append(collection.Coverage.Errors, rejectedTargetError())
 			continue
 		}

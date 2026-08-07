@@ -132,7 +132,7 @@ func TestAgentManifestFindsExplicitAndBundledSkillsWithoutReadingBody(t *testing
 
 	got := collectAgents(t, New(), context.Background(), home)
 	again := collectAgents(t, New(), context.Background(), home)
-	if !reflect.DeepEqual(got, again) {
+	if !reflect.DeepEqual(agentPersistentResult(got), agentPersistentResult(again)) {
 		t.Fatalf("non-deterministic results:\nfirst=%+v\nsecond=%+v", got, again)
 	}
 	for _, id := range []string{
@@ -157,6 +157,13 @@ func TestAgentManifestFindsExplicitAndBundledSkillsWithoutReadingBody(t *testing
 	if bytes.Contains(encoded, []byte(bodySecret)) || bytes.Contains(encoded, []byte("instructions only")) {
 		t.Fatalf("skill body leaked: %s", encoded)
 	}
+}
+
+func agentPersistentResult(result model.CollectorResult) model.CollectorResult {
+	result.LocalEvidenceIssuer = nil
+	result.LocalEvidenceTargets = nil
+	result.LocalTargets = nil
+	return result
 }
 
 func TestAgentManifestPreservesEveryVersionAndLocation(t *testing.T) {

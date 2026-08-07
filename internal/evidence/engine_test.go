@@ -242,6 +242,29 @@ func TestEngineRejectsEveryDuplicateTargetAndEvidenceIdentity(t *testing.T) {
 	}
 }
 
+func TestEngineAcceptsDistinctEvidenceUnderSharedCatalogTargetID(t *testing.T) {
+	fixture := newEngineFixture(t)
+	issuer := NewIssuer()
+	secondObservation := finalizedObservationAt(t, fixture.assetID, 1)
+	first, anchor := fixture.semanticTarget("fixture.shared-catalog-target")
+	second := first
+	second.ObservationID = secondObservation.ID
+	inventory := fixture.inventory()
+	inventory.Observations = append(inventory.Observations, secondObservation)
+	got := (Engine{ContextSemanticHasher: func(context.Context, model.Observation) (string, error) {
+		return strings.Repeat("a", 64), nil
+	}}).Collect(context.Background(), collector.Environment{}, inventory, []model.CollectorResult{{
+		Collector: "fixture", LocalEvidenceIssuer: issuer,
+		LocalEvidenceTargets: []model.LocalEvidenceTarget{issuer.Issue(first, anchor), issuer.Issue(second, anchor)},
+	}})
+	if len(got.Coverage.Errors) != 0 || len(got.Evidence) != 2 || len(got.Coverage.Targets) != 2 {
+		t.Fatalf("collection=%+v", got)
+	}
+	if got.Coverage.Targets[0].TargetID != "fixture.shared-catalog-target" || got.Coverage.Targets[1].TargetID != "fixture.shared-catalog-target" || got.Evidence[0].ID == got.Evidence[1].ID {
+		t.Fatalf("coverage=%+v evidence=%+v", got.Coverage.Targets, got.Evidence)
+	}
+}
+
 func TestEngineRejectsDuplicateGraphIDsBeforeOpeningRoot(t *testing.T) {
 	fixture := newEngineFixture(t)
 	for _, name := range []string{"asset", "observation"} {
