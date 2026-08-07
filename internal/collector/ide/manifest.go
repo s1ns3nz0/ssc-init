@@ -63,6 +63,8 @@ type jetBrainsManifest struct {
 type manifestEvidence struct {
 	asset    model.Asset
 	metadata map[string]string
+	main     string
+	browser  string
 }
 
 func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, error) {
@@ -85,13 +87,18 @@ func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, 
 	if !ok {
 		return manifestEvidence{}, errRejectedIDEIdentity
 	}
-	entryPoint := strings.TrimSpace(manifest.Main)
+	main := manifest.Main
+	browser := manifest.Browser
+	entryPoint := strings.TrimSpace(main)
 	if entryPoint == "" {
-		entryPoint = strings.TrimSpace(manifest.Browser)
+		entryPoint = strings.TrimSpace(browser)
 	}
-	entryPoint, ok = sanitizeSelectedMetadata(home, entryPoint, false)
-	if !ok {
-		return manifestEvidence{}, errInvalidManifest
+	entryPoint, metadataOK := sanitizeSelectedMetadata(home, entryPoint, false)
+	if !metadataOK {
+		// Keep the verified manifest eligible for identity and issue an explicit
+		// terminal entry-point result, but never place unsafe runtime text in
+		// public metadata.
+		entryPoint = ""
 	}
 
 	activationEvents, ok := sanitizeMetadataList(home, manifest.ActivationEvents, false)
@@ -125,7 +132,7 @@ func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, 
 			Type: model.AssetIDEExtension, Name: name, Version: version, Source: host,
 			Metadata: map[string]string{"publisher": publisher},
 		},
-		metadata: metadata,
+		metadata: metadata, main: main, browser: browser,
 	}, nil
 }
 
