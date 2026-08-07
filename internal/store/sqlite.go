@@ -34,6 +34,10 @@ type Store struct {
 	db    *sql.DB
 	guard *os.File
 	path  string
+
+	// contentCacheRowLimit is an injected test seam for the cache row cap.
+	// Zero selects the fixed production limit; it is not CLI-configurable.
+	contentCacheRowLimit int
 }
 
 // Open opens or creates a snapshot store at path.
