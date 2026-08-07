@@ -77,7 +77,7 @@ func validateIssuedCandidate(collectorName string, issued bool, target model.Loc
 	if !exists || observation.AssetID != target.AssetID || observation.Collector != collectorName {
 		return issuedCandidate{}, false
 	}
-	if !validKindSubject(target.Kind, target.Subject) || !validPresetShape(target, anchor) {
+	if !validKindSubject(target.Kind, target.Subject) || !validPresetShape(collectorName, target, anchor) {
 		return issuedCandidate{}, false
 	}
 	evidence, err := identity.FinalizeEvidence(model.ContentEvidence{AssetID: target.AssetID, ObservationID: target.ObservationID, Kind: target.Kind, Subject: target.Subject, Status: model.EvidenceUnavailable})
@@ -171,9 +171,12 @@ func validKindSubject(kind model.EvidenceKind, subject string) bool {
 	}
 }
 
-func validPresetShape(target model.LocalEvidenceTarget, anchor Anchor) bool {
+func validPresetShape(collectorName string, target model.LocalEvidenceTarget, anchor Anchor) bool {
 	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
 		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	}
+	if target.Kind == model.EvidenceFileSHA256 && collectorName == "projects" && model.ProjectEvidenceSubject(target.Subject) && (target.PresetStatus == model.EvidenceOversize || target.PresetStatus == model.EvidenceUnavailable) {
+		return target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.PresetStatus != "" {
 		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})

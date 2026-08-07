@@ -122,6 +122,66 @@ func TestWalkerNeverFollowsSymlinkedSubtreeOrConfig(t *testing.T) {
 	}
 }
 
+func TestWalkerExcludesSupplyChainEvidenceFromGeneratedAndDependencyTrees(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeWalkFile(t, filepath.Join(root, "safe", "package.json"), `{"name":"safe"}`)
+	for _, directory := range []string{".git", "node_modules", ".venv", "vendor", "build", "dist"} {
+		writeWalkFile(t, filepath.Join(root, directory, "package.json"), `{"name":"excluded"}`)
+	}
+	got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: root, Ref: "$HOME/Projects"}}, limits: defaultWalkLimits()})
+	if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].RelativePath != filepath.Join("safe", "package.json") {
+		t.Fatalf("evidence targets=%+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestWalkerRejectsSymlinkedEvidenceAndKeepsSafeSibling(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	outside := filepath.Join(home, "outside-package.json")
+	writeWalkFile(t, outside, `{"name":"outside"}`)
+	writeWalkFile(t, filepath.Join(root, "safe", "package.json"), `{"name":"safe"}`)
+	if err := os.MkdirAll(filepath.Join(root, "linked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked", "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: root, Ref: "$HOME/Projects"}}, limits: defaultWalkLimits()})
+	assertTargetIssue(t, got, "$HOME/Projects", model.TargetPartial, "symlink_rejected")
+	if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].RelativePath != filepath.Join("safe", "package.json") {
+		t.Fatalf("evidence targets=%+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestWalkerIssuesUnavailableTargetForEvidenceIdentitySwap(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	manifest := filepath.Join(root, "swapped", "package.json")
+	replacement := filepath.Join(home, "replacement-package.json")
+	writeWalkFile(t, manifest, `{"name":"before"}`)
+	writeWalkFile(t, replacement, `{"name":"replacement"}`)
+	collector := &projectCollector{
+		roots: []Root{{Path: root, Ref: "$HOME/Projects"}}, limits: defaultWalkLimits(),
+		beforeOpen: func(relative string) {
+			if relative != filepath.ToSlash(filepath.Join("swapped", "package.json")) {
+				return
+			}
+			if err := os.Rename(manifest, manifest+".old"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, manifest); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	got := collectProjectTest(t, collector)
+	assertTargetIssue(t, got, "$HOME/Projects", model.TargetPartial, "identity_changed")
+	if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].PresetStatus != model.EvidenceUnavailable || got.LocalEvidenceTargets[0].RootPath != "" || got.LocalEvidenceTargets[0].RelativePath != "" {
+		t.Fatalf("evidence targets=%+v", got.LocalEvidenceTargets)
+	}
+}
+
 func TestWalkerDetectsDirectoryIdentitySwapAndKeepsSafeSibling(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "Projects")
@@ -333,6 +393,19 @@ func TestWalkerReturnsBoundedPartialCoverageAndKeepsSafeRoots(t *testing.T) {
 		assertTargetIssue(t, got, "$HOME/config-root", model.TargetPartial, "config_limit")
 		if len(got.LocalTargets) != 1 || !strings.HasSuffix(got.LocalTargets[0].Path, filepath.Join("a", ".mcp.json")) {
 			t.Fatalf("localTargets=%+v", got.LocalTargets)
+		}
+	})
+
+	t.Run("evidence count", func(t *testing.T) {
+		limitedRoot := filepath.Join(home, "evidence-root")
+		writeWalkFile(t, filepath.Join(limitedRoot, "a", "package.json"), `{}`)
+		writeWalkFile(t, filepath.Join(limitedRoot, "b", "package.json"), `{}`)
+		limits := defaultWalkLimits()
+		limits.maxConfigs = 1
+		got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: limitedRoot, Ref: "$HOME/evidence-root"}}, limits: limits})
+		assertTargetIssue(t, got, "$HOME/evidence-root", model.TargetPartial, "config_limit")
+		if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].RelativePath != filepath.Join("a", "package.json") {
+			t.Fatalf("evidence targets=%+v", got.LocalEvidenceTargets)
 		}
 	})
 

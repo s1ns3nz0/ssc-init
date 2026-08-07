@@ -62,10 +62,20 @@ type discoveredConfig struct {
 	definition      configDefinition
 }
 
+type discoveredProjectEvidence struct {
+	relativePath       string
+	projectRelative    string
+	definition         projectEvidenceDefinition
+	fileFingerprint    platform.FileFingerprint
+	projectFingerprint platform.FileFingerprint
+}
+
 type rootWalk struct {
-	status  model.TargetStatus
-	configs []discoveredConfig
-	errors  []model.CoverageError
+	status          model.TargetStatus
+	rootFingerprint platform.FileFingerprint
+	configs         []discoveredConfig
+	evidence        []discoveredProjectEvidence
+	errors          []model.CoverageError
 }
 
 type rootWalker struct {
@@ -74,6 +84,7 @@ type rootWalker struct {
 	beforeOpen func(string)
 	entries    int
 	configs    []discoveredConfig
+	evidence   []discoveredProjectEvidence
 	errors     []model.CoverageError
 }
 
@@ -112,6 +123,10 @@ func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, con
 	if err != nil || rootIdentity == nil || !rootIdentity.IsDir() || !os.SameFile(expected, rootIdentity) {
 		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("identity_changed", "project directory identity changed")}}, nil
 	}
+	rootFingerprint, ok := platform.Fingerprint(rootIdentity)
+	if !ok {
+		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError("identity_changed", "project directory identity changed")}}, nil
+	}
 	directory, err := platform.OpenVerifiedDirectory(root)
 	if err != nil {
 		return rootWalk{status: model.TargetPartial, errors: []model.CoverageError{targetError(identityErrorCode(err), "project directory identity changed")}}, nil
@@ -127,11 +142,12 @@ func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, con
 		return rootWalk{}, walkErr
 	}
 	sort.Slice(walker.configs, func(i, j int) bool { return walker.configs[i].relativePath < walker.configs[j].relativePath })
+	sort.Slice(walker.evidence, func(i, j int) bool { return walker.evidence[i].relativePath < walker.evidence[j].relativePath })
 	status := model.TargetComplete
 	if len(walker.errors) > 0 {
 		status = model.TargetPartial
 	}
-	return rootWalk{status: status, configs: walker.configs, errors: walker.errors}, nil
+	return rootWalk{status: status, rootFingerprint: rootFingerprint, configs: walker.configs, evidence: walker.evidence, errors: walker.errors}, nil
 }
 
 func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory platform.RootedFile, relative string, depth int) (bool, error) {
@@ -198,36 +214,69 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 			continue
 		}
 		definition, projectRelative, recognized := recognizeConfig(filepath.ToSlash(entryRelative))
-		if !recognized {
+		evidenceDefinition, evidenceRecognized := evidenceCatalog[name]
+		if !recognized && !evidenceRecognized {
 			continue
 		}
 		if !expected.Mode().IsRegular() {
-			walker.addError("path_unavailable", "project configuration is unavailable")
+			walker.addError("path_unavailable", "project file is unavailable")
 			continue
 		}
-		if expected.Size() < 0 || expected.Size() > walker.limits.maxConfigBytes {
+		if recognized && (expected.Size() < 0 || expected.Size() > walker.limits.maxConfigBytes) {
 			walker.addError("config_size_limit", "project configuration exceeds the size limit")
 			continue
 		}
-		if len(walker.configs) >= walker.limits.maxConfigs {
+		if len(walker.configs)+len(walker.evidence) >= walker.limits.maxConfigs {
 			walker.addError("config_limit", "project configuration limit reached")
 			return true, nil
+		}
+		var enumeratedFile, enumeratedProject platform.FileFingerprint
+		if evidenceRecognized {
+			var fileOK, projectOK bool
+			enumeratedFile, fileOK = platform.Fingerprint(expected)
+			projectInfo, projectErr := directory.Stat()
+			enumeratedProject, projectOK = platform.Fingerprint(projectInfo)
+			if !fileOK || projectErr != nil || projectInfo == nil || !projectInfo.IsDir() || !projectOK {
+				walker.addError("identity_changed", "project evidence identity changed")
+				continue
+			}
 		}
 		if walker.beforeOpen != nil {
 			walker.beforeOpen(filepath.ToSlash(entryRelative))
 		}
 		file, opened, err := openVerifiedFile(root, name, expected)
 		if err != nil {
+			if evidenceRecognized {
+				walker.evidence = append(walker.evidence, discoveredProjectEvidence{
+					relativePath: filepath.Clean(entryRelative), projectRelative: filepath.Clean(relative), definition: evidenceDefinition,
+					fileFingerprint: enumeratedFile, projectFingerprint: enumeratedProject,
+				})
+				walker.addError(identityErrorCode(err), "project evidence identity changed")
+				continue
+			}
 			walker.addError(identityErrorCode(err), "project configuration identity changed")
 			continue
 		}
 		_ = file.Close()
-		if opened.Size() < 0 || opened.Size() > walker.limits.maxConfigBytes {
+		if recognized && (opened.Size() < 0 || opened.Size() > walker.limits.maxConfigBytes) {
 			walker.addError("config_size_limit", "project configuration exceeds the size limit")
 			continue
 		}
-		walker.configs = append(walker.configs, discoveredConfig{
-			relativePath: filepath.Clean(entryRelative), projectRelative: projectRelative, definition: definition,
+		if recognized {
+			walker.configs = append(walker.configs, discoveredConfig{
+				relativePath: filepath.Clean(entryRelative), projectRelative: projectRelative, definition: definition,
+			})
+			continue
+		}
+		fileFingerprint, fileOK := platform.Fingerprint(opened)
+		if !fileOK || fileFingerprint != enumeratedFile {
+			walker.addError("identity_changed", "project evidence identity changed")
+			continue
+		}
+		projectRelative = filepath.Clean(relative)
+		walker.evidence = append(walker.evidence, discoveredProjectEvidence{
+			relativePath: filepath.Clean(entryRelative), projectRelative: projectRelative, definition: evidenceDefinition,
+			fileFingerprint: fileFingerprint, projectFingerprint: enumeratedProject,
 		})
 	}
 	return false, nil

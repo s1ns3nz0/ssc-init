@@ -243,7 +243,7 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 	var writes []CacheWrite
 	switch {
 	case candidate.target.PresetStatus != "":
-		value.Status = candidate.target.PresetStatus
+		value = presetRecord(candidate.target)
 	case candidate.pathInvalid:
 		value = unavailableRecord("path_invalid", "evidence target path is invalid")
 	case candidate.target.Kind == model.EvidenceSemanticSHA256:
@@ -264,6 +264,17 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 		result.writes = nil
 	}
 	return result
+}
+
+func presetRecord(target model.LocalEvidenceTarget) model.ContentEvidence {
+	switch target.PresetStatus {
+	case model.EvidenceOversize:
+		return model.ContentEvidence{Status: model.EvidenceOversize, Errors: []model.EvidenceError{fixedFileErrors["oversize"]}}
+	case model.EvidenceUnavailable:
+		return model.ContentEvidence{Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{fixedFileErrors["read"]}}
+	default:
+		return model.ContentEvidence{Status: target.PresetStatus}
+	}
 }
 
 func terminalUnavailable(candidate *issuedCandidate, code, message string) collectedCandidate {

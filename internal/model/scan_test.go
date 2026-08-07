@@ -46,6 +46,27 @@ func TestLocalEvidenceTargetDoesNotMarshalRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestProjectEvidenceSubjectsAreClosedToExactCatalog(t *testing.T) {
+	valid := []string{
+		"project-manifest:package.json", "project-lockfile:package-lock.json", "project-lockfile:npm-shrinkwrap.json",
+		"project-lockfile:pnpm-lock.yaml", "project-lockfile:yarn.lock", "project-lockfile:bun.lock", "project-lockfile:bun.lockb",
+		"project-manifest:pyproject.toml", "project-manifest:Pipfile", "project-manifest:requirements.txt",
+		"project-lockfile:poetry.lock", "project-lockfile:Pipfile.lock", "project-lockfile:uv.lock",
+		"project-manifest:go.mod", "project-lockfile:go.sum", "project-manifest:Cargo.toml",
+		"project-lockfile:Cargo.lock", "project-manifest:Brewfile",
+	}
+	for _, subject := range valid {
+		if !ProjectEvidenceSubject(subject) {
+			t.Fatalf("valid project subject rejected: %q", subject)
+		}
+	}
+	for _, subject := range []string{"project-manifest:Package.json", "project-manifest:requirements-dev.txt", "project-lockfile:package.json", "manifest", "project-manifest:"} {
+		if ProjectEvidenceSubject(subject) {
+			t.Fatalf("unexpected project subject accepted: %q", subject)
+		}
+	}
+}
+
 func TestScanV3MarshalsNonNilEmptyEvidenceContracts(t *testing.T) {
 	value := struct {
 		Scan      ScanResult `json:"scan"`

@@ -13,8 +13,10 @@ import (
 	"strings"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/evidence"
 	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
 const (
@@ -183,13 +185,10 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
-			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(c, env.Home, root, walked.configs)
-			result.Assets = append(result.Assets, assets...)
-			result.Relationships = append(result.Relationships, relationships...)
-			result.Observations = append(result.Observations, observations...)
-			result.LocalTargets = append(result.LocalTargets, localTargets...)
-			target.Assets = len(assets)
-			target.Observations = len(observations)
+			assetStart, observationStart := len(result.Assets), len(result.Observations)
+			evidenceErrors := buildEvidence(ctx, c, env, root, walked, &result)
+			target.Assets = len(result.Assets) - assetStart
+			target.Observations = len(result.Observations) - observationStart
 			if len(evidenceErrors) > 0 {
 				target.Status = model.TargetPartial
 				target.Errors = append(target.Errors, evidenceErrors...)
@@ -216,6 +215,12 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 			return result.LocalTargets[i].Path < result.LocalTargets[j].Path
 		}
 		return result.LocalTargets[i].TargetID < result.LocalTargets[j].TargetID
+	})
+	sort.SliceStable(result.LocalEvidenceTargets, func(i, j int) bool {
+		if result.LocalEvidenceTargets[i].TargetID != result.LocalEvidenceTargets[j].TargetID {
+			return result.LocalEvidenceTargets[i].TargetID < result.LocalEvidenceTargets[j].TargetID
+		}
+		return result.LocalEvidenceTargets[i].ObservationID < result.LocalEvidenceTargets[j].ObservationID
 	})
 	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
@@ -268,19 +273,49 @@ func validateResolvedRoots(roots []Root) error {
 	return nil
 }
 
-func buildEvidence(owner *projectCollector, home string, root Root, configs []discoveredConfig) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
-	assets := make([]model.Asset, 0, len(configs)*2)
-	relationships := make([]model.Relationship, 0, len(configs))
-	observations := make([]model.Observation, 0, len(configs))
-	localTargets := make([]model.LocalTarget, 0, len(configs))
+func buildEvidence(ctx context.Context, owner *projectCollector, env collector.Environment, root Root, walked rootWalk, result *model.CollectorResult) []model.CoverageError {
 	errorsOut := make([]model.CoverageError, 0)
-	seenProjects := make(map[string]struct{})
-	for _, config := range configs {
-		absoluteConfig := filepath.Clean(filepath.Join(root.Path, config.relativePath))
-		absoluteProject := filepath.Clean(filepath.Join(root.Path, config.projectRelative))
-		locationRef := identity.SafeLocationRef(home, absoluteConfig, root.Ref)
-		projectRef := identity.SafeLocationRef(home, absoluteProject, root.Ref)
+	projectRelatives := make(map[string]struct{}, len(walked.configs)+len(walked.evidence))
+	for _, config := range walked.configs {
+		projectRelatives[filepath.Clean(config.projectRelative)] = struct{}{}
+	}
+	for _, item := range walked.evidence {
+		projectRelatives[filepath.Clean(item.projectRelative)] = struct{}{}
+	}
+	orderedProjects := make([]string, 0, len(projectRelatives))
+	for relative := range projectRelatives {
+		orderedProjects = append(orderedProjects, relative)
+	}
+	sort.Strings(orderedProjects)
+	projectIDs := make(map[string]string, len(orderedProjects))
+	projectObservations := make(map[string]model.Observation, len(orderedProjects))
+	for _, projectRelative := range orderedProjects {
+		absoluteProject := filepath.Clean(filepath.Join(root.Path, projectRelative))
+		projectRef := identity.SafeLocationRef(env.Home, absoluteProject, root.Ref)
 		projectID := digestID("project", "ssc-init.project.v1", projectRef)
+		observation, err := identity.FinalizeObservation(model.Observation{
+			AssetID: projectID, Collector: "projects", Scope: model.ScopeProject,
+			LocationRef: projectRef, ProjectID: projectID, Source: projectRootTargetID,
+			Metadata: map[string]string{"root_ref": root.Ref},
+		})
+		if err != nil {
+			errorsOut = append(errorsOut, model.CoverageError{Code: "identity_rejected", Message: "project identity was rejected"})
+			continue
+		}
+		projectIDs[projectRelative] = projectID
+		projectObservations[projectRelative] = observation
+		result.Assets = append(result.Assets, model.Asset{ID: projectID, Type: model.AssetProject, Name: "project"})
+		result.Observations = append(result.Observations, observation)
+	}
+
+	for _, config := range walked.configs {
+		absoluteConfig := filepath.Clean(filepath.Join(root.Path, config.relativePath))
+		locationRef := identity.SafeLocationRef(env.Home, absoluteConfig, root.Ref)
+		projectRelative := filepath.Clean(config.projectRelative)
+		projectID, exists := projectIDs[projectRelative]
+		if !exists {
+			continue
+		}
 		configID := digestID("project-config", "ssc-init.project-config.v1", locationRef)
 		observation, err := identity.FinalizeObservation(model.Observation{
 			AssetID: configID, Collector: "projects", Host: config.definition.host,
@@ -292,15 +327,11 @@ func buildEvidence(owner *projectCollector, home string, root Root, configs []di
 			errorsOut = append(errorsOut, model.CoverageError{Code: "identity_rejected", Message: "project configuration identity was rejected"})
 			continue
 		}
-		if _, exists := seenProjects[projectID]; !exists {
-			seenProjects[projectID] = struct{}{}
-			assets = append(assets, model.Asset{ID: projectID, Type: model.AssetProject, Name: "project"})
-		}
-		assets = append(assets, model.Asset{
+		result.Assets = append(result.Assets, model.Asset{
 			ID: configID, Type: model.AssetProject, Name: filepath.ToSlash(config.definition.relativePath), Source: "project-config",
 		})
-		relationships = append(relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
-		observations = append(observations, observation)
+		result.Relationships = append(result.Relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
+		result.Observations = append(result.Observations, observation)
 		localTarget := model.LocalTarget{
 			TargetID: config.definition.targetID, InstanceRef: locationRef, Path: absoluteConfig,
 			Format: config.definition.format, Host: config.definition.host,
@@ -309,9 +340,99 @@ func buildEvidence(owner *projectCollector, home string, root Root, configs []di
 		localTarget.Provenance = &localTargetProvenance{
 			owner: owner, rootSeal: root.seal, targetSeal: sealLocalTarget(root, &localTarget),
 		}
-		localTargets = append(localTargets, localTarget)
+		result.LocalTargets = append(result.LocalTargets, localTarget)
 	}
-	return assets, relationships, observations, localTargets, errorsOut
+
+	for _, item := range walked.evidence {
+		projectRelative := filepath.Clean(item.projectRelative)
+		projectID, exists := projectIDs[projectRelative]
+		observation, observed := projectObservations[projectRelative]
+		if !exists || !observed {
+			continue
+		}
+		issueProjectEvidence(ctx, env, root, walked.rootFingerprint, item, projectID, observation, result)
+	}
+	return errorsOut
+}
+
+func issueProjectEvidence(ctx context.Context, env collector.Environment, configured Root, rootFingerprint platform.FileFingerprint, item discoveredProjectEvidence, projectID string, observation model.Observation, result *model.CollectorResult) {
+	issuer := evidence.BindCollectorResult(result)
+	if issuer == nil {
+		return
+	}
+	base := model.LocalEvidenceTarget{
+		TargetID: item.definition.targetID(), AssetID: projectID, ObservationID: observation.ID,
+		Kind: model.EvidenceFileSHA256, Subject: item.definition.subject,
+	}
+	rooted, ok := env.FS.(platform.RootedFileSystem)
+	if !ok || rooted == nil {
+		base.PresetStatus = model.EvidenceUnavailable
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+		return
+	}
+	root, err := rooted.OpenRoot(configured.Path)
+	if err != nil {
+		base.PresetStatus = model.EvidenceUnavailable
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+		return
+	}
+	defer root.Close()
+	openedRoot, rootOK := projectRootFingerprint(root)
+	if !rootOK || openedRoot != rootFingerprint {
+		base.PresetStatus = model.EvidenceUnavailable
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+		return
+	}
+	asset := root
+	assetRelative := filepath.Clean(item.projectRelative)
+	if assetRelative == "." {
+		assetRelative = ""
+	}
+	if assetRelative != "" {
+		components := strings.Split(assetRelative, string(filepath.Separator))
+		asset, err = platform.OpenVerifiedRoot(ctx, root, components...)
+		if err != nil {
+			base.PresetStatus = model.EvidenceUnavailable
+			result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+			return
+		}
+		defer asset.Close()
+	}
+	assetFingerprint, assetOK := projectRootFingerprint(asset)
+	if !assetOK || assetFingerprint != item.projectFingerprint {
+		base.PresetStatus = model.EvidenceUnavailable
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+		return
+	}
+	digest, status, _ := evidence.HashVerifiedFile(ctx, root, item.relativePath, item.definition.maxBytes)
+	if status != model.EvidenceComplete || digest.Fingerprint != item.fileFingerprint {
+		if status == model.EvidenceOversize {
+			base.PresetStatus = model.EvidenceOversize
+		} else {
+			base.PresetStatus = model.EvidenceUnavailable
+		}
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, evidence.Anchor{}))
+		return
+	}
+	base.RootPath = configured.Path
+	base.RelativePath = filepath.Clean(item.relativePath)
+	anchor := evidence.Anchor{
+		Root: rootFingerprint, AssetRoot: assetFingerprint, AssetRelativePath: filepath.ToSlash(assetRelative),
+		RelativePath: filepath.Clean(item.relativePath), Digest: digest.SHA256, Size: digest.Size,
+		Mode: digest.Fingerprint.Mode & 0o777, Fingerprint: digest.Fingerprint, MaxBytes: item.definition.maxBytes,
+	}
+	result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, anchor))
+}
+
+func projectRootFingerprint(root platform.RootedDirectory) (platform.FileFingerprint, bool) {
+	if root == nil {
+		return platform.FileFingerprint{}, false
+	}
+	info, err := root.Lstat(".")
+	if err != nil || info == nil || !info.IsDir() {
+		return platform.FileFingerprint{}, false
+	}
+	return platform.Fingerprint(info)
 }
 
 func sealLocalTarget(root Root, target *model.LocalTarget) [sha256.Size]byte {

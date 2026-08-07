@@ -652,6 +652,60 @@ func TestEngineAllowsPackageAndContainerSkippedPresets(t *testing.T) {
 	}
 }
 
+func TestEngineAllowsProjectsOnlyTerminalFilePresets(t *testing.T) {
+	for _, status := range []model.EvidenceStatus{model.EvidenceOversize, model.EvidenceUnavailable} {
+		t.Run(string(status), func(t *testing.T) {
+			observation, err := identity.FinalizeObservation(model.Observation{AssetID: "project", Collector: "projects", Scope: model.ScopeProject, LocationRef: "$HOME/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			issuer := NewIssuer()
+			target := issuer.Issue(model.LocalEvidenceTarget{
+				TargetID: "projects.manifest.package.json", AssetID: "project", ObservationID: observation.ID,
+				Kind: model.EvidenceFileSHA256, Subject: "project-manifest:package.json", PresetStatus: status,
+			}, Anchor{})
+			got := (Engine{}).Collect(context.Background(), collector.Environment{}, model.Inventory{
+				Assets: []model.Asset{{ID: "project"}}, Observations: []model.Observation{observation},
+			}, []model.CollectorResult{{Collector: "projects", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
+			if len(got.Coverage.Errors) != 0 || len(got.Evidence) != 1 || got.Evidence[0].Status != status || len(got.Evidence[0].Errors) != 1 {
+				t.Fatalf("collection=%+v", got)
+			}
+		})
+	}
+}
+
+func TestEngineRejectsProjectTerminalPresetsOutsideClosedContract(t *testing.T) {
+	tests := []struct {
+		name, collectorName, subject string
+		status                       model.EvidenceStatus
+		root                         string
+	}{
+		{name: "other collector", collectorName: "fixture", subject: "project-manifest:package.json", status: model.EvidenceOversize},
+		{name: "generic subject", collectorName: "projects", subject: model.EvidenceSubjectManifest, status: model.EvidenceOversize},
+		{name: "partial", collectorName: "projects", subject: "project-manifest:package.json", status: model.EvidencePartial},
+		{name: "complete", collectorName: "projects", subject: "project-manifest:package.json", status: model.EvidenceComplete},
+		{name: "preset path", collectorName: "projects", subject: "project-manifest:package.json", status: model.EvidenceUnavailable, root: "/private/path"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := identity.FinalizeObservation(model.Observation{AssetID: "project", Collector: test.collectorName, Scope: model.ScopeProject, LocationRef: "$HOME/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			issuer := NewIssuer()
+			target := issuer.Issue(model.LocalEvidenceTarget{
+				TargetID: test.collectorName + ".manifest.package.json", AssetID: "project", ObservationID: observation.ID,
+				Kind: model.EvidenceFileSHA256, Subject: test.subject, PresetStatus: test.status, RootPath: test.root,
+			}, Anchor{})
+			recorder := &recordingSessionFS{}
+			got := (Engine{}).Collect(context.Background(), collector.Environment{FS: recorder}, model.Inventory{
+				Assets: []model.Asset{{ID: "project"}}, Observations: []model.Observation{observation},
+			}, []model.CollectorResult{{Collector: test.collectorName, LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
+			assertRejectedWithoutOpen(t, got, recorder)
+		})
+	}
+}
+
 func TestEngineBoundsBlockedSemanticHasherAndClearsRuntimeState(t *testing.T) {
 	fixture := newEngineFixture(t)
 	issuer := NewIssuer()
