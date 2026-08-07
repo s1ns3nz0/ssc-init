@@ -69,6 +69,7 @@ type treeState struct {
 	partial      bool
 	oversize     bool
 	stopped      bool
+	timeLimited  bool
 	cache        LeafCache
 	cacheEnabled bool
 	target       model.LocalEvidenceTarget
@@ -445,7 +446,12 @@ func (s *treeState) addOpenError(err error) {
 	s.addPartial("read")
 }
 
-func (s *treeState) addPartial(kind string)  { s.addError(treeError(kind), false) }
+func (s *treeState) addPartial(kind string) {
+	if kind == "time" {
+		s.timeLimited = true
+	}
+	s.addError(treeError(kind), false)
+}
 func (s *treeState) addOversize(kind string) { s.addError(treeError(kind), true) }
 
 func (s *treeState) addError(err model.EvidenceError, oversize bool) {
@@ -508,6 +514,9 @@ func (s *treeState) writeHeader() {
 }
 
 func (s *treeState) result() (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
+	if s.timeLimited {
+		s.writes = nil
+	}
 	s.digest.Digest = hex.EncodeToString(s.hasher.Sum(nil))
 	status := model.EvidenceComplete
 	if s.oversize {

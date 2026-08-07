@@ -291,6 +291,70 @@ func TestTreeCacheHitReturnedAfterCancellationIsRejected(t *testing.T) {
 	}
 }
 
+func TestTreeCacheCancellationClearsEarlierLeafWrites(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cache trust is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	for _, name := range []string{"first", "second"} {
+		if err := os.WriteFile(filepath.Join(rootPath, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := &blockingSecondLookupCache{started: make(chan struct{}), release: make(chan struct{})}
+	root, wrapped := openCacheTestRoot(t, rootPath, localityKnownLocal, nil)
+	defer root.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type treeResult struct {
+		digest TreeDigest
+		status model.EvidenceStatus
+		errs   []model.EvidenceError
+		writes []CacheWrite
+	}
+	results := make(chan treeResult, 1)
+	go func() {
+		digest, status, errs, writes := HashTreeForTarget(ctx, cacheTargetFixture("observation"), wrapped, "", DefaultTreeLimits, cache)
+		results <- treeResult{digest: digest, status: status, errs: errs, writes: writes}
+	}()
+	select {
+	case <-cache.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second cache lookup did not block")
+	}
+	cancel()
+	close(cache.release)
+	var result treeResult
+	select {
+	case result = <-results:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tree hash did not return after cancellation")
+	}
+	if cache.calls != 2 || result.status != model.EvidencePartial || !hasTreeError(result.errs, "time_limit") || result.digest.Cache != "rejected" || len(result.writes) != 0 {
+		t.Fatalf("calls=%d result=%+v", cache.calls, result)
+	}
+}
+
+func TestTreeCachePreservesCompleteLeafWritesForNonCancellationPartialSibling(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cache trust is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "file"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(rootPath, "link")); err != nil {
+		t.Fatal(err)
+	}
+	cache := newRecordingLeafCache()
+	root, wrapped := openCacheTestRoot(t, rootPath, localityKnownLocal, cache)
+	defer root.Close()
+	digest, status, errs, writes := HashTreeForTarget(context.Background(), cacheTargetFixture("observation"), wrapped, "", DefaultTreeLimits, cache)
+	if status != model.EvidencePartial || !hasTreeError(errs, "symlink_rejected") || digest.Cache != "miss" || len(writes) != 1 {
+		t.Fatalf("digest=%+v status=%s errors=%+v writes=%+v", digest, status, errs, writes)
+	}
+}
+
 func TestTreeCacheRejectsSizeAndMTimePreservingReplacement(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cache trust is Darwin-specific")
@@ -424,6 +488,22 @@ type blockingLeafCache struct {
 	entry   CacheEntry
 	started chan struct{}
 	release chan struct{}
+}
+
+type blockingSecondLookupCache struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (c *blockingSecondLookupCache) Lookup(_ context.Context, _ CacheKey) (CacheEntry, bool, error) {
+	c.calls++
+	if c.calls == 1 {
+		return CacheEntry{}, false, nil
+	}
+	close(c.started)
+	<-c.release
+	return CacheEntry{}, false, nil
 }
 
 type postLookupStatErrorRoot struct {
