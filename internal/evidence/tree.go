@@ -27,6 +27,10 @@ const (
 	recordFile      byte = 'f'
 	recordSymlink   byte = 'l'
 	recordSpecial   byte = 's'
+	cacheDisabled        = "disabled"
+	cacheHit             = "hit"
+	cacheMiss            = "miss"
+	cacheRejected        = "rejected"
 )
 
 // TreeLimits are non-negotiable bounds for one tree evidence target.
@@ -51,22 +55,24 @@ type TreeDigest struct {
 	Files       int
 	Directories int
 	Symlinks    int
+	Cache       string
 }
 
 type treeState struct {
-	ctx      context.Context
-	limits   TreeLimits
-	hasher   hash.Hash
-	digest   TreeDigest
-	entries  int
-	pending  int
-	errors   []model.EvidenceError
-	partial  bool
-	oversize bool
-	stopped  bool
-	cache    LeafCache
-	target   model.LocalEvidenceTarget
-	writes   []CacheWrite
+	ctx          context.Context
+	limits       TreeLimits
+	hasher       hash.Hash
+	digest       TreeDigest
+	entries      int
+	pending      int
+	errors       []model.EvidenceError
+	partial      bool
+	oversize     bool
+	stopped      bool
+	cache        LeafCache
+	cacheEnabled bool
+	target       model.LocalEvidenceTarget
+	writes       []CacheWrite
 }
 
 // HashTree produces a deterministic, descriptor-anchored manifest. It does
@@ -88,10 +94,12 @@ func hashTree(ctx context.Context, target model.LocalEvidenceTarget, root platfo
 	ctx, cancel := context.WithTimeout(ctx, limits.Timeout)
 	defer cancel()
 	h := sha256.New()
+	cacheEnabled := completeCacheTarget(target) && cache != nil && !disabledLeafCache(cache)
 	if cache == nil {
 		cache = DisabledLeafCache{}
 	}
-	state := treeState{ctx: ctx, limits: limits, hasher: h, cache: cache, target: target}
+	state := treeState{ctx: ctx, limits: limits, hasher: h, cache: cache, cacheEnabled: cacheEnabled, target: target}
+	state.digest.Cache = cacheDisabled
 	state.writeHeader()
 
 	if root == nil || !validTreeLimits(limits) {
@@ -119,6 +127,19 @@ func hashTree(ctx context.Context, target model.LocalEvidenceTarget, root platfo
 	}
 	state.walk(current, "", 0, true)
 	return state.result()
+}
+
+func completeCacheTarget(target model.LocalEvidenceTarget) bool {
+	return target.ObservationID != "" && target.Kind != "" && target.Subject != ""
+}
+
+func disabledLeafCache(cache LeafCache) bool {
+	switch cache.(type) {
+	case DisabledLeafCache, *DisabledLeafCache:
+		return true
+	default:
+		return false
+	}
 }
 
 func validTreeLimits(l TreeLimits) bool {
@@ -262,6 +283,10 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		return
 	}
 	file, hit, cacheEligible := s.cachedLeaf(root, name, relative, info, initialFingerprint)
+	if s.ctx.Err() != nil {
+		s.addPartial("time")
+		return
+	}
 	status := model.EvidenceComplete
 	var errs []model.EvidenceError
 	if !hit {
@@ -311,6 +336,9 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 // cachedLeaf opens the candidate before lookup and repeats its identity check
 // after a cache hit. It never returns an unvalidated cache value.
 func (s *treeState) cachedLeaf(root platform.RootedDirectory, name, relative string, initialInfo os.FileInfo, initial platform.FileFingerprint) (FileDigest, bool, bool) {
+	if !s.cacheEnabled {
+		return FileDigest{}, false, false
+	}
 	file, expected, opened, err := platform.OpenVerifiedFile(root, name)
 	if err != nil {
 		return FileDigest{}, false, false
@@ -330,19 +358,58 @@ func (s *treeState) cachedLeaf(root platform.RootedDirectory, name, relative str
 	}
 	key := NewCacheKey(s.target, relative, before)
 	entry, found, err := s.cache.Lookup(s.ctx, key)
-	if err != nil || !found || !validCacheEntry(entry, key, before) {
+	if s.ctx.Err() != nil {
+		s.noteCache(cacheRejected)
+		return FileDigest{}, false, false
+	}
+	if err != nil {
+		s.noteCache(cacheRejected)
+		return FileDigest{}, false, true
+	}
+	if !found {
+		s.noteCache(cacheMiss)
+		return FileDigest{}, false, true
+	}
+	if !validCacheEntry(entry, key, before) {
+		s.noteCache(cacheRejected)
 		return FileDigest{}, false, true
 	}
 	after, err := file.Stat()
 	if err != nil {
+		s.noteCache(cacheRejected)
 		return FileDigest{}, false, true
 	}
 	afterFingerprint, ok := platform.Fingerprint(after)
 	postName, err := root.Lstat(name)
 	if err != nil || !ok || before != afterFingerprint || !os.SameFile(expected, postName) {
+		s.noteCache(cacheRejected)
 		return FileDigest{}, false, true
 	}
+	if s.ctx.Err() != nil {
+		s.noteCache(cacheRejected)
+		return FileDigest{}, false, false
+	}
+	s.noteCache(cacheHit)
 	return FileDigest{SHA256: entry.Digest, Size: entry.Size, Fingerprint: before}, true, true
+}
+
+func (s *treeState) noteCache(status string) {
+	if cacheStatusRank(status) > cacheStatusRank(s.digest.Cache) {
+		s.digest.Cache = status
+	}
+}
+
+func cacheStatusRank(status string) int {
+	switch status {
+	case cacheHit:
+		return 1
+	case cacheMiss:
+		return 2
+	case cacheRejected:
+		return 3
+	default:
+		return 0
+	}
 }
 
 func validCacheEntry(entry CacheEntry, key CacheKey, fingerprint platform.FileFingerprint) bool {
