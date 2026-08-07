@@ -32,7 +32,7 @@ The full suite passed the IDE/evidence packages and all other implemented packag
 
 ## Implementation commit
 
-Pending commit hash; recorded by the report-only follow-up commit.
+Implementation commit hash: `072a1914dd0a97cf0e6942b08ab16a0932e61c45`.
 
 ## Concerns
 
