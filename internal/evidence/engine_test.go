@@ -265,6 +265,22 @@ func TestEngineAcceptsDistinctEvidenceUnderSharedCatalogTargetID(t *testing.T) {
 	}
 }
 
+func TestEngineRejectsSharedTargetIDBoundTwiceToSameObservation(t *testing.T) {
+	fixture := newEngineFixture(t)
+	issuer := NewIssuer()
+	fileTarget := fixture.fileTarget(issuer, "fixture.shared-binding", model.EvidenceSubjectManifest, fixture.manifestRootRelative)
+	treeTarget := issuer.Issue(fixture.treeTargetValue("fixture.shared-binding"), fixture.anchorWithoutContent())
+
+	got := (Engine{}).Collect(context.Background(), collector.Environment{FS: platform.OSFileSystem{}}, fixture.inventory(), []model.CollectorResult{{
+		Collector: "fixture", LocalEvidenceIssuer: issuer,
+		LocalEvidenceTargets: []model.LocalEvidenceTarget{fileTarget, treeTarget},
+	}})
+
+	if len(got.Evidence) != 0 || len(got.Coverage.Targets) != 0 || len(got.Coverage.Errors) != 2 {
+		t.Fatalf("ambiguous shared binding accepted: %+v", got)
+	}
+}
+
 func TestEngineRejectsDuplicateGraphIDsBeforeOpeningRoot(t *testing.T) {
 	fixture := newEngineFixture(t)
 	for _, name := range []string{"asset", "observation"} {

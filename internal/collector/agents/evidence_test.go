@@ -40,6 +40,43 @@ func TestAgentEvidenceTargetMatrix(t *testing.T) {
 			t.Fatalf("unsupported Cursor plugin target emitted: %+v", target)
 		}
 	}
+	collection := collectAgentEvidence(t, home, got)
+	assertCompleteAgentEvidence(t, got, collection, map[string][]string{
+		"agent-plugin:claude:claude-plugin@1.0.0": {"file-sha256/manifest", "tree-sha256/payload-tree"},
+		"agent-skill:claude:bundled-skill":        {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+		"agent-plugin:codex:codex-plugin@1.0.0":   {"file-sha256/manifest", "tree-sha256/payload-tree"},
+		"agent-skill:claude:claude-skill":         {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+		"agent-skill:codex:codex-skill":           {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+		"agent-skill:cursor:cursor-skill":         {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+	})
+	before := agentEvidenceDigest(t, collection, "agent-plugin:claude:claude-plugin@1.0.0", model.EvidenceSubjectPayloadTree)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "outside-sibling.txt"), "outside payload mutation")
+	again := collectAgents(t, New(), context.Background(), home)
+	after := collectAgentEvidence(t, home, again)
+	if digest := agentEvidenceDigest(t, after, "agent-plugin:claude:claude-plugin@1.0.0", model.EvidenceSubjectPayloadTree); digest != before {
+		t.Fatalf("outside sibling changed plugin payload digest: before=%q after=%q", before, digest)
+	}
+}
+
+func TestAgentEvidenceCompletesForCatalogRootPluginsAndSkills(t *testing.T) {
+	home := t.TempDir()
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", ".claude-plugin", "plugin.json"), `{"name":"claude-root","version":"1.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".claude", "plugins", "payload.txt"), "claude payload")
+	writeAgentFile(t, filepath.Join(home, ".codex", "plugins", ".codex-plugin", "plugin.json"), `{"name":"codex-root","version":"2.0.0"}`)
+	writeAgentFile(t, filepath.Join(home, ".codex", "plugins", "payload.txt"), "codex payload")
+	writeAgentFile(t, filepath.Join(home, ".claude", "skills", "SKILL.md"), "---\nname: claude-root-skill\n---\nbody\n")
+	writeAgentFile(t, filepath.Join(home, ".codex", "skills", "SKILL.md"), "---\nname: codex-root-skill\n---\nbody\n")
+
+	got := collectAgents(t, New(), context.Background(), home)
+	collection := collectAgentEvidence(t, home, got)
+	assertCompleteAgentEvidence(t, got, collection, map[string][]string{
+		"agent-plugin:claude:claude-root@1.0.0": {"file-sha256/manifest", "tree-sha256/payload-tree"},
+		"agent-plugin:codex:codex-root@2.0.0":   {"file-sha256/manifest", "tree-sha256/payload-tree"},
+		"agent-skill:claude:claude-root-skill":  {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+		"agent-skill:codex:codex-root-skill":    {"file-sha256/skill-document", "tree-sha256/payload-tree"},
+	})
+	assertTarget(t, got, "agents.claude.plugins", model.TargetComplete, 1, 1)
+	assertTarget(t, got, "agents.codex.plugins", model.TargetComplete, 1, 1)
 }
 
 func TestAgentEvidenceMissingOptionalPluginManifestEmitsNoFakeManifest(t *testing.T) {
@@ -131,6 +168,58 @@ func hasEvidenceError(collection evidence.Collection, code string) bool {
 		}
 	}
 	return false
+}
+
+func collectAgentEvidence(t *testing.T, home string, result model.CollectorResult) evidence.Collection {
+	t.Helper()
+	graph := inventory.Build([]model.CollectorResult{result})
+	return (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+}
+
+func assertCompleteAgentEvidence(t *testing.T, result model.CollectorResult, collection evidence.Collection, want map[string][]string) {
+	t.Helper()
+	observationIDs := make(map[string]map[string]struct{})
+	for _, observation := range result.Observations {
+		if observationIDs[observation.AssetID] == nil {
+			observationIDs[observation.AssetID] = make(map[string]struct{})
+		}
+		observationIDs[observation.AssetID][observation.ID] = struct{}{}
+	}
+	got := make(map[string][]string)
+	for _, record := range collection.Evidence {
+		if record.Status != model.EvidenceComplete || record.Algorithm != "sha256" || len(record.Digest) != 64 || record.ID == "" {
+			t.Fatalf("incomplete evidence record: %+v", record)
+		}
+		if _, bound := observationIDs[record.AssetID][record.ObservationID]; !bound {
+			t.Fatalf("evidence is not bound to its asset observation: %+v", record)
+		}
+		got[record.AssetID] = append(got[record.AssetID], string(record.Kind)+"/"+record.Subject)
+	}
+	for index, terminal := range collection.Coverage.Targets {
+		if terminal.Status != model.EvidenceComplete || index >= len(collection.Evidence) || terminal.AssetID != collection.Evidence[index].AssetID || terminal.ObservationID != collection.Evidence[index].ObservationID || terminal.EvidenceID != collection.Evidence[index].ID {
+			t.Fatalf("terminal coverage is not bound to evidence: target=%+v evidence=%+v", terminal, collection.Evidence)
+		}
+	}
+	for assetID := range got {
+		sort.Strings(got[assetID])
+	}
+	for assetID := range want {
+		sort.Strings(want[assetID])
+	}
+	if collection.Coverage.Status != model.CoverageComplete || len(collection.Coverage.Errors) != 0 || len(collection.Coverage.Targets) != len(collection.Evidence) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("collection=%+v got=%+v want=%+v", collection, got, want)
+	}
+}
+
+func agentEvidenceDigest(t *testing.T, collection evidence.Collection, assetID, subject string) string {
+	t.Helper()
+	for _, record := range collection.Evidence {
+		if record.AssetID == assetID && record.Subject == subject && record.Status == model.EvidenceComplete {
+			return record.Digest
+		}
+	}
+	t.Fatalf("missing complete evidence asset=%q subject=%q: %+v", assetID, subject, collection)
+	return ""
 }
 
 func assertEvidenceTargets(t *testing.T, result model.CollectorResult, want map[string][]string) {

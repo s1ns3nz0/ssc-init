@@ -442,6 +442,9 @@ func recognizedAgentMarker(relative string, declaration targetDeclaration) (mark
 	if declaration.marker == markerCodexPlugin {
 		markerDirectory = ".codex-plugin"
 	}
+	if clean == markerDirectory+"/plugin.json" {
+		return declaration.marker, ".", true
+	}
 	pluginSuffix := "/" + markerDirectory + "/plugin.json"
 	if strings.HasSuffix(clean, pluginSuffix) {
 		base := strings.TrimSuffix(clean, pluginSuffix)
