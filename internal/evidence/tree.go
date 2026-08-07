@@ -53,23 +53,6 @@ type TreeDigest struct {
 	Symlinks    int
 }
 
-// CacheKey, CacheEntry and CacheWrite reserve the tree cache contract. Tree
-// hashing deliberately does not trust or write cache values until Task 5.
-type CacheKey [32]byte
-type CacheEntry struct{}
-type CacheWrite struct{}
-
-type LeafCache interface {
-	Lookup(context.Context, CacheKey) (CacheEntry, bool, error)
-}
-
-// DisabledLeafCache is the explicit no-cache implementation.
-type DisabledLeafCache struct{}
-
-func (DisabledLeafCache) Lookup(context.Context, CacheKey) (CacheEntry, bool, error) {
-	return CacheEntry{}, false, nil
-}
-
 type treeState struct {
 	ctx      context.Context
 	limits   TreeLimits
@@ -81,18 +64,34 @@ type treeState struct {
 	partial  bool
 	oversize bool
 	stopped  bool
+	cache    LeafCache
+	target   model.LocalEvidenceTarget
+	writes   []CacheWrite
 }
 
 // HashTree produces a deterministic, descriptor-anchored manifest. It does
 // not follow symbolic links and retains no path or leaf data after returning.
-func HashTree(ctx context.Context, root platform.RootedDirectory, relativePath string, limits TreeLimits, _ LeafCache) (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
+func HashTree(ctx context.Context, root platform.RootedDirectory, relativePath string, limits TreeLimits, cache LeafCache) (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
+	return hashTree(ctx, model.LocalEvidenceTarget{}, root, relativePath, limits, cache)
+}
+
+// HashTreeForTarget hashes a tree while binding any reusable leaf summaries to
+// the target's observation, kind, and subject.
+func HashTreeForTarget(ctx context.Context, target model.LocalEvidenceTarget, root platform.RootedDirectory, relativePath string, limits TreeLimits, cache LeafCache) (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
+	return hashTree(ctx, target, root, relativePath, limits, cache)
+}
+
+func hashTree(ctx context.Context, target model.LocalEvidenceTarget, root platform.RootedDirectory, relativePath string, limits TreeLimits, cache LeafCache) (TreeDigest, model.EvidenceStatus, []model.EvidenceError, []CacheWrite) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, limits.Timeout)
 	defer cancel()
 	h := sha256.New()
-	state := treeState{ctx: ctx, limits: limits, hasher: h}
+	if cache == nil {
+		cache = DisabledLeafCache{}
+	}
+	state := treeState{ctx: ctx, limits: limits, hasher: h, cache: cache, target: target}
 	state.writeHeader()
 
 	if root == nil || !validTreeLimits(limits) {
@@ -262,7 +261,12 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		s.addPartial("read")
 		return
 	}
-	file, status, errs := HashVerifiedFile(s.ctx, root, name, s.limits.MaxFileBytes)
+	file, hit, cacheEligible := s.cachedLeaf(root, name, relative, info, initialFingerprint)
+	status := model.EvidenceComplete
+	var errs []model.EvidenceError
+	if !hit {
+		file, status, errs = HashVerifiedFile(s.ctx, root, name, s.limits.MaxFileBytes)
+	}
 	if status != model.EvidenceComplete {
 		if s.ctx.Err() != nil {
 			s.addPartial("time")
@@ -288,6 +292,13 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		s.addError(model.EvidenceError{Code: "identity_changed", Message: "evidence file identity changed"}, false)
 		return
 	}
+	if !hit && cacheEligible {
+		key := NewCacheKey(s.target, relative, file.Fingerprint)
+		s.writes = append(s.writes, CacheWrite{Key: key, Entry: CacheEntry{
+			Key: key, Status: model.EvidenceComplete,
+			Algorithm: "sha256", Format: contentCacheFormat, Digest: file.SHA256, Size: file.Size,
+		}})
+	}
 	s.digest.Size += file.Size
 	decoded, decodeErr := hex.DecodeString(file.SHA256)
 	if decodeErr != nil || len(decoded) != sha256.Size {
@@ -295,6 +306,53 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		return
 	}
 	s.write(recordFile, []byte(relative), uint32Bytes(file.Fingerprint.Mode&0o777), uint64Bytes(uint64(file.Size)), decoded)
+}
+
+// cachedLeaf opens the candidate before lookup and repeats its identity check
+// after a cache hit. It never returns an unvalidated cache value.
+func (s *treeState) cachedLeaf(root platform.RootedDirectory, name, relative string, initialInfo os.FileInfo, initial platform.FileFingerprint) (FileDigest, bool, bool) {
+	file, expected, opened, err := platform.OpenVerifiedFile(root, name)
+	if err != nil {
+		return FileDigest{}, false, false
+	}
+	defer file.Close()
+	localFile, ok := file.(platform.LocalRootedFile)
+	if !ok {
+		return FileDigest{}, false, false
+	}
+	local, known := localFile.LocalFilesystem()
+	if !known || !local {
+		return FileDigest{}, false, false
+	}
+	before, ok := platform.Fingerprint(opened)
+	if !ok || before != initial || !os.SameFile(initialInfo, expected) {
+		return FileDigest{}, false, false
+	}
+	key := NewCacheKey(s.target, relative, before)
+	entry, found, err := s.cache.Lookup(s.ctx, key)
+	if err != nil || !found || !validCacheEntry(entry, key, before) {
+		return FileDigest{}, false, true
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return FileDigest{}, false, true
+	}
+	afterFingerprint, ok := platform.Fingerprint(after)
+	postName, err := root.Lstat(name)
+	if err != nil || !ok || before != afterFingerprint || !os.SameFile(expected, postName) {
+		return FileDigest{}, false, true
+	}
+	return FileDigest{SHA256: entry.Digest, Size: entry.Size, Fingerprint: before}, true, true
+}
+
+func validCacheEntry(entry CacheEntry, key CacheKey, fingerprint platform.FileFingerprint) bool {
+	if entry.Key != key || entry.Status != model.EvidenceComplete ||
+		entry.Algorithm != "sha256" || entry.Format != contentCacheFormat || entry.Size < 0 || entry.Size != fingerprint.Size ||
+		len(entry.Digest) != sha256.Size*2 || entry.Digest != strings.ToLower(entry.Digest) {
+		return false
+	}
+	decoded, err := hex.DecodeString(entry.Digest)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func (s *treeState) expired() bool {
@@ -390,7 +448,7 @@ func (s *treeState) result() (TreeDigest, model.EvidenceStatus, []model.Evidence
 	} else if s.partial {
 		status = model.EvidencePartial
 	}
-	return s.digest, status, s.errors, nil
+	return s.digest, status, s.errors, s.writes
 }
 
 func validTreeName(name string) bool {
