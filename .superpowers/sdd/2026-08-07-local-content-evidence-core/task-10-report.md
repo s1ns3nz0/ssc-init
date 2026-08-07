@@ -2,6 +2,7 @@
 
 Base: `6b1d7fc4b61d3c00cd9025b8c62ada011c002b99`
 Product commit: `2bf7acaf17ff7edc8e239e3a66bc7a6389854c0f`
+Review fix commit: `1993e58a46525da76301cb0b9ca41502077d42cc`
 
 ## Delivered
 
@@ -91,3 +92,70 @@ Product commit: `2bf7acaf17ff7edc8e239e3a66bc7a6389854c0f`
 No persistence or CLI schema work was added ahead of Tasks 12–14. Project
 evidence collection remains intentionally Darwin-bound with the existing
 strong filesystem fingerprint contract.
+
+## Review fix round 1
+
+The Task 10 review found three important gaps and one test-strength issue. All
+were reproduced with focused regressions before the product changes.
+
+### Cancellation propagation
+
+- RED: cancellation from the walker open callback was returned as `err=nil`
+  with complete project-root coverage and an `unavailable` evidence target.
+  The new phase matrix also showed that cancellation immediately before hashing
+  returned already-finalized project assets and observations as partial
+  false-success output.
+- GREEN: the walker now checks context immediately after every callback.
+  `Collect`, `buildEvidence`, and target issuance check context after walking,
+  before and within every bounded loop, around test-only phase seams, before
+  and after hashing, and before returning. Cancellation and deadline errors are
+  propagated without conversion to evidence status.
+- Cancellation abort now clears any issued runtime target/proof and returns an
+  empty collector result, rather than exposing partial graph or target state.
+  A counting reader proves cancellation during the first hash stops before the
+  next project file is read.
+
+### Stat-known oversize files
+
+- RED contract: the original post-walk path called `HashVerifiedFile` for a
+  file already known by verified stat to be 32 MiB + 1, causing a bounded but
+  unnecessary content read.
+- GREEN: the walker records `oversize` only after no-follow verified open and
+  matching discovery/open fingerprints. Issuance converts that marker directly
+  to a sealed path-free preset. A counting filesystem proves zero content read
+  calls and zero content bytes for the pre-existing oversize case.
+- A separate regression grows a within-bound enumerated file immediately before
+  hashing. That path still performs exactly `maxBytes + 1` bytes of bounded
+  reading, emits `oversize`, and preserves its safe sibling target.
+
+### Project graph semantics
+
+- RED: both preset and complete filesystem project subjects were accepted when
+  bound to an agent-plugin asset, non-project scope, mismatched `ProjectID`, or
+  a project-config source; complete targets reached the filesystem.
+- GREEN: every closed `ProjectEvidenceSubject` now requires collector
+  `projects`, kind `file-sha256`, asset type `project`, scope `project`,
+  `ProjectID == AssetID`, and source `projects.root`. The shared check executes
+  before preset/filesystem branching and before all filesystem access.
+
+### Mutation delta strength
+
+- Every catalog mutation case now includes a second safe catalog sibling.
+  Tests require stable evidence IDs, one changed digest only for the mutated
+  subject, byte-for-byte stable sibling evidence, and exactly one
+  `inventory.Diff` change for the mutated evidence ID.
+
+### Review-fix verification
+
+- PASS: `go test ./internal/collector/projects ./internal/evidence ./internal/model ./internal/inventory ./internal/collector/mcp -count=1`
+- PASS (50x): project cancellation, hash cancellation, stat-known oversize,
+  post-enumeration growth, identity swap, and post-collection mutation suite.
+- PASS (50x): project graph-binding negatives, preset-contract negatives, and
+  legitimate project preset positives.
+- PASS: `go test -race ./internal/collector/projects ./internal/evidence -count=1`
+- PASS: `go vet ./internal/collector/projects/... ./internal/evidence/... ./internal/model/... ./internal/inventory/...`
+- PASS: `git diff --check`
+- PASS from clean product commit: `go test ./scripts -count=1`
+- `go test ./... -count=1` retained only the known staged Task 13–14
+  acceptance/CLI fixture failures and the dirty-worktree release guard during
+  the pre-commit run; all Task 10 and related packages passed.
