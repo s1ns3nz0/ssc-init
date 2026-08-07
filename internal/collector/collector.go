@@ -32,9 +32,13 @@ type Collector interface {
 func ClearLocalEvidenceTargets(results []model.CollectorResult) {
 	for index := range results {
 		targets := results[index].LocalEvidenceTargets
-		for targetIndex := range targets {
-			targets[targetIndex] = model.LocalEvidenceTarget{}
+		if cap(targets) > 0 {
+			full := targets[:cap(targets)]
+			for targetIndex := range full {
+				full[targetIndex] = model.LocalEvidenceTarget{}
+			}
 		}
 		results[index].LocalEvidenceTargets = nil
+		results[index].LocalEvidenceIssuer = nil
 	}
 }

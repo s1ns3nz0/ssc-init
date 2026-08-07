@@ -29,6 +29,7 @@ type CollectorResult struct {
 	Errors               []CoverageError       `json:"errors,omitempty"`
 	Targets              []TargetCoverage      `json:"targets,omitempty"`
 	Observations         []Observation         `json:"observations,omitempty"`
+	LocalEvidenceIssuer  any                   `json:"-"`
 	LocalEvidenceTargets []LocalEvidenceTarget `json:"-"`
 	LocalTargets         []LocalTarget         `json:"-"`
 }
