@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
@@ -179,6 +180,73 @@ func TestWalkerIssuesUnavailableTargetForEvidenceIdentitySwap(t *testing.T) {
 	assertTargetIssue(t, got, "$HOME/Projects", model.TargetPartial, "identity_changed")
 	if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].PresetStatus != model.EvidenceUnavailable || got.LocalEvidenceTargets[0].RootPath != "" || got.LocalEvidenceTargets[0].RelativePath != "" {
 		t.Fatalf("evidence targets=%+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestProjectEvidenceKnownOversizeReadsNoContentBytes(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	large := filepath.Join(root, "package-lock.json")
+	writeWalkFile(t, large, "x")
+	if err := os.Truncate(large, maxProjectEvidenceBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSystem := &countingProjectFileSystem{readBytesByName: make(map[string]int64)}
+	environment := testutil.Environment(t, home)
+	environment.FS = fileSystem
+	got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileSystem.readCalls != 0 || fileSystem.readBytes != 0 || fileSystem.readBytesByName["package-lock.json"] != 0 {
+		t.Fatalf("known oversize file was read: calls=%d bytes=%d byName=%v", fileSystem.readCalls, fileSystem.readBytes, fileSystem.readBytesByName)
+	}
+	if len(got.LocalEvidenceTargets) != 1 || got.LocalEvidenceTargets[0].PresetStatus != model.EvidenceOversize || got.LocalEvidenceTargets[0].RootPath != "" || got.LocalEvidenceTargets[0].RelativePath != "" {
+		t.Fatalf("targets=%+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestProjectEvidenceGrowthAfterEnumerationUsesBoundedReadAndKeepsSibling(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	large := filepath.Join(root, "package-lock.json")
+	writeWalkFile(t, large, "small-at-enumeration")
+	writeWalkFile(t, filepath.Join(root, "requirements.txt"), "safe sibling")
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSystem := &countingProjectFileSystem{readBytesByName: make(map[string]int64)}
+	environment := testutil.Environment(t, home)
+	environment.FS = fileSystem
+	collector := &projectCollector{roots: roots, limits: defaultWalkLimits()}
+	collector.beforeEvidenceHash = func(relative string) {
+		if relative == "package-lock.json" {
+			if err := os.Truncate(large, maxProjectEvidenceBytes+2); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := collector.Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileSystem.readBytesByName["package-lock.json"] != maxProjectEvidenceBytes+1 {
+		t.Fatalf("grown file bytes=%d want=%d all=%v", fileSystem.readBytesByName["package-lock.json"], maxProjectEvidenceBytes+1, fileSystem.readBytesByName)
+	}
+	if len(got.LocalEvidenceTargets) != 2 {
+		t.Fatalf("targets=%+v", got.LocalEvidenceTargets)
+	}
+	statuses := map[string]model.EvidenceStatus{}
+	for _, target := range got.LocalEvidenceTargets {
+		statuses[target.Subject] = target.PresetStatus
+	}
+	if statuses["project-lockfile:package-lock.json"] != model.EvidenceOversize || statuses["project-manifest:requirements.txt"] != "" {
+		t.Fatalf("statuses=%v targets=%+v", statuses, got.LocalEvidenceTargets)
 	}
 }
 
@@ -597,4 +665,143 @@ func TestWalkCancellationReturnsContextError(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func TestProjectEvidenceCancellationPropagatesAcrossCollectionPhases(t *testing.T) {
+	for _, phase := range []string{"walker callback", "after walk", "project loop", "before hash"} {
+		t.Run(phase, func(t *testing.T) {
+			home := t.TempDir()
+			root := filepath.Join(home, "Projects")
+			writeWalkFile(t, filepath.Join(root, "a", "package.json"), `{}`)
+			writeWalkFile(t, filepath.Join(root, "b", "package.json"), `{}`)
+			roots, err := ResolveRoots(home, []string{root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			projectCollector := &projectCollector{roots: roots, limits: defaultWalkLimits()}
+			switch phase {
+			case "walker callback":
+				projectCollector.beforeOpen = func(relative string) {
+					if relative == filepath.ToSlash(filepath.Join("a", "package.json")) {
+						calls++
+						cancel()
+					}
+				}
+			case "after walk":
+				projectCollector.afterWalk = func(string) { calls++; cancel() }
+			case "project loop":
+				projectCollector.beforeProject = func(string) { calls++; cancel() }
+			case "before hash":
+				projectCollector.beforeEvidenceHash = func(string) { calls++; cancel() }
+			}
+			got, err := projectCollector.Collect(ctx, testutil.Environment(t, home))
+			if !errors.Is(err, context.Canceled) || calls != 1 {
+				t.Fatalf("phase=%q calls=%d err=%v result=%+v", phase, calls, err, got)
+			}
+			if len(got.Targets) != 0 || len(got.Assets) != 0 || len(got.Observations) != 0 || len(got.LocalTargets) != 0 || len(got.LocalEvidenceTargets) != 0 || got.LocalEvidenceIssuer != nil {
+				t.Fatalf("canceled collection returned false-success output: %+v", got)
+			}
+		})
+	}
+}
+
+func TestProjectEvidenceCancellationDuringHashPropagatesImmediately(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeWalkFile(t, filepath.Join(root, "a", "package.json"), strings.Repeat("x", 1<<20))
+	writeWalkFile(t, filepath.Join(root, "b", "package.json"), strings.Repeat("y", 1<<20))
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fileSystem := &countingProjectFileSystem{cancelOnRead: cancel}
+	environment := testutil.Environment(t, home)
+	environment.FS = fileSystem
+	got, err := (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(ctx, environment)
+	if !errors.Is(err, context.Canceled) || fileSystem.readCalls != 1 {
+		t.Fatalf("calls=%d bytes=%d err=%v result=%+v", fileSystem.readCalls, fileSystem.readBytes, err, got)
+	}
+	if len(got.Targets) != 0 || len(got.Assets) != 0 || len(got.Observations) != 0 || len(got.LocalTargets) != 0 || len(got.LocalEvidenceTargets) != 0 || got.LocalEvidenceIssuer != nil {
+		t.Fatalf("canceled hash returned false-success output: %+v", got)
+	}
+}
+
+func TestProjectEvidencePropagatesExpiredDeadline(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeWalkFile(t, filepath.Join(root, "package.json"), `{}`)
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err = (&projectCollector{roots: roots, limits: defaultWalkLimits()}).Collect(ctx, testutil.Environment(t, home))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+type countingProjectFileSystem struct {
+	platform.OSFileSystem
+	readCalls       int
+	readBytes       int64
+	readBytesByName map[string]int64
+	cancelOnRead    func()
+	canceled        bool
+}
+
+func (f *countingProjectFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countingProjectRoot{RootedDirectory: root, owner: f}, nil
+}
+
+type countingProjectRoot struct {
+	platform.RootedDirectory
+	owner *countingProjectFileSystem
+}
+
+func (r *countingProjectRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countingProjectRoot{RootedDirectory: child, owner: r.owner}, nil
+}
+
+func (r *countingProjectRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countingProjectFile{RootedFile: file, owner: r.owner, name: name}, nil
+}
+
+type countingProjectFile struct {
+	platform.RootedFile
+	owner *countingProjectFileSystem
+	name  string
+}
+
+func (f *countingProjectFile) Read(buffer []byte) (int, error) {
+	f.owner.readCalls++
+	if !f.owner.canceled && f.owner.cancelOnRead != nil {
+		f.owner.canceled = true
+		f.owner.cancelOnRead()
+	}
+	count, err := f.RootedFile.Read(buffer)
+	f.owner.readBytes += int64(count)
+	if f.owner.readBytesByName == nil {
+		f.owner.readBytesByName = make(map[string]int64)
+	}
+	f.owner.readBytesByName[f.name] += int64(count)
+	return count, err
 }

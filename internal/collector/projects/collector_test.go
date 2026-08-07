@@ -193,12 +193,32 @@ func TestEveryProjectCatalogFileMutationChangesOnlyItsEvidence(t *testing.T) {
 			home := t.TempDir()
 			root := filepath.Join(home, "workspace")
 			path := filepath.Join(root, name)
+			sibling := "package.json"
+			if name == sibling {
+				sibling = "requirements.txt"
+			}
 			writeProjectFile(t, path, "before")
-			before := collectProjectEvidence(t, home, collectProjectsAt(t, home, root))
+			writeProjectFile(t, filepath.Join(root, sibling), "stable sibling")
+			beforeCollection, beforeInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
 			writeProjectFile(t, path, "after")
-			after := collectProjectEvidence(t, home, collectProjectsAt(t, home, root))
-			if len(before.Evidence) != 1 || len(after.Evidence) != 1 || before.Evidence[0].Status != model.EvidenceComplete || after.Evidence[0].Status != model.EvidenceComplete || before.Evidence[0].Subject != after.Evidence[0].Subject || before.Evidence[0].Digest == after.Evidence[0].Digest {
-				t.Fatalf("before=%+v after=%+v", before, after)
+			afterCollection, afterInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
+			if len(beforeCollection.Evidence) != 2 || len(afterCollection.Evidence) != 2 {
+				t.Fatalf("before=%+v after=%+v", beforeCollection, afterCollection)
+			}
+			beforeBySubject := evidenceBySubject(beforeCollection.Evidence)
+			afterBySubject := evidenceBySubject(afterCollection.Evidence)
+			mutatedSubject := projectEvidenceSubjectForTest(name)
+			siblingSubject := projectEvidenceSubjectForTest(sibling)
+			if beforeBySubject[mutatedSubject].ID == "" || beforeBySubject[mutatedSubject].ID != afterBySubject[mutatedSubject].ID || beforeBySubject[mutatedSubject].Digest == afterBySubject[mutatedSubject].Digest {
+				t.Fatalf("mutated evidence before=%+v after=%+v", beforeBySubject[mutatedSubject], afterBySubject[mutatedSubject])
+			}
+			if beforeBySubject[siblingSubject].ID == "" || !reflect.DeepEqual(beforeBySubject[siblingSubject], afterBySubject[siblingSubject]) {
+				t.Fatalf("sibling evidence changed: before=%+v after=%+v", beforeBySubject[siblingSubject], afterBySubject[siblingSubject])
+			}
+			delta := inventory.Diff(beforeInventory, afterInventory)
+			want := []model.Change{{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: beforeBySubject[mutatedSubject].ID}}
+			if !reflect.DeepEqual(delta.Changes, want) {
+				t.Fatalf("delta=%+v want=%+v before=%+v after=%+v", delta.Changes, want, beforeInventory.Evidence, afterInventory.Evidence)
 			}
 		})
 	}
@@ -515,6 +535,22 @@ func collectProjectEvidence(t *testing.T, home string, result model.CollectorRes
 	t.Helper()
 	graph := inventory.Build([]model.CollectorResult{result})
 	return (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+}
+
+func collectProjectInventory(t *testing.T, home string, result model.CollectorResult) (evidence.Collection, model.Inventory) {
+	t.Helper()
+	graph := inventory.Build([]model.CollectorResult{result})
+	collection := (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+	graph.Evidence = inventory.NormalizeEvidence(collection.Evidence)
+	return collection, graph
+}
+
+func evidenceBySubject(values []model.ContentEvidence) map[string]model.ContentEvidence {
+	result := make(map[string]model.ContentEvidence, len(values))
+	for _, value := range values {
+		result[value.Subject] = value
+	}
+	return result
 }
 
 func projectEvidenceSubjectForTest(name string) string {

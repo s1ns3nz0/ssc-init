@@ -68,6 +68,7 @@ type discoveredProjectEvidence struct {
 	definition         projectEvidenceDefinition
 	fileFingerprint    platform.FileFingerprint
 	projectFingerprint platform.FileFingerprint
+	oversize           bool
 }
 
 type rootWalk struct {
@@ -199,6 +200,9 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 			}
 			if walker.beforeOpen != nil {
 				walker.beforeOpen(filepath.ToSlash(entryRelative))
+				if err := walker.ctx.Err(); err != nil {
+					return true, err
+				}
 			}
 			childRoot, childDirectory, err := openVerifiedDirectory(root, name, expected)
 			if err != nil {
@@ -243,6 +247,9 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 		}
 		if walker.beforeOpen != nil {
 			walker.beforeOpen(filepath.ToSlash(entryRelative))
+			if err := walker.ctx.Err(); err != nil {
+				return true, err
+			}
 		}
 		file, opened, err := openVerifiedFile(root, name, expected)
 		if err != nil {
@@ -277,6 +284,7 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 		walker.evidence = append(walker.evidence, discoveredProjectEvidence{
 			relativePath: filepath.Clean(entryRelative), projectRelative: projectRelative, definition: evidenceDefinition,
 			fileFingerprint: fileFingerprint, projectFingerprint: enumeratedProject,
+			oversize: opened.Size() > evidenceDefinition.maxBytes,
 		})
 	}
 	return false, nil

@@ -70,11 +70,15 @@ func validateIssuedCandidate(collectorName string, issued bool, target model.Loc
 	if !issued || !validTargetID(target.TargetID, collectorName) {
 		return issuedCandidate{}, false
 	}
-	if _, exists := assets[target.AssetID]; !exists {
+	asset, exists := assets[target.AssetID]
+	if !exists {
 		return issuedCandidate{}, false
 	}
 	observation, exists := observations[target.ObservationID]
 	if !exists || observation.AssetID != target.AssetID || observation.Collector != collectorName {
+		return issuedCandidate{}, false
+	}
+	if model.ProjectEvidenceSubject(target.Subject) && !validProjectEvidenceBinding(collectorName, target, asset, observation) {
 		return issuedCandidate{}, false
 	}
 	if !validKindSubject(target.Kind, target.Subject) || !validPresetShape(collectorName, target, anchor) {
@@ -112,6 +116,12 @@ func validateIssuedCandidate(collectorName string, issued bool, target model.Loc
 	candidate.anchorAssetRelative = anchorAssetRelative
 	candidate.targetAssetRelative = targetRelative
 	return candidate, true
+}
+
+func validProjectEvidenceBinding(collectorName string, target model.LocalEvidenceTarget, asset model.Asset, observation model.Observation) bool {
+	return collectorName == "projects" && target.Kind == model.EvidenceFileSHA256 &&
+		asset.Type == model.AssetProject && observation.Scope == model.ScopeProject &&
+		observation.ProjectID == target.AssetID && observation.Source == "projects.root"
 }
 
 func newIssuedCandidate(target model.LocalEvidenceTarget, anchor Anchor, observation model.Observation, evidenceID string) issuedCandidate {

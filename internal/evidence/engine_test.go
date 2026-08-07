@@ -377,6 +377,9 @@ func TestEngineSupportsFileTargetWhoseAssetIsTheCatalogRoot(t *testing.T) {
 	observation := finalizedEvidenceObservation(t, "asset")
 	observation.ID = ""
 	observation.Collector = "projects"
+	observation.Scope = model.ScopeProject
+	observation.ProjectID = "asset"
+	observation.Source = "projects.root"
 	var err error
 	observation, err = identity.FinalizeObservation(observation)
 	if err != nil {
@@ -397,7 +400,7 @@ func TestEngineSupportsFileTargetWhoseAssetIsTheCatalogRoot(t *testing.T) {
 	recorder := &recordingSessionFS{delegate: platform.OSFileSystem{}}
 
 	got := (Engine{}).Collect(context.Background(), collector.Environment{FS: recorder}, model.Inventory{
-		Assets: []model.Asset{{ID: "asset"}}, Observations: []model.Observation{observation},
+		Assets: []model.Asset{{ID: "asset", Type: model.AssetProject}}, Observations: []model.Observation{observation},
 	}, []model.CollectorResult{{Collector: "projects", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
 
 	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceComplete || got.Evidence[0].Digest != hex.EncodeToString(digest[:]) {
@@ -655,7 +658,7 @@ func TestEngineAllowsPackageAndContainerSkippedPresets(t *testing.T) {
 func TestEngineAllowsProjectsOnlyTerminalFilePresets(t *testing.T) {
 	for _, status := range []model.EvidenceStatus{model.EvidenceOversize, model.EvidenceUnavailable} {
 		t.Run(string(status), func(t *testing.T) {
-			observation, err := identity.FinalizeObservation(model.Observation{AssetID: "project", Collector: "projects", Scope: model.ScopeProject, LocationRef: "$HOME/project"})
+			observation, err := identity.FinalizeObservation(model.Observation{AssetID: "project", Collector: "projects", Scope: model.ScopeProject, LocationRef: "$HOME/project", ProjectID: "project", Source: "projects.root"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -665,7 +668,7 @@ func TestEngineAllowsProjectsOnlyTerminalFilePresets(t *testing.T) {
 				Kind: model.EvidenceFileSHA256, Subject: "project-manifest:package.json", PresetStatus: status,
 			}, Anchor{})
 			got := (Engine{}).Collect(context.Background(), collector.Environment{}, model.Inventory{
-				Assets: []model.Asset{{ID: "project"}}, Observations: []model.Observation{observation},
+				Assets: []model.Asset{{ID: "project", Type: model.AssetProject}}, Observations: []model.Observation{observation},
 			}, []model.CollectorResult{{Collector: "projects", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
 			if len(got.Coverage.Errors) != 0 || len(got.Evidence) != 1 || got.Evidence[0].Status != status || len(got.Evidence[0].Errors) != 1 {
 				t.Fatalf("collection=%+v", got)
@@ -703,6 +706,53 @@ func TestEngineRejectsProjectTerminalPresetsOutsideClosedContract(t *testing.T) 
 			}, []model.CollectorResult{{Collector: test.collectorName, LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
 			assertRejectedWithoutOpen(t, got, recorder)
 		})
+	}
+}
+
+func TestEngineRejectsProjectEvidenceBoundToNonProjectGraphBeforeFilesystem(t *testing.T) {
+	fixture := newEngineFixture(t)
+	tests := []struct {
+		name      string
+		assetType model.AssetType
+		scope     model.ObservationScope
+		projectID string
+		source    string
+	}{
+		{name: "agent plugin asset", assetType: model.AssetAgentPlugin, scope: model.ScopeProject, projectID: fixture.assetID, source: "projects.root"},
+		{name: "non-project scope", assetType: model.AssetProject, scope: model.ScopeUser, projectID: fixture.assetID, source: "projects.root"},
+		{name: "project id mismatch", assetType: model.AssetProject, scope: model.ScopeProject, projectID: "different-project", source: "projects.root"},
+		{name: "wrong source", assetType: model.AssetProject, scope: model.ScopeProject, projectID: fixture.assetID, source: "mcp.shared.project"},
+	}
+	for _, binding := range []string{"preset", "filesystem"} {
+		for _, test := range tests {
+			t.Run(binding+"/"+test.name, func(t *testing.T) {
+				observation, err := identity.FinalizeObservation(model.Observation{
+					AssetID: fixture.assetID, Collector: "projects", Scope: test.scope, LocationRef: "$HOME/project",
+					ProjectID: test.projectID, Source: test.source,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				value := model.LocalEvidenceTarget{
+					TargetID: "projects.manifest.package.json", AssetID: fixture.assetID, ObservationID: observation.ID,
+					Kind: model.EvidenceFileSHA256, Subject: "project-manifest:package.json",
+				}
+				anchor := Anchor{}
+				if binding == "preset" {
+					value.PresetStatus = model.EvidenceUnavailable
+				} else {
+					value.RootPath, value.RelativePath = fixture.root, fixture.manifestRootRelative
+					anchor = fixture.anchor
+				}
+				issuer := NewIssuer()
+				target := issuer.Issue(value, anchor)
+				recorder := &recordingSessionFS{}
+				got := (Engine{}).Collect(context.Background(), collector.Environment{FS: recorder}, model.Inventory{
+					Assets: []model.Asset{{ID: fixture.assetID, Type: test.assetType}}, Observations: []model.Observation{observation},
+				}, []model.CollectorResult{{Collector: "projects", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target}}})
+				assertRejectedWithoutOpen(t, got, recorder)
+			})
+		}
 	}
 }
 
