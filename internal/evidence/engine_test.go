@@ -767,6 +767,56 @@ func TestEngineInstallsPlannedSimpleSemanticHasherDirectly(t *testing.T) {
 	}
 }
 
+func TestEngineDefaultHashesValidMCPSemanticTarget(t *testing.T) {
+	asset := model.Asset{ID: "mcp:codex:fixture"}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "mcp", Host: "codex", Scope: model.ScopeUser,
+		LocationRef: "$HOME/.codex/config.toml", Source: "mcp.codex.user",
+		Metadata: map[string]string{"transport": "stdio", "command": "node", "env_keys": "API_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := NewIssuer()
+	target := issuer.Issue(model.LocalEvidenceTarget{
+		TargetID: "mcp.codex.user.semantic", AssetID: asset.ID, ObservationID: observation.ID,
+		Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectMCPDeclaration,
+	}, Anchor{})
+	got := (Engine{}).Collect(context.Background(), collector.Environment{}, model.Inventory{Assets: []model.Asset{asset}, Observations: []model.Observation{observation}}, []model.CollectorResult{{
+		Collector: "mcp", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+	want, err := HashMCPObservation(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceComplete || got.Evidence[0].Digest != want {
+		t.Fatalf("collection=%+v want=%q", got, want)
+	}
+}
+
+func TestEngineDefaultRejectsInvalidMCPSemanticObservation(t *testing.T) {
+	asset := model.Asset{ID: "mcp:codex:fixture"}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "mcp", Host: "codex", Scope: model.ScopeUser,
+		LocationRef: "$HOME/.codex/config.toml", Source: "mcp.codex.user",
+		Metadata: map[string]string{"transport": "stdio", "command": "/private/bin/tool"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := NewIssuer()
+	target := issuer.Issue(model.LocalEvidenceTarget{
+		TargetID: "mcp.codex.user.semantic", AssetID: asset.ID, ObservationID: observation.ID,
+		Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectMCPDeclaration,
+	}, Anchor{})
+	got := (Engine{}).Collect(context.Background(), collector.Environment{}, model.Inventory{Assets: []model.Asset{asset}, Observations: []model.Observation{observation}}, []model.CollectorResult{{
+		Collector: "mcp", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceUnavailable {
+		t.Fatalf("collection=%+v", got)
+	}
+}
+
 func TestEnginePrefersContextSemanticHasherWhenBothAreInstalled(t *testing.T) {
 	fixture := newEngineFixture(t)
 	issuer := NewIssuer()

@@ -196,6 +196,10 @@ func collectReadEvidence(result *model.CollectorResult, home, locationRef string
 		result.Observations = append(result.Observations, observation)
 		target.Assets++
 		target.Observations++
+		if !issueMCPSemanticEvidence(result, declaration, observation) {
+			target.Status = model.TargetPartial
+			target.Errors = append(target.Errors, coverageError("identity_changed", "MCP evidence issuer is unavailable", ""))
+		}
 	}
 	result.Targets = append(result.Targets, target)
 }
@@ -406,6 +410,12 @@ func sortResult(result *model.CollectorResult) {
 	})
 	sort.SliceStable(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.SliceStable(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
+	sort.SliceStable(result.LocalEvidenceTargets, func(i, j int) bool {
+		if result.LocalEvidenceTargets[i].TargetID != result.LocalEvidenceTargets[j].TargetID {
+			return result.LocalEvidenceTargets[i].TargetID < result.LocalEvidenceTargets[j].TargetID
+		}
+		return result.LocalEvidenceTargets[i].ObservationID < result.LocalEvidenceTargets[j].ObservationID
+	})
 }
 
 func buildServerEvidence(home, locationRef string, declaration targetDeclaration, server ServerConfig) (model.Asset, model.Observation, error) {

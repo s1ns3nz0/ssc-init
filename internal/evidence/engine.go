@@ -286,7 +286,7 @@ func (engine Engine) collectSemantic(ctx context.Context, source model.Observati
 		simpleHasher = nil
 	}
 	if contextHasher == nil && simpleHasher == nil {
-		return model.ContentEvidence{Status: model.EvidenceUnsupported}
+		simpleHasher = HashMCPObservation
 	}
 	if ctx.Err() != nil {
 		return unavailableRecord("time_limit", "evidence target deadline exceeded")
