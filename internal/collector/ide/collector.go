@@ -234,7 +234,7 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension evidence anchor identity changed", redactPath(home, entryPath))
 			continue
 		}
-		if !c.appendEvidence(ctx, extensionsRoot, rootPath, home, declaration, "", entryPath, manifestRelative, parsed, result, &target, manifestAnchor) {
+		if !c.appendEvidence(rootPath, home, declaration, "", entryPath, manifestRelative, parsed, result, &target, manifestAnchor) {
 			_ = extensionRoot.Close()
 			continue
 		}
@@ -479,14 +479,14 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension evidence anchor identity changed", redactPath(home, pluginPath))
 			continue
 		}
-		c.appendEvidence(ctx, pluginsRoot, filepath.Join(productPath, "plugins"), home, declaration, product, pluginPath, manifestRelative, parsed, result, &target, manifestAnchor)
+		c.appendEvidence(filepath.Join(productPath, "plugins"), home, declaration, product, pluginPath, manifestRelative, parsed, result, &target, manifestAnchor)
 		_ = pluginRoot.Close()
 	}
 	result.Targets = append(result.Targets, target)
 	return nil
 }
 
-func (c *ideCollector) appendEvidence(ctx context.Context, root platform.RootedDirectory, rootPath, home string, declaration targetDeclaration, product, locationPath, manifestRelative string, evidence manifestEvidence, result *model.CollectorResult, target *model.TargetCoverage, manifestAnchor ideEvidenceAnchor) bool {
+func (c *ideCollector) appendEvidence(rootPath, home string, declaration targetDeclaration, product, locationPath, manifestRelative string, evidence manifestEvidence, result *model.CollectorResult, target *model.TargetCoverage, manifestAnchor ideEvidenceAnchor) bool {
 	metadata := make(map[string]string, len(evidence.metadata)+3)
 	for key, value := range evidence.metadata {
 		if value != "" {
@@ -516,7 +516,7 @@ func (c *ideCollector) appendEvidence(ctx context.Context, root platform.RootedD
 	result.Observations = append(result.Observations, observation)
 	target.Assets++
 	target.Observations++
-	c.issueIDEManifestTargets(ctx, root, rootPath, declaration, evidence, observation, result, target, manifestAnchor)
+	c.issueIDEManifestTargets(rootPath, declaration, evidence, observation, result, target, manifestAnchor)
 	return true
 }
 

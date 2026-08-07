@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/ssc-init/ssc-init/internal/evidence"
@@ -48,6 +49,10 @@ func TestJetBrainsPluginIssuesManifestAndExactPluginTree(t *testing.T) {
 		t.Fatalf("subjects=%v", subjects)
 	}
 	first := collectIDEEvidence(t, home, got)
+	assertIDERecordSet(t, got, first, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectManifest:    model.EvidenceComplete,
+		model.EvidenceSubjectPayloadTree: model.EvidenceComplete,
+	})
 	beforeManifest := ideDigest(t, first, model.EvidenceSubjectManifest)
 	beforeTree := ideDigest(t, first, model.EvidenceSubjectPayloadTree)
 	writeIDEFile(t, filepath.Join(plugin, "lib", "plugin.jar"), "jar-two")
@@ -56,6 +61,10 @@ func TestJetBrainsPluginIssuesManifestAndExactPluginTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := collectIDEEvidence(t, home, again)
+	assertIDERecordSet(t, again, second, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectManifest:    model.EvidenceComplete,
+		model.EvidenceSubjectPayloadTree: model.EvidenceComplete,
+	})
 	if digest := ideDigest(t, second, model.EvidenceSubjectManifest); digest != beforeManifest {
 		t.Fatalf("manifest changed after jar mutation: before=%q after=%q", beforeManifest, digest)
 	}
@@ -74,13 +83,26 @@ func TestVSCodeEntrypointMutationChangesOnlyMainAndTreeEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := collectIDEEvidence(t, home, firstResult)
+	assertIDERecordSet(t, firstResult, first, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectEntrypointBrowser: model.EvidenceComplete,
+		model.EvidenceSubjectEntrypointMain:    model.EvidenceComplete,
+		model.EvidenceSubjectManifest:          model.EvidenceComplete,
+		model.EvidenceSubjectPayloadTree:       model.EvidenceComplete,
+	})
 	before := ideDigests(first)
 	writeIDEFile(t, filepath.Join(base, "dist", "main.js"), "main-two")
 	secondResult, err := New().Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := ideDigests(collectIDEEvidence(t, home, secondResult))
+	second := collectIDEEvidence(t, home, secondResult)
+	assertIDERecordSet(t, secondResult, second, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectEntrypointBrowser: model.EvidenceComplete,
+		model.EvidenceSubjectEntrypointMain:    model.EvidenceComplete,
+		model.EvidenceSubjectManifest:          model.EvidenceComplete,
+		model.EvidenceSubjectPayloadTree:       model.EvidenceComplete,
+	})
+	after := ideDigests(second)
 	if after[model.EvidenceSubjectManifest] != before[model.EvidenceSubjectManifest] || after[model.EvidenceSubjectEntrypointBrowser] != before[model.EvidenceSubjectEntrypointBrowser] {
 		t.Fatalf("stable evidence changed: before=%v after=%v", before, after)
 	}
@@ -89,10 +111,11 @@ func TestVSCodeEntrypointMutationChangesOnlyMainAndTreeEvidence(t *testing.T) {
 	}
 }
 
-func TestIDEEntrypointInvalidPathsAreTerminalWithoutOutsideOpen(t *testing.T) {
+func TestIDESecondaryBrowserInvalidPathsAreTerminalWithoutOutsideOpen(t *testing.T) {
 	for _, entry := range []string{"../outside.js", "/private/outside.js", "dist/../../outside.js", "dist/\x00bad.js"} {
 		t.Run(entry, func(t *testing.T) {
-			home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":`+jsonQuote(entry)+`}`)
+			home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":"dist/main.js","browser":`+jsonQuote(entry)+`}`)
+			writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "fixture", "dist", "main.js"), "main")
 			outside := filepath.Join(home, ".vscode", "extensions", "outside.js")
 			writeIDEFile(t, outside, "outside")
 			recorder := &recordingIDEFileSystem{forbidden: outside}
@@ -102,12 +125,39 @@ func TestIDEEntrypointInvalidPathsAreTerminalWithoutOutsideOpen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			quoted := jsonQuote(entry)
+			if bytes.Contains(encoded, []byte(quoted[1:len(quoted)-1])) {
+				t.Fatalf("secondary runtime entry leaked into JSON: entry=%q json=%s", entry, encoded)
+			}
 			collection := (evidence.Engine{}).Collect(context.Background(), env, inventory.Build([]model.CollectorResult{result}), []model.CollectorResult{result})
-			if !ideCollectionHasError(collection, model.EvidenceSubjectEntrypointMain, "path_invalid") {
+			if !ideCollectionHasError(collection, model.EvidenceSubjectEntrypointBrowser, "path_invalid") {
 				t.Fatalf("entry=%q collection=%+v", entry, collection)
 			}
 			if recorder.forbiddenOpens != 0 {
 				t.Fatalf("entry=%q outside opens=%d", entry, recorder.forbiddenOpens)
+			}
+		})
+	}
+}
+
+func TestIDELegacyRejectedSelectedEntrypointEmitsNoPublicRecords(t *testing.T) {
+	for _, entry := range []string{"dist/\x00bad.js", "dist/\x01bad.js", strings.Repeat("x", maxMetadataLength+1)} {
+		t.Run(entry[:min(len(entry), 16)], func(t *testing.T) {
+			home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":`+jsonQuote(entry)+`}`)
+			result, err := New().Collect(context.Background(), testutil.Environment(t, home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Assets) != 0 || len(result.Observations) != 0 || len(result.LocalEvidenceTargets) != 0 {
+				t.Fatalf("entry=%q assets=%+v observations=%+v evidence=%+v", entry, result.Assets, result.Observations, result.LocalEvidenceTargets)
+			}
+			target := assertIDETarget(t, result, "ide.vscode.extensions", "", model.TargetPartial, 0, 0)
+			if len(target.Errors) != 1 || target.Errors[0].Code != "manifest_invalid" {
+				t.Fatalf("entry=%q target=%+v", entry, target)
 			}
 		})
 	}
@@ -144,18 +194,46 @@ func TestIDEEntrypointIntermediateSymlinkAndNonregularAreTerminal(t *testing.T) 
 	}
 }
 
-func TestIDEEvidenceManifestAnchorRejectsPostCollectionMutation(t *testing.T) {
-	home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":"dist/main.js"}`)
+func TestIDEEveryVSCodeTargetRejectsPostCollectionManifestMutation(t *testing.T) {
+	home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":"dist/main.js","browser":"dist/web.js"}`)
 	base := filepath.Join(home, ".vscode", "extensions", "fixture")
 	writeIDEFile(t, filepath.Join(base, "dist", "main.js"), "main")
+	writeIDEFile(t, filepath.Join(base, "dist", "web.js"), "browser")
 	result, err := New().Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeIDEFile(t, filepath.Join(base, "package.json"), `{"name":"fixture","publisher":"acme","version":"2.0.0","main":"dist/main.js"}`)
+	writeIDEFile(t, filepath.Join(base, "package.json"), `{"name":"fixture","publisher":"acme","version":"2.0.0","main":"dist/main.js","browser":"dist/web.js"}`)
 	collection := collectIDEEvidence(t, home, result)
-	if !ideCollectionHasError(collection, model.EvidenceSubjectManifest, "identity_changed") {
-		t.Fatalf("collection=%+v", collection)
+	assertIDERecordSet(t, result, collection, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectEntrypointBrowser: model.EvidenceUnavailable,
+		model.EvidenceSubjectEntrypointMain:    model.EvidenceUnavailable,
+		model.EvidenceSubjectManifest:          model.EvidenceUnavailable,
+		model.EvidenceSubjectPayloadTree:       model.EvidenceUnavailable,
+	})
+	for _, subject := range []string{model.EvidenceSubjectEntrypointBrowser, model.EvidenceSubjectEntrypointMain, model.EvidenceSubjectManifest, model.EvidenceSubjectPayloadTree} {
+		assertIDEOnlyError(t, collection, subject, "identity_changed")
+	}
+}
+
+func TestIDEEveryJetBrainsTargetRejectsPostCollectionManifestMutation(t *testing.T) {
+	home := t.TempDir()
+	plugin := filepath.Join(home, "Library", "Application Support", "JetBrains", "IDEA", "plugins", "fixture")
+	manifest := filepath.Join(plugin, "META-INF", "plugin.xml")
+	writeIDEFile(t, manifest, `<idea-plugin><id>org.example.fixture</id><name>Fixture</name><version>1.0.0</version></idea-plugin>`)
+	writeIDEFile(t, filepath.Join(plugin, "lib", "plugin.jar"), "jar")
+	result, err := New().Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeIDEFile(t, manifest, `<idea-plugin><id>org.example.fixture</id><name>Fixture</name><version>2.0.0</version></idea-plugin>`)
+	collection := collectIDEEvidence(t, home, result)
+	assertIDERecordSet(t, result, collection, map[string]model.EvidenceStatus{
+		model.EvidenceSubjectManifest:    model.EvidenceUnavailable,
+		model.EvidenceSubjectPayloadTree: model.EvidenceUnavailable,
+	})
+	for _, subject := range []string{model.EvidenceSubjectManifest, model.EvidenceSubjectPayloadTree} {
+		assertIDEOnlyError(t, collection, subject, "identity_changed")
 	}
 }
 
@@ -321,6 +399,60 @@ func assertCompleteIDEEvidence(t *testing.T, result model.CollectorResult, expec
 			t.Fatalf("terminal=%+v record=%+v", terminal, record)
 		}
 	}
+}
+
+func assertIDERecordSet(t *testing.T, result model.CollectorResult, collection evidence.Collection, want map[string]model.EvidenceStatus) {
+	t.Helper()
+	if len(collection.Evidence) != len(want) || len(collection.Coverage.Targets) != len(want) {
+		t.Fatalf("evidence=%+v terminals=%+v want=%+v", collection.Evidence, collection.Coverage.Targets, want)
+	}
+	observations := make(map[string]string, len(result.Observations))
+	for _, observation := range result.Observations {
+		observations[observation.ID] = observation.AssetID
+	}
+	seen := make(map[string]struct{}, len(want))
+	wantCoverage := model.CoverageComplete
+	for index, record := range collection.Evidence {
+		status, ok := want[record.Subject]
+		if !ok || record.Status != status || observations[record.ObservationID] != record.AssetID {
+			t.Fatalf("record=%+v observations=%+v want=%+v", record, observations, want)
+		}
+		if _, duplicate := seen[record.Subject]; duplicate {
+			t.Fatalf("duplicate subject %q", record.Subject)
+		}
+		seen[record.Subject] = struct{}{}
+		terminal := collection.Coverage.Targets[index]
+		if terminal.AssetID != record.AssetID || terminal.ObservationID != record.ObservationID || terminal.EvidenceID != record.ID || terminal.Status != record.Status {
+			t.Fatalf("terminal=%+v record=%+v", terminal, record)
+		}
+		if status == model.EvidenceComplete && (record.Algorithm != "sha256" || len(record.Digest) != 64) {
+			t.Fatalf("complete record=%+v", record)
+		}
+		if status != model.EvidenceComplete {
+			wantCoverage = model.CoveragePartial
+		}
+	}
+	if collection.Coverage.Status != wantCoverage || len(collection.Coverage.Errors) != 0 {
+		t.Fatalf("coverage=%+v wantStatus=%q", collection.Coverage, wantCoverage)
+	}
+}
+
+func assertIDEOnlyError(t *testing.T, collection evidence.Collection, subject, code string) {
+	t.Helper()
+	for index, record := range collection.Evidence {
+		if record.Subject != subject {
+			continue
+		}
+		if len(record.Errors) != 1 || record.Errors[0].Code != code {
+			t.Fatalf("subject=%q record=%+v", subject, record)
+		}
+		terminal := collection.Coverage.Targets[index]
+		if len(terminal.Errors) != 1 || terminal.Errors[0].Code != code {
+			t.Fatalf("subject=%q terminal=%+v", subject, terminal)
+		}
+		return
+	}
+	t.Fatalf("missing subject=%q collection=%+v", subject, collection)
 }
 
 func ideCollectionHasError(collection evidence.Collection, subject, code string) bool {

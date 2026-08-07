@@ -93,12 +93,9 @@ func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, 
 	if entryPoint == "" {
 		entryPoint = strings.TrimSpace(browser)
 	}
-	entryPoint, metadataOK := sanitizeSelectedMetadata(home, entryPoint, false)
-	if !metadataOK {
-		// Keep the verified manifest eligible for identity and issue an explicit
-		// terminal entry-point result, but never place unsafe runtime text in
-		// public metadata.
-		entryPoint = ""
+	entryPoint, ok = sanitizeSelectedMetadata(home, entryPoint, false)
+	if !ok {
+		return manifestEvidence{}, errInvalidManifest
 	}
 
 	activationEvents, ok := sanitizeMetadataList(home, manifest.ActivationEvents, false)
