@@ -113,8 +113,79 @@ func TestMCPCombinedCredentialSyntaxIsRedactedBeforeSemanticEvidence(t *testing.
 	assertJSONExcludes(t, firstCollection, "credential-marker-one", "credential-marker-two")
 }
 
+func TestMCPPunctuationAttachedCredentialsAndCanonicalHeadersAreRedacted(t *testing.T) {
+	// Keep this corpus mirrored by the defensive hasher cases in semantic_test.go.
+	cases := []struct {
+		name      string
+		args      []string
+		want      string
+		forbidden []string
+	}{
+		{"long slash", []string{"--auth/slash-marker"}, "[redacted]", []string{"slash-marker"}},
+		{"long semicolon", []string{"--header;semicolon-marker"}, "[redacted]", []string{"semicolon-marker"}},
+		{"long pipe", []string{"--env|pipe-marker"}, "[redacted]", []string{"pipe-marker"}},
+		{"long quote", []string{"--token'quote-marker"}, "[redacted]", []string{"quote-marker"}},
+		{"long double quote", []string{`--client-secret"double-marker`}, "[redacted]", []string{"double-marker"}},
+		{"short header slash", []string{"-H/short-marker"}, "[redacted]", []string{"short-marker"}},
+		{"short env pipe", []string{"-e|env-marker"}, "[redacted]", []string{"env-marker"}},
+		{"noncanonical placeholder", []string{"--auth/colon-marker:[redacted]"}, "[redacted]", []string{"colon-marker"}},
+		{"standalone", []string{"--auth", "standalone-marker"}, "--auth\x1f[redacted]", []string{"standalone-marker"}},
+		{"authorization header", []string{"Authorization: header-marker"}, "Authorization: [redacted]", []string{"header-marker"}},
+		{"proxy authorization header", []string{"Proxy-Authorization: proxy-marker"}, "Proxy-Authorization: [redacted]", []string{"proxy-marker"}},
+		{"split authorization header", []string{"Authorization:", "split-marker"}, "Authorization: [redacted]\x1f[redacted]", []string{"split-marker"}},
+		{"split proxy authorization header", []string{"Proxy-Authorization:", "split-proxy-marker"}, "Proxy-Authorization: [redacted]\x1f[redacted]", []string{"split-proxy-marker"}},
+		{"safe tokenizer", []string{"--tokenizer"}, "--tokenizer", nil},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			contents, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fixture": map[string]any{"command": "runner", "args": test.args}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, collection := collectMCPConfigEvidence(t, string(contents))
+			if len(result.Observations) != 1 {
+				t.Fatalf("result=%+v", result)
+			}
+			if got := result.Observations[0].Metadata["args"]; got != test.want {
+				t.Fatalf("args=%q want=%q", got, test.want)
+			}
+			if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+				t.Fatalf("collection=%+v", collection)
+			}
+			assertJSONExcludes(t, result, test.forbidden...)
+			assertJSONExcludes(t, collection, test.forbidden...)
+		})
+	}
+}
+
+func TestMCPInvalidSemanticListItemsAreQuarantinedBeforeObservationFinalization(t *testing.T) {
+	config := `{"mcpServers":{
+"safe":{"command":"node","env":{"API_TOKEN":"secret"},"headers":{"Authorization":"secret"},"enabledTools":["read_file","tool-name","tool.name"],"disabledTools":["delete_file"]},
+"bad-env":{"command":"node","env":{"BAD=actualvalue":"secret"}},
+"bad-header":{"command":"node","headers":{"X-Auth:actualvalue":"secret"}},
+"bad-enabled":{"command":"node","enabledTools":["bad/tool"]},
+"bad-disabled":{"command":"node","disabledTools":["write:actualvalue"]}
+}}`
+	result, collection := collectMCPConfigEvidence(t, config)
+	target := assertTarget(t, result.Targets, "mcp.cursor.user", "")
+	if target.Status != model.TargetPartial || target.Assets != 1 || target.Observations != 1 || !hasErrorCode(target.Errors, "rejected_metadata") {
+		t.Fatalf("target=%+v", target)
+	}
+	if len(result.Observations) != 1 || result.Observations[0].AssetID != "mcp:cursor:safe" {
+		t.Fatalf("result=%+v", result)
+	}
+	metadata := result.Observations[0].Metadata
+	if metadata["env_keys"] != "API_TOKEN" || metadata["header_keys"] != "Authorization" || metadata["enabled_tools"] != "read_file,tool-name,tool.name" || metadata["disabled_tools"] != "delete_file" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+	assertJSONExcludes(t, result, "BAD=actualvalue", "X-Auth:actualvalue", "bad/tool", "write:actualvalue")
+}
+
 func TestMCPEmbeddedAbsolutePathsAreRedactedWithoutRejectingSafeShapes(t *testing.T) {
-	config := `{"mcpServers":{"fixture":{"command":"runner --root:/private/command-marker","args":["--root:/private/argument-marker","x;/private/semicolon-marker","https://example.invalid/api/v1/mcp","external-arg/path-sha256:` + strings.Repeat("a", 64) + `"]}}}`
+	config := `{"mcpServers":{"fixture":{"command":"runner --root:/private/command-marker","args":["--root:/private/argument-marker","x;/private/semicolon-marker","--root:'/private/quote-marker","x|/private/pipe-marker","[/private/bracket-marker","https://example.invalid/api/v1/mcp","https://[::1]/api/v1/mcp","$HOME/Projects/demo","config-relative/work/file","external-arg/path-sha256:` + strings.Repeat("a", 64) + `"]}}}`
 	result, collection := collectMCPConfigEvidence(t, config)
 	if len(result.Observations) != 1 {
 		t.Fatalf("observations=%+v", result.Observations)
@@ -123,14 +194,14 @@ func TestMCPEmbeddedAbsolutePathsAreRedactedWithoutRejectingSafeShapes(t *testin
 	if metadata["command"] != "[redacted]" {
 		t.Fatalf("command=%q", metadata["command"])
 	}
-	wantArgs := "[redacted]\x1f[redacted]\x1fhttps://example.invalid/api/v1/mcp\x1fexternal-arg/path-sha256:" + strings.Repeat("a", 64)
+	wantArgs := "[redacted]\x1f[redacted]\x1f[redacted]\x1f[redacted]\x1f[redacted]\x1fhttps://example.invalid/api/v1/mcp\x1fhttps://[::1]/api/v1/mcp\x1f$HOME/Projects/demo\x1fconfig-relative/work/file\x1fexternal-arg/path-sha256:" + strings.Repeat("a", 64)
 	if metadata["args"] != wantArgs {
 		t.Fatalf("args=%q want=%q", metadata["args"], wantArgs)
 	}
 	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
 		t.Fatalf("collection=%+v", collection)
 	}
-	assertJSONExcludes(t, result, "/private/command-marker", "/private/argument-marker", "/private/semicolon-marker")
+	assertJSONExcludes(t, result, "/private/command-marker", "/private/argument-marker", "/private/semicolon-marker", "/private/quote-marker", "/private/pipe-marker", "/private/bracket-marker")
 }
 
 func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
@@ -139,24 +210,42 @@ func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
 "assignment":{"url":"https://example.invalid/password=assignment-marker"},
 "colon-assignment":{"url":"https://example.invalid/password:colon-assignment-marker"},
 "encoded-assignment":{"url":"https://example.invalid/password%3Dencoded-assignment-marker"},
-"segment":{"url":"https://example.invalid/token/segment-marker"},
-"double-segment":{"url":"https://example.invalid/token//double-segment-marker"},
+"auth-callback":{"url":"https://example.invalid/auth/callback"},
+"token-refresh":{"url":"https://example.invalid/token/refresh"},
+"ordinary-escape":{"url":"https://example.invalid/api%2Dv1/mcp"},
 "encoded-separator":{"url":"https://example.invalid/token%2Fencoded-segment-marker"},
+"double-encoded":{"url":"https://example.invalid/password%253Ddouble-encoded-marker"},
+"double-encoded-lower":{"url":"https://example.invalid/password%253ddouble-lower-marker"},
 "control":{"url":"https://example.invalid/api/%0av1"},
 "invalid-escape":{"url":"https://example.invalid/%zz"}
 }}`
 	result, collection := collectMCPConfigEvidence(t, config)
-	if len(result.Observations) != 9 || len(collection.Evidence) != 9 {
+	if len(result.Observations) != 12 || len(collection.Evidence) != 12 {
 		t.Fatalf("observations=%+v collection=%+v", result.Observations, collection)
 	}
 	for _, observation := range result.Observations {
 		shape := observation.Metadata["url_shape"]
-		if observation.AssetID == "mcp:cursor:safe" {
+		switch observation.AssetID {
+		case "mcp:cursor:safe":
 			if shape != "https://example.invalid/api/v1/mcp?query_keys=access_token,mode" {
 				t.Fatalf("safe shape=%q", shape)
 			}
-		} else if shape != "[redacted]" {
-			t.Fatalf("asset=%q shape=%q", observation.AssetID, shape)
+		case "mcp:cursor:auth-callback":
+			if shape != "https://example.invalid/auth/callback" {
+				t.Fatalf("auth callback shape=%q", shape)
+			}
+		case "mcp:cursor:token-refresh":
+			if shape != "https://example.invalid/token/refresh" {
+				t.Fatalf("token refresh shape=%q", shape)
+			}
+		case "mcp:cursor:ordinary-escape":
+			if shape != "https://example.invalid/api%2Dv1/mcp" {
+				t.Fatalf("ordinary escape shape=%q", shape)
+			}
+		default:
+			if shape != "[redacted]" {
+				t.Fatalf("asset=%q shape=%q", observation.AssetID, shape)
+			}
 		}
 	}
 	for _, item := range collection.Evidence {
@@ -166,7 +255,7 @@ func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
 	}
 	assertJSONExcludes(t, result,
 		"userinfo-marker", "query-marker", "fragment-marker", "assignment-marker",
-		"colon-assignment-marker", "encoded-assignment-marker", "segment-marker", "double-segment-marker", "encoded-segment-marker", "%0a", "%zz",
+		"colon-assignment-marker", "encoded-assignment-marker", "encoded-segment-marker", "double-encoded-marker", "double-lower-marker", "%0a", "%zz",
 	)
 }
 

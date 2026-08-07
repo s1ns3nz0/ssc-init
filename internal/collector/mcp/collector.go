@@ -425,6 +425,9 @@ func buildServerEvidence(home, locationRef string, declaration targetDeclaration
 	if invalidServerName(server.Name) || privacy.ContainsSensitiveValue(server.Name) {
 		return model.Asset{}, model.Observation{}, identity.ErrRejectedIdentity
 	}
+	if !validServerSemanticLists(server) {
+		return model.Asset{}, model.Observation{}, errors.New("unsafe MCP metadata")
+	}
 	asset := model.Asset{
 		ID:   "mcp:" + declaration.spec.Host + ":" + server.Name,
 		Type: model.AssetMCP, Name: server.Name, Source: declaration.spec.Host,
@@ -484,7 +487,79 @@ func putMetadata(metadata map[string]string, key, value string) {
 
 func safeMetadata(metadata map[string]string) bool {
 	for key, value := range metadata {
-		if key == "" || value == "" || privacy.ContainsSensitiveValue(key) || privacy.ContainsSensitiveValue(value) || containsRawAbsolutePath(value) {
+		if key == "" || value == "" || privacy.ContainsSensitiveValue(key) || containsSensitiveMetadataValue(key, value) || containsRawAbsolutePath(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsSensitiveMetadataValue(key, value string) bool {
+	if key != "args" {
+		return privacy.ContainsSensitiveValue(value)
+	}
+	for _, item := range strings.Split(value, "\x1f") {
+		if privacy.ContainsSensitiveValue(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func validServerSemanticLists(server ServerConfig) bool {
+	return validServerSemanticList(server.EnvKeys, validMCPEnvKey) &&
+		validServerSemanticList(server.HeaderKeys, validMCPHeaderKey) &&
+		validServerSemanticList(server.EnabledTools, validMCPToolName) &&
+		validServerSemanticList(server.DisabledTools, validMCPToolName)
+}
+
+func validServerSemanticList(values []string, validItem func(string) bool) bool {
+	total := 0
+	for _, value := range values {
+		if !validItem(value) {
+			return false
+		}
+		total += len(value)
+	}
+	if len(values) > 1 {
+		total += len(values) - 1
+	}
+	return total <= maxMCPSemanticFieldBytes
+}
+
+func validMCPEnvKey(value string) bool {
+	if value == "" || !(value[0] == '_' || value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !(character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPHeaderKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPToolName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.') {
 			return false
 		}
 	}
@@ -524,18 +599,58 @@ func sanitizeCommand(home, command string) string {
 }
 
 func containsRawAbsolutePath(value string) bool {
-	fields := strings.FieldsFunc(value, func(character rune) bool {
-		return character == '\x1f' || character == ',' || character == '=' || character == ':' || character == ';' || unicode.IsSpace(character)
-	})
-	for index, field := range fields {
-		if filepath.IsAbs(field) {
-			if strings.HasPrefix(field, "//") && index > 0 && (fields[index-1] == "http" || fields[index-1] == "https") {
-				continue
-			}
+	for index, character := range value {
+		if character != '/' {
+			continue
+		}
+		if mcpURLSchemeSlashes(value, index) {
+			continue
+		}
+		if mcpHTTPAuthorityRootSlash(value, index) {
+			continue
+		}
+		if index == 0 {
+			return true
+		}
+		previous, _ := utf8.DecodeLastRuneInString(value[:index])
+		if !(unicode.IsLetter(previous) || unicode.IsDigit(previous) || strings.ContainsRune("-._~", previous)) {
 			return true
 		}
 	}
 	return false
+}
+
+func mcpURLSchemeSlashes(value string, slash int) bool {
+	for _, scheme := range []string{"http:", "https:"} {
+		start := slash - len(scheme)
+		if start >= 0 && value[start:slash] == scheme && (start == 0 || !mcpPathSafeByte(value[start-1])) && slash+1 < len(value) && value[slash+1] == '/' {
+			return true
+		}
+		start = slash - len(scheme) - 1
+		if start >= 0 && value[start:slash+1] == scheme+"//" && (start == 0 || !mcpPathSafeByte(value[start-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpHTTPAuthorityRootSlash(value string, slash int) bool {
+	prefix := value[:slash]
+	for _, scheme := range []string{"http://", "https://"} {
+		start := strings.LastIndex(prefix, scheme)
+		if start < 0 || start > 0 && mcpPathSafeByte(value[start-1]) {
+			continue
+		}
+		parsed, err := url.Parse(prefix[start:])
+		if err == nil && parsed.Scheme+"://" == scheme && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpPathSafeByte(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("-._~", rune(character))
 }
 
 func sanitizeArgs(home string, args []string) []string {
@@ -547,6 +662,13 @@ func sanitizeArgs(home string, args []string) []string {
 			redactNext = false
 			continue
 		}
+		if prefix, ok := sensitiveTextPrefix(arg); ok {
+			result[index] = prefix + redactedValue
+			if standaloneSensitiveTextFlag(arg) {
+				redactNext = true
+			}
+			continue
+		}
 		if prefix, ok := combinedCredentialFlag(arg); ok {
 			result[index] = prefix + redactedValue
 			continue
@@ -554,10 +676,6 @@ func sanitizeArgs(home string, args []string) []string {
 		if credentialFlag(arg) {
 			result[index] = arg
 			redactNext = true
-			continue
-		}
-		if prefix, ok := sensitiveTextPrefix(arg); ok {
-			result[index] = prefix + redactedValue
 			continue
 		}
 		if key, value, found := strings.Cut(arg, "="); found {
@@ -629,7 +747,7 @@ func safeMCPURLPath(parsed *url.URL) bool {
 		return false
 	}
 	decoded, err := url.PathUnescape(escaped)
-	if err != nil || len(decoded) > maxMCPSemanticFieldBytes || !utf8.ValidString(decoded) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
+	if err != nil || containsMCPValidPercentEscape(decoded) || len(decoded) > maxMCPSemanticFieldBytes || !utf8.ValidString(decoded) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
 		return false
 	}
 	for _, character := range decoded {
@@ -638,22 +756,28 @@ func safeMCPURLPath(parsed *url.URL) bool {
 		}
 	}
 	segments := strings.Split(decoded, "/")
-	for index, segment := range segments {
+	for _, segment := range segments {
 		if segment == "" {
 			continue
 		}
 		if separator := strings.IndexAny(segment, "=:"); separator > 0 && sensitiveName(segment[:separator]) {
 			return false
 		}
-		if sensitiveName(segment) {
-			for _, following := range segments[index+1:] {
-				if following != "" {
-					return false
-				}
-			}
-		}
 	}
 	return true
+}
+
+func containsMCPValidPercentEscape(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if value[index] == '%' && isMCPASCIIHex(value[index+1]) && isMCPASCIIHex(value[index+2]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMCPASCIIHex(character byte) bool {
+	return character >= '0' && character <= '9' || character >= 'a' && character <= 'f' || character >= 'A' && character <= 'F'
 }
 
 func safeMCPURLQueryKey(value string) bool {
@@ -721,7 +845,14 @@ func combinedCredentialFlag(value string) (string, bool) {
 		prefix := value[:2]
 		if value[2] == ':' || value[2] == '=' {
 			prefix += value[2:3]
+			return prefix, true
 		}
+		if privacy.IsRedactedPlaceholder(value[2:]) || mcpLongFlagCharacter(value[2]) {
+			return prefix, true
+		}
+		return "", true
+	}
+	if prefix, attached := attachedSensitiveLongFlag(value); attached {
 		return prefix, true
 	}
 	if separator := strings.IndexAny(value, "=:"); separator > 2 {
@@ -742,7 +873,7 @@ func combinedCredentialFlag(value string) (string, bool) {
 }
 
 func sensitiveLongFlag(value string) bool {
-	if !strings.HasPrefix(value, "--") {
+	if !validMCPLongFlag(value) {
 		return false
 	}
 	name := strings.TrimPrefix(value, "--")
@@ -752,6 +883,39 @@ func sensitiveLongFlag(value string) bool {
 		}
 	}
 	return hasSensitiveComponent(name)
+}
+
+func attachedSensitiveLongFlag(value string) (canonicalPrefix string, attached bool) {
+	if !strings.HasPrefix(value, "--") {
+		return "", false
+	}
+	end := 2
+	for end < len(value) && mcpLongFlagCharacter(value[end]) {
+		end++
+	}
+	if end == len(value) || end == 2 || !sensitiveLongFlag(value[:end]) {
+		return "", false
+	}
+	if value[end] == ':' || value[end] == '=' {
+		return value[:end+1], true
+	}
+	return "", true
+}
+
+func validMCPLongFlag(value string) bool {
+	if len(value) <= 2 || !strings.HasPrefix(value, "--") {
+		return false
+	}
+	for index := 2; index < len(value); index++ {
+		if !mcpLongFlagCharacter(value[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func mcpLongFlagCharacter(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_'
 }
 
 func sensitiveTextPrefix(value string) (string, bool) {
@@ -765,6 +929,11 @@ func sensitiveTextPrefix(value string) (string, bool) {
 		return "Bearer ", true
 	}
 	return "", false
+}
+
+func standaloneSensitiveTextFlag(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return strings.EqualFold(trimmed, "authorization:") || strings.EqualFold(trimmed, "proxy-authorization:")
 }
 
 func sensitiveName(value string) bool {

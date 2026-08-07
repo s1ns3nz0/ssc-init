@@ -88,7 +88,7 @@ func validSemanticMCPStructure(transport string, metadata map[string]string) boo
 }
 
 func validSemanticMCPValue(key, value string) bool {
-	if !validSemanticMCPText(value, key == "args", maxSemanticMCPFieldBytes) || privacy.ContainsSensitiveValue(value) || ((key == "command" || key == "args") && semanticHasUnredactedCredential(value)) || containsSemanticRawAbsolutePath(value) {
+	if !validSemanticMCPText(value, key == "args", maxSemanticMCPFieldBytes) || containsSemanticSensitiveValue(key, value) || ((key == "command" || key == "args") && semanticHasUnredactedCredential(value)) || containsSemanticRawAbsolutePath(value) {
 		return false
 	}
 	switch key {
@@ -100,8 +100,12 @@ func validSemanticMCPValue(key, value string) bool {
 		return value == "" || privacy.IsRedactedPlaceholder(value) || validSanitizedURLShape(value)
 	case "cwd_ref":
 		return value == "" || privacy.IsRedactedPlaceholder(value) || validSanitizedCWDRef(value)
-	case "env_keys", "header_keys", "enabled_tools", "disabled_tools":
-		return validSemanticMCPList(value, ',')
+	case "env_keys":
+		return validSemanticMCPList(value, validSemanticMCPEnvKey)
+	case "header_keys":
+		return validSemanticMCPList(value, validSemanticMCPHeaderKey)
+	case "enabled_tools", "disabled_tools":
+		return validSemanticMCPList(value, validSemanticMCPToolName)
 	case "args":
 		return validSemanticMCPArgumentList(value)
 	case "command":
@@ -109,6 +113,18 @@ func validSemanticMCPValue(key, value string) bool {
 	default:
 		return false
 	}
+}
+
+func containsSemanticSensitiveValue(key, value string) bool {
+	if key != "args" {
+		return privacy.ContainsSensitiveValue(value)
+	}
+	for _, item := range strings.Split(value, "\x1f") {
+		if privacy.ContainsSensitiveValue(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func validSemanticMCPArgumentList(value string) bool {
@@ -147,12 +163,51 @@ func validSemanticMCPToken(value string) bool {
 	return true
 }
 
-func validSemanticMCPList(value string, delimiter rune) bool {
+func validSemanticMCPList(value string, validItem func(string) bool) bool {
 	if value == "" {
 		return true
 	}
-	for _, item := range strings.Split(value, string(delimiter)) {
-		if item == "" || !validSemanticMCPFreeText(item) || strings.ContainsAny(item, "=,\x1f") {
+	for _, item := range strings.Split(value, ",") {
+		if !validItem(item) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemanticMCPEnvKey(value string) bool {
+	if value == "" || !(value[0] == '_' || value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !(character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemanticMCPHeaderKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemanticMCPToolName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.') {
 			return false
 		}
 	}
@@ -170,7 +225,13 @@ func semanticHasUnredactedCredential(value string) bool {
 	items := strings.FieldsFunc(value, func(character rune) bool { return unicode.IsSpace(character) || character == '\x1f' })
 	for index, item := range items {
 		if candidate, combined := semanticCombinedCredential(item); combined {
-			if candidate == "" || !privacy.IsRedactedPlaceholder(candidate) {
+			if candidate == "" {
+				if index+1 >= len(items) || !privacy.IsRedactedPlaceholder(items[index+1]) {
+					return true
+				}
+				continue
+			}
+			if !privacy.IsRedactedPlaceholder(candidate) {
 				return true
 			}
 			continue
@@ -189,21 +250,82 @@ func semanticCombinedCredential(value string) (candidate string, combined bool) 
 		remainder := value[2:]
 		if remainder[0] == ':' || remainder[0] == '=' {
 			remainder = remainder[1:]
+			return remainder, true
 		}
-		return remainder, true
+		if privacy.IsRedactedPlaceholder(remainder) {
+			return remainder, true
+		}
+		return value, true
 	}
 	separator := strings.IndexAny(value, "=:")
-	if separator <= 0 || !semanticCredentialKey(value[:separator]) {
-		return "", false
+	if separator > 0 && semanticCredentialFlag(value[:separator]) {
+		return value[separator+1:], true
 	}
-	return value[separator+1:], true
+	if semanticAttachedSensitiveLongFlag(value) {
+		return value, true
+	}
+	for _, prefix := range []string{"--api-key", "--apikey", "--token"} {
+		if len(value) > len(prefix) && strings.EqualFold(value[:len(prefix)], prefix) {
+			if prefix == "--token" && strings.HasPrefix(strings.ToLower(value[len(prefix):]), "izer") {
+				return "", false
+			}
+			return value[len(prefix):], true
+		}
+	}
+	return "", false
 }
 
 func semanticCredentialFlag(value string) bool {
 	if value == "-H" || value == "-e" {
 		return true
 	}
-	return semanticCredentialKey(value)
+	if strings.HasPrefix(value, "--") && validSemanticLongFlag(value) {
+		return semanticCredentialKey(value)
+	}
+	return !strings.HasPrefix(value, "-") && validSemanticCredentialWord(value) && semanticCredentialKey(value)
+}
+
+func semanticAttachedSensitiveLongFlag(value string) bool {
+	if !strings.HasPrefix(value, "--") {
+		return false
+	}
+	end := 2
+	for end < len(value) && semanticLongFlagCharacter(value[end]) {
+		end++
+	}
+	if end == len(value) || end == 2 || !semanticCredentialKey(value[:end]) {
+		return false
+	}
+	return true
+}
+
+func validSemanticLongFlag(value string) bool {
+	if len(value) <= 2 || !strings.HasPrefix(value, "--") {
+		return false
+	}
+	for index := 2; index < len(value); index++ {
+		if !semanticLongFlagCharacter(value[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func semanticLongFlagCharacter(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_'
+}
+
+func validSemanticCredentialWord(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(semanticLongFlagCharacter(character) || character == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func semanticCredentialKey(value string) bool {
@@ -221,18 +343,58 @@ func semanticCredentialKey(value string) bool {
 }
 
 func containsSemanticRawAbsolutePath(value string) bool {
-	items := strings.FieldsFunc(value, func(character rune) bool {
-		return character == '\x1f' || character == ',' || character == '=' || character == ':' || character == ';' || unicode.IsSpace(character)
-	})
-	for index, item := range items {
-		if filepath.IsAbs(item) {
-			if strings.HasPrefix(item, "//") && index > 0 && (items[index-1] == "http" || items[index-1] == "https") {
-				continue
-			}
+	for index, character := range value {
+		if character != '/' {
+			continue
+		}
+		if semanticURLSchemeSlashes(value, index) {
+			continue
+		}
+		if semanticHTTPAuthorityRootSlash(value, index) {
+			continue
+		}
+		if index == 0 {
+			return true
+		}
+		previous, _ := utf8.DecodeLastRuneInString(value[:index])
+		if !(unicode.IsLetter(previous) || unicode.IsDigit(previous) || strings.ContainsRune("-._~", previous)) {
 			return true
 		}
 	}
 	return false
+}
+
+func semanticURLSchemeSlashes(value string, slash int) bool {
+	for _, scheme := range []string{"http:", "https:"} {
+		start := slash - len(scheme)
+		if start >= 0 && value[start:slash] == scheme && (start == 0 || !semanticPathSafeByte(value[start-1])) && slash+1 < len(value) && value[slash+1] == '/' {
+			return true
+		}
+		start = slash - len(scheme) - 1
+		if start >= 0 && value[start:slash+1] == scheme+"//" && (start == 0 || !semanticPathSafeByte(value[start-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticHTTPAuthorityRootSlash(value string, slash int) bool {
+	prefix := value[:slash]
+	for _, scheme := range []string{"http://", "https://"} {
+		start := strings.LastIndex(prefix, scheme)
+		if start < 0 || start > 0 && semanticPathSafeByte(value[start-1]) {
+			continue
+		}
+		parsed, err := url.Parse(prefix[start:])
+		if err == nil && parsed.Scheme+"://" == scheme && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticPathSafeByte(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("-._~", rune(character))
 }
 
 func validSanitizedURLShape(value string) bool {
@@ -264,26 +426,32 @@ func validSemanticURLPath(parsed *url.URL) bool {
 		return false
 	}
 	decoded, err := url.PathUnescape(escaped)
-	if err != nil || !validSemanticMCPText(decoded, false, maxSemanticMCPFieldBytes) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
+	if err != nil || containsValidPercentEscape(decoded) || !validSemanticMCPText(decoded, false, maxSemanticMCPFieldBytes) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
 		return false
 	}
 	segments := strings.Split(decoded, "/")
-	for index, segment := range segments {
+	for _, segment := range segments {
 		if segment == "" {
 			continue
 		}
 		if separator := strings.IndexAny(segment, "=:"); separator > 0 && semanticCredentialKey(segment[:separator]) {
 			return false
 		}
-		if semanticCredentialKey(segment) {
-			for _, following := range segments[index+1:] {
-				if following != "" {
-					return false
-				}
-			}
-		}
 	}
 	return true
+}
+
+func containsValidPercentEscape(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if value[index] == '%' && isASCIIHex(value[index+1]) && isASCIIHex(value[index+2]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIHex(character byte) bool {
+	return character >= '0' && character <= '9' || character >= 'a' && character <= 'f' || character >= 'A' && character <= 'F'
 }
 
 func validSemanticURLQueryKeys(value string) bool {

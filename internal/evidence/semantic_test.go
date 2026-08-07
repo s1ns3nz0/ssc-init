@@ -160,7 +160,11 @@ func TestHashMCPObservationRejectsMalformedV1Tuples(t *testing.T) {
 func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths(t *testing.T) {
 	unsafe := []string{
 		"--auth:actualvalue", "--header=actualvalue", "--env:actualvalue", "--token:actualvalue",
-		"--client-secret=actualvalue", "-Hactualvalue", "-H:actualvalue", "-eactualvalue", "-e:actualvalue", "--root:/private/key", "x;/private/key",
+		"--client-secret=actualvalue", "-Hactualvalue", "-H:actualvalue", "-eactualvalue", "-e:actualvalue",
+		"--auth/actualvalue", "--header;actualvalue", "--env|actualvalue", "--token'actualvalue",
+		`--client-secret"actualvalue`, "-H/actualvalue", "-e|actualvalue",
+		"--auth/actualvalue:[redacted]", "--header;actualvalue=[redacted]", "--auth.actualvalue:[redacted]",
+		"--root:/private/key", "x;/private/key",
 	}
 	for _, value := range unsafe {
 		t.Run(value, func(t *testing.T) {
@@ -174,12 +178,89 @@ func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths
 	for _, value := range []string{
 		"--auth:[redacted]", "--header=[redacted]", "--env:[redacted]", "--token:[redacted]",
 		"--client-secret=[redacted]", "-H[redacted]", "-H:[redacted]", "-e[redacted]", "-e:[redacted]", "--tokenizer",
+		"[redacted]", "Authorization: [redacted]", "Proxy-Authorization: [redacted]",
+		"Authorization:\x1f[redacted]", "Proxy-Authorization:\x1f[redacted]",
 	} {
 		t.Run("safe "+value, func(t *testing.T) {
 			candidate := safeMCPObservation()
 			candidate.Metadata["args"] = value
 			if _, err := HashMCPObservation(candidate); err != nil {
 				t.Fatalf("sanitized argument rejected: %q: %v", value, err)
+			}
+		})
+	}
+	for _, value := range []string{
+		"Authorization:", "Authorization: actualvalue", "Authorization:\x1factualvalue",
+		"Proxy-Authorization:", "Proxy-Authorization: actualvalue", "Proxy-Authorization:\x1factualvalue",
+	} {
+		t.Run("invalid canonical header "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["args"] = value
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("noncanonical header credential accepted: %q", value)
+			}
+		})
+	}
+}
+
+func TestHashMCPObservationAppliesFieldSpecificListGrammars(t *testing.T) {
+	for _, test := range []struct{ key, value string }{
+		{"env_keys", "API_TOKEN,_PRIVATE2"},
+		{"header_keys", "Authorization,X-Client_2"},
+		{"enabled_tools", "read_file,tool-name,tool.name"},
+		{"disabled_tools", "delete_file,tool-name,tool.name"},
+	} {
+		t.Run("safe "+test.key, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata[test.key] = test.value
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("safe %s=%q rejected: %v", test.key, test.value, err)
+			}
+		})
+	}
+
+	for _, test := range []struct{ key, value string }{
+		{"env_keys", "API_TOKEN,BAD=actualvalue"},
+		{"env_keys", "API_TOKEN,BAD/value"},
+		{"env_keys", "2INVALID"},
+		{"header_keys", "Authorization,X-Auth:actualvalue"},
+		{"header_keys", "Authorization,Bad Header"},
+		{"enabled_tools", "read_file,bad/tool"},
+		{"disabled_tools", "delete_file,write:actualvalue"},
+	} {
+		t.Run("unsafe "+test.key+" "+test.value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata[test.key] = test.value
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("unsafe %s=%q accepted", test.key, test.value)
+			}
+		})
+	}
+}
+
+func TestHashMCPObservationDetectsSlashRootedPathsAfterPunctuation(t *testing.T) {
+	for _, value := range []string{
+		"/private/direct", `--root:'/private/quoted`, "x|/private/piped", "x:/private/colon",
+		"x;/private/semicolon", "x=/private/equals", "[/private/bracketed", `"/private/double-quoted`,
+	} {
+		t.Run("unsafe "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["args"] = value
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("slash-rooted path accepted: %q", value)
+			}
+		})
+	}
+
+	for _, value := range []string{
+		"https://example.invalid/api/v1", "--url=https://example.invalid/api/v1", "https://[::1]/api/v1", "--url=https://[::1]/api/v1", "$HOME/Projects/demo",
+		"config-relative/work/file", "external-arg/path-sha256:" + strings.Repeat("a", 64), "relative/path",
+	} {
+		t.Run("safe "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["args"] = value
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("safe path shape rejected: %q: %v", value, err)
 			}
 		})
 	}
@@ -191,9 +272,10 @@ func TestHashMCPObservationRejectsUnsafeDecodedURLPaths(t *testing.T) {
 		"https://example.invalid/password:actualvalue",
 		"https://example.invalid/password%3Dactualvalue",
 		"https://example.invalid/password%3Aactualvalue",
-		"https://example.invalid/token/value",
-		"https://example.invalid/token//value",
 		"https://example.invalid/token%2Fvalue",
+		"https://example.invalid/password%253Dactualvalue",
+		"https://example.invalid/password%253dactualvalue",
+		"https://example.invalid/password%252Factualvalue",
 		"https://example.invalid/api/%0av1",
 		"https://user:actualvalue@example.invalid/api/v1/mcp",
 		"https://example.invalid/api/v1/mcp?mode=safe",
@@ -210,6 +292,9 @@ func TestHashMCPObservationRejectsUnsafeDecodedURLPaths(t *testing.T) {
 	}
 	for _, value := range []string{
 		"https://example.invalid/api/v1/mcp",
+		"https://example.invalid/auth/callback",
+		"https://example.invalid/token/refresh",
+		"https://example.invalid/api%2Dv1/mcp",
 		"https://example.invalid/api/v1/mcp?query_keys=access_token,mode",
 		"[redacted]",
 	} {
