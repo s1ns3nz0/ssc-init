@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"hash"
+	"io"
 	"io/fs"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +18,8 @@ import (
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
+
+const treeReadDirBatchSize = 256
 
 const (
 	treeDomain           = "ssc-init.tree.v1"
@@ -71,6 +76,7 @@ type treeState struct {
 	hasher   hash.Hash
 	digest   TreeDigest
 	entries  int
+	pending  int
 	errors   []model.EvidenceError
 	partial  bool
 	oversize bool
@@ -139,23 +145,58 @@ func (s *treeState) walk(root platform.RootedDirectory, relative string, depth i
 		s.addOpenError(err)
 		return
 	}
-	entries, err := directory.ReadDir(-1)
+	entries, err := s.readDirectory(directory)
 	_ = directory.Close()
+	if s.stopped {
+		return
+	}
 	if err != nil {
+		if s.ctx.Err() != nil {
+			return
+		}
 		s.addPartial("read")
 		return
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	s.pending += len(entries)
 	for _, entry := range entries {
+		s.pending--
 		if s.stopped || s.expired() {
 			return
 		}
 		name := entry.Name()
 		if !validTreeName(name) {
+			s.entries++
 			s.addPartial("path")
 			continue
 		}
 		s.digestEntry(root, joinTreePath(relative, name), name, depth)
+	}
+}
+
+func (s *treeState) readDirectory(directory platform.RootedFile) ([]os.DirEntry, error) {
+	remaining := s.limits.MaxEntries - s.entries - s.pending
+	entries := make([]os.DirEntry, 0, min(remaining, treeReadDirBatchSize))
+	for {
+		if s.expired() {
+			return nil, s.ctx.Err()
+		}
+		request := min(treeReadDirBatchSize, remaining+1-len(entries))
+		chunk, err := directory.ReadDir(request)
+		entries = append(entries, chunk...)
+		if len(entries) > remaining {
+			s.addOversize("entries")
+			return nil, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(chunk) == 0 {
+			return nil, io.ErrNoProgress
+		}
 	}
 }
 
@@ -176,6 +217,7 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		target, readErr := root.Readlink(name)
 		if readErr != nil {
 			s.addPartial("read")
+			return
 		}
 		targetDigest := sha256.Sum256([]byte(target))
 		s.write(recordSymlink, []byte(relative), targetDigest[:])
@@ -211,6 +253,11 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		s.addOversize("bytes")
 		return
 	}
+	initialFingerprint, fingerprintOK := platform.Fingerprint(info)
+	if !fingerprintOK {
+		s.addPartial("read")
+		return
+	}
 	file, status, errs := HashVerifiedFile(s.ctx, root, name, s.limits.MaxFileBytes)
 	if status != model.EvidenceComplete {
 		if s.ctx.Err() != nil {
@@ -229,13 +276,21 @@ func (s *treeState) digestEntry(root platform.RootedDirectory, relative, name st
 		}
 		return
 	}
+	if file.Size > s.limits.MaxTotalBytes-s.digest.Size {
+		s.addOversize("bytes")
+		return
+	}
+	if initialFingerprint != file.Fingerprint {
+		s.addError(model.EvidenceError{Code: "identity_changed", Message: "evidence file identity changed"}, false)
+		return
+	}
 	s.digest.Size += file.Size
 	decoded, decodeErr := hex.DecodeString(file.SHA256)
 	if decodeErr != nil || len(decoded) != sha256.Size {
 		s.addPartial("read")
 		return
 	}
-	s.write(recordFile, []byte(relative), uint32Bytes(uint32(mode.Perm())), uint64Bytes(uint64(file.Size)), decoded)
+	s.write(recordFile, []byte(relative), uint32Bytes(file.Fingerprint.Mode&0o777), uint64Bytes(uint64(file.Size)), decoded)
 }
 
 func (s *treeState) expired() bool {
@@ -250,11 +305,11 @@ func (s *treeState) expired() bool {
 }
 
 func (s *treeState) addOpenError(err error) {
-	if err == platform.ErrUnsafeRootedPath {
+	if errors.Is(err, platform.ErrUnsafeRootedPath) {
 		s.addError(model.EvidenceError{Code: "identity_changed", Message: "evidence tree identity changed"}, false)
 		return
 	}
-	if err != nil && strings.Contains(err.Error(), "invalid") {
+	if errors.Is(err, fs.ErrInvalid) {
 		s.addPartial("path")
 		return
 	}

@@ -3,6 +3,8 @@ package evidence
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -53,6 +55,33 @@ func TestHashTreeChangesForEntryType(t *testing.T) {
 	}
 }
 
+func TestHashTreeChangesForStandaloneRemoval(t *testing.T) {
+	rootPath := t.TempDir()
+	writeTreeFile(t, rootPath, "keep", "one", 0o600)
+	writeTreeFile(t, rootPath, "remove", "two", 0o600)
+	first := hashTreeFixture(t, rootPath, DefaultTreeLimits)
+	if err := os.Remove(filepath.Join(rootPath, "remove")); err != nil {
+		t.Fatal(err)
+	}
+	second := hashTreeFixture(t, rootPath, DefaultTreeLimits)
+	if first.Digest == second.Digest {
+		t.Fatal("removal did not change tree")
+	}
+}
+
+func TestHashTreeV1GoldenEncoding(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTreeFile(t, rootPath, "a", "x", 0o600)
+	got := hashTreeFixture(t, rootPath, DefaultTreeLimits)
+	const want = "4c880a04f1414e8c0a4c239fa679d0af2f593c10e46f863b1f4fd07df6c3120f"
+	if got.Digest != want {
+		t.Fatalf("ssc-init.tree.v1 digest=%s want=%s", got.Digest, want)
+	}
+}
+
 func TestHashTreeDoesNotFollowSymlinkAndHashesTarget(t *testing.T) {
 	rootPath := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "real-home-marker")
@@ -73,6 +102,25 @@ func TestHashTreeDoesNotFollowSymlinkAndHashesTarget(t *testing.T) {
 	changed, changedStatus, changedErrors := hashTreeRaw(t, rootPath, DefaultTreeLimits)
 	if changedStatus != model.EvidencePartial || !hasTreeError(changedErrors, "symlink_rejected") || got.Digest == changed.Digest {
 		t.Fatal("link target did not change tree")
+	}
+}
+
+func TestHashTreeOmitsSymlinkRecordWhenReadlinkFails(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Symlink("target", filepath.Join(rootPath, "link")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	got, status, errs, _ := HashTree(context.Background(), readlinkErrorRoot{RootedDirectory: root}, "", DefaultTreeLimits, nil)
+
+	emptyRootPath := t.TempDir()
+	empty := hashTreeFixture(t, emptyRootPath, DefaultTreeLimits)
+	if status != model.EvidencePartial || !hasTreeError(errs, "read_unavailable") || got.Digest != empty.Digest {
+		t.Fatalf("got=%+v empty=%+v status=%s errors=%+v", got, empty, status, errs)
 	}
 }
 
@@ -123,6 +171,86 @@ func TestTreeLimitExactBoundariesAreComplete(t *testing.T) {
 	}
 }
 
+func TestTreeLimitUsesVerifiedSizeBeforeAddingTotal(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "payload")
+	writeTreeFile(t, rootPath, "payload", "1", 0o600)
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wrapped := &mutateOnSecondLstatRoot{RootedDirectory: root, target: "payload", mutate: func() error {
+		replacement := path + ".replacement"
+		if err := os.WriteFile(replacement, []byte("12"), 0o600); err != nil {
+			return err
+		}
+		return os.Rename(replacement, path)
+	}}
+	limits := TreeLimits{MaxDepth: 1, MaxEntries: 1, MaxFileBytes: 2, MaxTotalBytes: 1, MaxErrors: 2, Timeout: time.Second}
+	got, status, errs, _ := HashTree(context.Background(), wrapped, "", limits, nil)
+	if status != model.EvidenceOversize || !hasTreeError(errs, "byte_limit") || got.Size != 0 {
+		t.Fatalf("got=%+v status=%s errors=%+v", got, status, errs)
+	}
+}
+
+func TestTreeLimitReadsDirectoryInBoundedChunks(t *testing.T) {
+	rootPath := t.TempDir()
+	writeTreeFile(t, rootPath, "a", "1", 0o600)
+	writeTreeFile(t, rootPath, "b", "2", 0o600)
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wrapped := &boundedReadRoot{RootedDirectory: root, maxRequest: 2}
+	limits := TreeLimits{MaxDepth: 1, MaxEntries: 1, MaxFileBytes: 1, MaxTotalBytes: 1, MaxErrors: 2, Timeout: time.Second}
+	_, status, errs, _ := HashTree(context.Background(), wrapped, "", limits, nil)
+	if status != model.EvidenceOversize || !hasTreeError(errs, "file_limit") || wrapped.largestRequest > wrapped.maxRequest {
+		t.Fatalf("status=%s errors=%+v largest-request=%d", status, errs, wrapped.largestRequest)
+	}
+}
+
+func TestHashTreeRejectsReplacementBetweenMetadataAndBytes(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "payload")
+	writeTreeFile(t, rootPath, "payload", "one", 0o600)
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wrapped := &mutateOnSecondLstatRoot{RootedDirectory: root, target: "payload", mutate: func() error {
+		replacement := path + ".replacement"
+		if err := os.WriteFile(replacement, []byte("two"), 0o600); err != nil {
+			return err
+		}
+		return os.Rename(replacement, path)
+	}}
+	got, status, errs, _ := HashTree(context.Background(), wrapped, "", DefaultTreeLimits, nil)
+	if status != model.EvidencePartial || !hasTreeError(errs, "identity_changed") || got.Size != 0 {
+		t.Fatalf("got=%+v status=%s errors=%+v", got, status, errs)
+	}
+}
+
+func TestHashTreeRejectsModeChangeBetweenMetadataAndBytes(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "payload")
+	writeTreeFile(t, rootPath, "payload", "one", 0o600)
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wrapped := &mutateOnSecondLstatRoot{RootedDirectory: root, target: "payload", mutate: func() error {
+		return os.Chmod(path, 0o700)
+	}}
+	got, status, errs, _ := HashTree(context.Background(), wrapped, "", DefaultTreeLimits, nil)
+	if status != model.EvidencePartial || !hasTreeError(errs, "identity_changed") || got.Size != 0 {
+		t.Fatalf("got=%+v status=%s errors=%+v", got, status, errs)
+	}
+}
+
 func TestHashTreeRejectsInvalidNamesAndStopsAtErrorLimit(t *testing.T) {
 	rootPath := t.TempDir()
 	writeTreeFile(t, rootPath, "one", "x", 0o600)
@@ -134,6 +262,19 @@ func TestHashTreeRejectsInvalidNamesAndStopsAtErrorLimit(t *testing.T) {
 	invalid := invalidNameRoot{RootedDirectory: root}
 	_, status, errs, _ := HashTree(context.Background(), invalid, "", TreeLimits{MaxDepth: 2, MaxEntries: 4, MaxFileBytes: 10, MaxTotalBytes: 10, MaxErrors: 1, Timeout: time.Second}, nil)
 	if status != model.EvidencePartial || !hasTreeError(errs, "path_invalid") || len(errs) != 1 {
+		t.Fatalf("status=%s errors=%+v", status, errs)
+	}
+}
+
+func TestHashTreeClassifiesWrappedUnsafeRootAsIdentityChange(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := (platform.OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	_, status, errs, _ := HashTree(context.Background(), wrappedUnsafeRoot{RootedDirectory: root}, "", DefaultTreeLimits, nil)
+	if status != model.EvidencePartial || !hasTreeError(errs, "identity_changed") {
 		t.Fatalf("status=%s errors=%+v", status, errs)
 	}
 }
@@ -247,9 +388,16 @@ func (r invalidNameRoot) Open(name string) (platform.RootedFile, error) {
 	return r.RootedDirectory.Open(name)
 }
 
-type invalidNameFile struct{ platform.RootedFile }
+type invalidNameFile struct {
+	platform.RootedFile
+	returned bool
+}
 
 func (f *invalidNameFile) ReadDir(n int) ([]os.DirEntry, error) {
+	if f.returned {
+		return nil, io.EOF
+	}
+	f.returned = true
 	return []os.DirEntry{invalidEntry{}}, nil
 }
 
@@ -285,4 +433,70 @@ func (f *reversedReadFile) ReadDir(n int) ([]os.DirEntry, error) {
 		entries[left], entries[right] = entries[right], entries[left]
 	}
 	return entries, err
+}
+
+type readlinkErrorRoot struct{ platform.RootedDirectory }
+
+func (r readlinkErrorRoot) Readlink(string) (string, error) {
+	return "", errors.New("controlled readlink failure")
+}
+
+type boundedReadRoot struct {
+	platform.RootedDirectory
+	maxRequest     int
+	largestRequest int
+}
+
+func (r *boundedReadRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == "." {
+		return &boundedReadFile{RootedFile: file, owner: r}, nil
+	}
+	return file, nil
+}
+
+type boundedReadFile struct {
+	platform.RootedFile
+	owner *boundedReadRoot
+}
+
+func (f *boundedReadFile) ReadDir(n int) ([]os.DirEntry, error) {
+	if n > f.owner.largestRequest {
+		f.owner.largestRequest = n
+	}
+	if n <= 0 || n > f.owner.maxRequest {
+		return nil, errors.New("unbounded ReadDir request")
+	}
+	return f.RootedFile.ReadDir(n)
+}
+
+type mutateOnSecondLstatRoot struct {
+	platform.RootedDirectory
+	target string
+	mutate func() error
+	calls  int
+}
+
+func (r *mutateOnSecondLstatRoot) Lstat(name string) (os.FileInfo, error) {
+	if name == r.target {
+		r.calls++
+		if r.calls == 2 {
+			if err := r.mutate(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return r.RootedDirectory.Lstat(name)
+}
+
+type wrappedUnsafeRoot struct{ platform.RootedDirectory }
+
+func (r wrappedUnsafeRoot) Lstat(name string) (os.FileInfo, error) {
+	if name == "." {
+		return nil, fmt.Errorf("controlled wrapper: %w", platform.ErrUnsafeRootedPath)
+	}
+	return r.RootedDirectory.Lstat(name)
 }
