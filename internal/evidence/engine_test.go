@@ -794,6 +794,46 @@ func TestEngineDefaultHashesValidMCPSemanticTarget(t *testing.T) {
 	}
 }
 
+func TestEngineDefaultLeavesNonMCPSemanticTargetsUnsupported(t *testing.T) {
+	fixture := newEngineFixture(t)
+	issuer := NewIssuer()
+	value, anchor := fixture.semanticTarget("fixture.semantic")
+	target := issuer.Issue(value, anchor)
+	got := (Engine{}).Collect(context.Background(), collector.Environment{}, fixture.inventory(), []model.CollectorResult{{
+		Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceUnsupported || got.Evidence[0].Digest != "" {
+		t.Fatalf("collection=%+v", got)
+	}
+}
+
+func TestEngineExplicitSemanticHasherOverridesMCPDefault(t *testing.T) {
+	asset := model.Asset{ID: "mcp:codex:fixture"}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "mcp", Host: "codex", Scope: model.ScopeUser,
+		LocationRef: "$HOME/.codex/config.toml", Source: "mcp.codex.user",
+		Metadata: map[string]string{"transport": "stdio", "command": "node"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := NewIssuer()
+	target := issuer.Issue(model.LocalEvidenceTarget{
+		TargetID: "mcp.codex.user.semantic", AssetID: asset.ID, ObservationID: observation.ID,
+		Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectMCPDeclaration,
+	}, Anchor{})
+	var calls atomic.Int32
+	got := (Engine{SemanticHasher: func(model.Observation) (string, error) {
+		calls.Add(1)
+		return strings.Repeat("d", 64), nil
+	}}).Collect(context.Background(), collector.Environment{}, model.Inventory{Assets: []model.Asset{asset}, Observations: []model.Observation{observation}}, []model.CollectorResult{{
+		Collector: "mcp", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+	if calls.Load() != 1 || len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceComplete || got.Evidence[0].Digest != strings.Repeat("d", 64) {
+		t.Fatalf("calls=%d collection=%+v", calls.Load(), got)
+	}
+}
+
 func TestEngineDefaultRejectsInvalidMCPSemanticObservation(t *testing.T) {
 	asset := model.Asset{ID: "mcp:codex:fixture"}
 	observation, err := identity.FinalizeObservation(model.Observation{

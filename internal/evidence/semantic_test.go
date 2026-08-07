@@ -41,12 +41,10 @@ func TestHashMCPObservationChangesForEverySupportedSemanticField(t *testing.T) {
 		name   string
 		mutate func(*model.Observation)
 	}{
-		{"host", func(v *model.Observation) { v.Host = "cursor" }},
-		{"source", func(v *model.Observation) { v.Source = "mcp.cursor.user" }},
-		{"transport", func(v *model.Observation) { v.Metadata["transport"] = "http" }},
+		{"host", func(v *model.Observation) { v.Host, v.Source = "cursor", "mcp.cursor.user" }},
+		{"source", func(v *model.Observation) { v.Source = "mcp.codex.project" }},
 		{"command", func(v *model.Observation) { v.Metadata["command"] = "python" }},
 		{"args", func(v *model.Observation) { v.Metadata["args"] = "--mode\x1fstrict" }},
-		{"url shape", func(v *model.Observation) { v.Metadata["url_shape"] = "https://example.invalid/other?query_keys=mode" }},
 		{"cwd ref", func(v *model.Observation) { v.Metadata["cwd_ref"] = "config-relative/other" }},
 		{"enabled", func(v *model.Observation) { v.Metadata["enabled"] = "false" }},
 		{"environment key names", func(v *model.Observation) { v.Metadata["env_keys"] = "OTHER_TOKEN" }},
@@ -64,6 +62,26 @@ func TestHashMCPObservationChangesForEverySupportedSemanticField(t *testing.T) {
 			}
 			if got == first {
 				t.Fatalf("semantic mutation did not change digest: %s", test.name)
+			}
+		})
+	}
+	remote := model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{
+		"transport": "http", "url_shape": "https://example.invalid/mcp?query_keys=mode",
+	}}
+	remoteDigest, err := HashMCPObservation(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, key, value string }{
+		{"transport", "transport", "sse"},
+		{"url shape", "url_shape", "https://example.invalid/other?query_keys=mode"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneSemanticObservation(remote)
+			candidate.Metadata[test.key] = test.value
+			got, err := HashMCPObservation(candidate)
+			if err != nil || got == remoteDigest {
+				t.Fatalf("digest=%q baseline=%q err=%v", got, remoteDigest, err)
 			}
 		})
 	}
@@ -114,10 +132,124 @@ func TestHashMCPObservationRejectsUnsafeIncludedValues(t *testing.T) {
 	}
 }
 
+func TestHashMCPObservationRejectsMalformedV1Tuples(t *testing.T) {
+	cases := []struct {
+		name  string
+		value model.Observation
+	}{
+		{"uppercase host", model.Observation{Host: "Codex", Source: "mcp.Codex.user", Metadata: map[string]string{"transport": "stdio", "command": "node"}}},
+		{"source host mismatch", model.Observation{Host: "codex", Source: "mcp.cursor.user", Metadata: map[string]string{"transport": "stdio", "command": "node"}}},
+		{"source missing suffix", model.Observation{Host: "codex", Source: "mcp.codex", Metadata: map[string]string{"transport": "stdio", "command": "node"}}},
+		{"unknown transport", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "websocket", "url_shape": "https://example.invalid/mcp"}}},
+		{"stdio missing command", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "stdio"}}},
+		{"stdio with url", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "stdio", "command": "node", "url_shape": "https://example.invalid/mcp"}}},
+		{"remote missing url", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http"}}},
+		{"remote with command", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http", "command": "node", "url_shape": "https://example.invalid/mcp"}}},
+		{"remote with args", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "sse", "url_shape": "https://example.invalid/mcp", "args": "--mode"}}},
+		{"remote with cwd", model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "streamable-http", "url_shape": "https://example.invalid/mcp", "cwd_ref": "config-relative/work"}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := HashMCPObservation(test.value); err == nil {
+				t.Fatalf("malformed tuple accepted: %+v", test.value)
+			}
+		})
+	}
+}
+
+func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths(t *testing.T) {
+	unsafe := []string{
+		"--auth:actualvalue", "--header=actualvalue", "--env:actualvalue", "--token:actualvalue",
+		"--client-secret=actualvalue", "-Hactualvalue", "-H:actualvalue", "-eactualvalue", "-e:actualvalue", "--root:/private/key", "x;/private/key",
+	}
+	for _, value := range unsafe {
+		t.Run(value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["args"] = value
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("unsafe argument accepted: %q", value)
+			}
+		})
+	}
+	for _, value := range []string{
+		"--auth:[redacted]", "--header=[redacted]", "--env:[redacted]", "--token:[redacted]",
+		"--client-secret=[redacted]", "-H[redacted]", "-H:[redacted]", "-e[redacted]", "-e:[redacted]", "--tokenizer",
+	} {
+		t.Run("safe "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["args"] = value
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("sanitized argument rejected: %q: %v", value, err)
+			}
+		})
+	}
+}
+
+func TestHashMCPObservationRejectsUnsafeDecodedURLPaths(t *testing.T) {
+	unsafe := []string{
+		"https://example.invalid/password=actualvalue",
+		"https://example.invalid/password:actualvalue",
+		"https://example.invalid/password%3Dactualvalue",
+		"https://example.invalid/password%3Aactualvalue",
+		"https://example.invalid/token/value",
+		"https://example.invalid/token//value",
+		"https://example.invalid/token%2Fvalue",
+		"https://example.invalid/api/%0av1",
+		"https://user:actualvalue@example.invalid/api/v1/mcp",
+		"https://example.invalid/api/v1/mcp?mode=safe",
+		"https://example.invalid/api/v1/mcp?query_keys=mode%2Cother",
+		"https://example.invalid/api/v1/mcp?query_keys=mode#fragment",
+	}
+	for _, value := range unsafe {
+		t.Run(value, func(t *testing.T) {
+			candidate := model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http", "url_shape": value}}
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("unsafe URL shape accepted: %q", value)
+			}
+		})
+	}
+	for _, value := range []string{
+		"https://example.invalid/api/v1/mcp",
+		"https://example.invalid/api/v1/mcp?query_keys=access_token,mode",
+		"[redacted]",
+	} {
+		t.Run("safe "+value, func(t *testing.T) {
+			candidate := model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http", "url_shape": value}}
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("safe URL shape rejected: %q: %v", value, err)
+			}
+		})
+	}
+}
+
+func TestHashMCPObservationValidatesHomeCWDReferenceSuffix(t *testing.T) {
+	for _, value := range []string{"$HOME", "$HOME/work", "config-relative/work", "external-cwd/path-sha256:" + strings.Repeat("a", 64)} {
+		t.Run("safe "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["cwd_ref"] = value
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("safe CWD rejected: %q: %v", value, err)
+			}
+		})
+	}
+	for _, value := range []string{
+		"$HOME/", "$HOME/../work", "$HOME/work//nested", "$HOME/./work", "$HOME//work", `$HOME/work\nested`,
+		"external-other/path-sha256:" + strings.Repeat("a", 64),
+	} {
+		t.Run("unsafe "+value, func(t *testing.T) {
+			candidate := safeMCPObservation()
+			candidate.Metadata["cwd_ref"] = value
+			if _, err := HashMCPObservation(candidate); err == nil {
+				t.Fatalf("unsafe CWD accepted: %q", value)
+			}
+		})
+	}
+}
+
 func safeMCPObservation() model.Observation {
 	return model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{
 		"transport": "stdio", "command": "node", "args": "--mode\x1fsafe",
-		"url_shape": "https://example.invalid/mcp?query_keys=mode", "cwd_ref": "config-relative/work",
+		"cwd_ref": "config-relative/work",
 		"enabled": "true", "env_keys": "API_TOKEN", "header_keys": "Authorization",
 		"enabled_tools": "read", "disabled_tools": "delete",
 	}}

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
@@ -25,6 +26,8 @@ import (
 const maxMCPConfigBytes = maxJSONConfigBytes
 
 const redactedValue = "[redacted]"
+
+const maxMCPSemanticFieldBytes = 4096
 
 type mcpCollector struct {
 	projectTargets []model.LocalTarget
@@ -514,17 +517,21 @@ func sanitizeCommand(home, command string) string {
 	if filepath.IsAbs(command) {
 		return identity.SafeLocationRef(home, command, "external-command")
 	}
-	if privacy.ContainsSensitiveValue(command) {
+	if privacy.ContainsSensitiveValue(command) || containsRawAbsolutePath(command) {
 		return redactedValue
 	}
 	return redactHomeText(home, command)
 }
 
 func containsRawAbsolutePath(value string) bool {
-	for _, field := range strings.FieldsFunc(value, func(character rune) bool {
-		return character == '\x1f' || character == ',' || character == '=' || unicode.IsSpace(character)
-	}) {
+	fields := strings.FieldsFunc(value, func(character rune) bool {
+		return character == '\x1f' || character == ',' || character == '=' || character == ':' || character == ';' || unicode.IsSpace(character)
+	})
+	for index, field := range fields {
 		if filepath.IsAbs(field) {
+			if strings.HasPrefix(field, "//") && index > 0 && (fields[index-1] == "http" || fields[index-1] == "https") {
+				continue
+			}
 			return true
 		}
 	}
@@ -540,13 +547,13 @@ func sanitizeArgs(home string, args []string) []string {
 			redactNext = false
 			continue
 		}
+		if prefix, ok := combinedCredentialFlag(arg); ok {
+			result[index] = prefix + redactedValue
+			continue
+		}
 		if credentialFlag(arg) {
 			result[index] = arg
 			redactNext = true
-			continue
-		}
-		if prefix, ok := combinedCredentialFlag(arg); ok {
-			result[index] = prefix + redactedValue
 			continue
 		}
 		if prefix, ok := sensitiveTextPrefix(arg); ok {
@@ -560,9 +567,11 @@ func sanitizeArgs(home string, args []string) []string {
 			case absoluteURL(value):
 				result[index] = key + "=" + sanitizeURLShape(value)
 			case filepath.IsAbs(value):
-				result[index] = key + "=" + identity.SafeLocationRef(home, value, "external-arg")
+				result[index] = redactedValue
 			case privacy.ContainsSensitiveValue(value):
 				result[index] = key + "=" + redactedValue
+			case containsRawAbsolutePath(arg):
+				result[index] = redactedValue
 			default:
 				result[index] = redactHomeText(home, arg)
 			}
@@ -573,7 +582,7 @@ func sanitizeArgs(home string, args []string) []string {
 			result[index] = sanitizeURLShape(arg)
 		case filepath.IsAbs(arg):
 			result[index] = identity.SafeLocationRef(home, arg, "external-arg")
-		case privacy.ContainsSensitiveValue(arg):
+		case privacy.ContainsSensitiveValue(arg), containsRawAbsolutePath(arg):
 			result[index] = redactedValue
 		default:
 			result[index] = redactHomeText(home, arg)
@@ -587,20 +596,76 @@ func sanitizeURLShape(raw string) string {
 		return ""
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || !safeMCPURLPath(parsed) {
 		return redactedValue
 	}
 	parsed.User = nil
 	shape := parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
-	keys := make([]string, 0, len(parsed.Query()))
-	for key := range parsed.Query() {
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return redactedValue
+	}
+	keys := make([]string, 0, len(query))
+	for key := range query {
+		if !safeMCPURLQueryKey(key) {
+			return redactedValue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	if len(keys) > 0 {
 		shape += "?query_keys=" + strings.Join(keys, ",")
 	}
+	if len(shape) > maxMCPSemanticFieldBytes {
+		return redactedValue
+	}
 	return shape
+}
+
+func safeMCPURLPath(parsed *url.URL) bool {
+	escaped := parsed.EscapedPath()
+	lowerEscaped := strings.ToLower(escaped)
+	if strings.Contains(lowerEscaped, "%2f") || strings.Contains(lowerEscaped, "%5c") {
+		return false
+	}
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil || len(decoded) > maxMCPSemanticFieldBytes || !utf8.ValidString(decoded) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
+		return false
+	}
+	for _, character := range decoded {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	segments := strings.Split(decoded, "/")
+	for index, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		if separator := strings.IndexAny(segment, "=:"); separator > 0 && sensitiveName(segment[:separator]) {
+			return false
+		}
+		if sensitiveName(segment) {
+			for _, following := range segments[index+1:] {
+				if following != "" {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func safeMCPURLQueryKey(value string) bool {
+	if value == "" || len(value) > maxMCPSemanticFieldBytes || !utf8.ValidString(value) || privacy.ContainsSensitiveValue(value) {
+		return false
+	}
+	for _, character := range value {
+		if !(unicode.IsLetter(character) || unicode.IsDigit(character) || character == '_' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeCWD(home, cwd string) string {
@@ -611,10 +676,31 @@ func sanitizeCWD(home, cwd string) string {
 		return identity.SafeLocationRef(home, cwd, "external-cwd")
 	}
 	redacted := redactHomeText(home, cwd)
-	if strings.HasPrefix(redacted, "$HOME") {
+	if redacted == "$HOME" {
+		return redacted
+	}
+	if strings.HasPrefix(redacted, "$HOME/") {
+		if !safeMCPRelativeRef(strings.TrimPrefix(redacted, "$HOME/")) {
+			return redactedValue
+		}
 		return filepath.ToSlash(redacted)
 	}
-	return "config-relative/" + filepath.ToSlash(filepath.Clean(cwd))
+	if !safeMCPRelativeRef(cwd) {
+		return redactedValue
+	}
+	return "config-relative/" + filepath.ToSlash(cwd)
+}
+
+func safeMCPRelativeRef(value string) bool {
+	if value == "" || len(value) > maxMCPSemanticFieldBytes || !utf8.ValidString(value) || strings.ContainsRune(value, '\\') || filepath.IsAbs(value) || filepath.Clean(value) != value || value == "." || value == ".." || strings.HasPrefix(value, ".."+string(filepath.Separator)) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func absoluteURL(value string) bool {
@@ -631,8 +717,18 @@ func credentialFlag(value string) bool {
 
 func combinedCredentialFlag(value string) (string, bool) {
 	lower := strings.ToLower(value)
-	if strings.HasPrefix(value, "-H") && len(value) > 2 {
-		return value[:2], true
+	if (strings.HasPrefix(value, "-H") || strings.HasPrefix(value, "-e")) && len(value) > 2 {
+		prefix := value[:2]
+		if value[2] == ':' || value[2] == '=' {
+			prefix += value[2:3]
+		}
+		return prefix, true
+	}
+	if separator := strings.IndexAny(value, "=:"); separator > 2 {
+		key := value[:separator]
+		if sensitiveLongFlag(key) || sensitiveName(key) {
+			return value[:separator+1], true
+		}
 	}
 	for _, flag := range []string{"--api-key", "--apikey", "--token"} {
 		if strings.HasPrefix(lower, flag) && len(value) > len(flag) {

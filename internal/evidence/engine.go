@@ -286,6 +286,9 @@ func (engine Engine) collectSemantic(ctx context.Context, source model.Observati
 		simpleHasher = nil
 	}
 	if contextHasher == nil && simpleHasher == nil {
+		if source.Collector != "mcp" {
+			return model.ContentEvidence{Status: model.EvidenceUnsupported}
+		}
 		simpleHasher = HashMCPObservation
 	}
 	if ctx.Err() != nil {
