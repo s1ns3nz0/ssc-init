@@ -50,4 +50,4 @@ Both focused suites passed after the minimal changes.
 - `internal/evidence/engine.go`
 - `internal/evidence/engine_test.go`
 
-Commit: pending.
+Implementation commit: `c8b11ab1a704a83da75fa6ceab7446e0bb1034d4` (`feat: plan agent content evidence`).
