@@ -34,7 +34,7 @@ The full test run passed the IDE and evidence packages. Its only failures were t
 
 ## Commit
 
-Commit hash: pending amend.
+Implementation commit hash: `48fa008004245e498672ca4d7f1a2a32eb733807`.
 
 ## Concerns
 
