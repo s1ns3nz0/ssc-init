@@ -432,8 +432,8 @@ func buildServerEvidence(home, locationRef string, declaration targetDeclaration
 		ID:   "mcp:" + declaration.spec.Host + ":" + server.Name,
 		Type: model.AssetMCP, Name: server.Name, Source: declaration.spec.Host,
 	}
-	metadata := observationMetadata(home, declaration.spec.ID, server)
-	if !safeMetadata(metadata) {
+	metadata, metadataOK := observationMetadata(home, declaration.spec.ID, server)
+	if !metadataOK || !safeMetadata(metadata) {
 		return model.Asset{}, model.Observation{}, errors.New("unsafe MCP metadata")
 	}
 	observation, err := identity.FinalizeObservation(model.Observation{
@@ -459,13 +459,17 @@ func invalidServerName(name string) bool {
 	return false
 }
 
-func observationMetadata(home, sourceTarget string, server ServerConfig) map[string]string {
+func observationMetadata(home, sourceTarget string, server ServerConfig) (map[string]string, bool) {
+	args, argsOK := sanitizeArgs(home, server.Args)
+	if !argsOK {
+		return nil, false
+	}
 	metadata := map[string]string{
 		"transport":     server.Transport,
 		"source_target": sourceTarget,
 	}
 	putMetadata(metadata, "command", sanitizeCommand(home, server.Command))
-	putMetadata(metadata, "args", strings.Join(sanitizeArgs(home, server.Args), "\x1f"))
+	putMetadata(metadata, "args", strings.Join(args, "\x1f"))
 	putMetadata(metadata, "url_shape", sanitizeURLShape(server.URL))
 	putMetadata(metadata, "cwd_ref", sanitizeCWD(home, server.CWD))
 	if server.Enabled != nil {
@@ -476,7 +480,7 @@ func observationMetadata(home, sourceTarget string, server ServerConfig) map[str
 	putMetadata(metadata, "enabled_tools", strings.Join(server.EnabledTools, ","))
 	putMetadata(metadata, "disabled_tools", strings.Join(server.DisabledTools, ","))
 	putMetadata(metadata, "unknown_fields", strings.Join(server.UnknownFields, ","))
-	return metadata
+	return metadata, true
 }
 
 func putMetadata(metadata map[string]string, key, value string) {
@@ -515,11 +519,13 @@ func validServerSemanticLists(server ServerConfig) bool {
 
 func validServerSemanticList(values []string, validItem func(string) bool) bool {
 	total := 0
+	previous := ""
 	for _, value := range values {
-		if !validItem(value) {
+		if !validItem(value) || (previous != "" && value <= previous) {
 			return false
 		}
 		total += len(value)
+		previous = value
 	}
 	if len(values) > 1 {
 		total += len(values) - 1
@@ -579,7 +585,7 @@ func sanitizeCommand(home, command string) string {
 		if credentialFlag(key) || sensitiveName(key) {
 			return redactedValue
 		}
-		if _, sensitive := combinedCredentialFlag(field); sensitive {
+		if _, _, sensitive := combinedCredentialFlag(field); sensitive {
 			return redactedValue
 		}
 		if _, sensitive := sensitiveTextPrefix(field); sensitive {
@@ -653,7 +659,7 @@ func mcpPathSafeByte(character byte) bool {
 	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("-._~", rune(character))
 }
 
-func sanitizeArgs(home string, args []string) []string {
+func sanitizeArgs(home string, args []string) ([]string, bool) {
 	result := make([]string, len(args))
 	redactNext := false
 	for index, arg := range args {
@@ -669,8 +675,9 @@ func sanitizeArgs(home string, args []string) []string {
 			}
 			continue
 		}
-		if prefix, ok := combinedCredentialFlag(arg); ok {
+		if prefix, consumeNext, ok := combinedCredentialFlag(arg); ok {
 			result[index] = prefix + redactedValue
+			redactNext = consumeNext
 			continue
 		}
 		if credentialFlag(arg) {
@@ -706,7 +713,10 @@ func sanitizeArgs(home string, args []string) []string {
 			result[index] = redactHomeText(home, arg)
 		}
 	}
-	return result
+	if redactNext {
+		return nil, false
+	}
+	return result, true
 }
 
 func sanitizeURLShape(raw string) string {
@@ -839,37 +849,37 @@ func credentialFlag(value string) bool {
 	return value == "-H" || value == "-e" || sensitiveLongFlag(value)
 }
 
-func combinedCredentialFlag(value string) (string, bool) {
+func combinedCredentialFlag(value string) (prefix string, consumeNext, sensitive bool) {
 	lower := strings.ToLower(value)
 	if (strings.HasPrefix(value, "-H") || strings.HasPrefix(value, "-e")) && len(value) > 2 {
-		prefix := value[:2]
+		prefix = value[:2]
 		if value[2] == ':' || value[2] == '=' {
 			prefix += value[2:3]
-			return prefix, true
+			return prefix, len(value) == 3, true
 		}
 		if privacy.IsRedactedPlaceholder(value[2:]) || mcpLongFlagCharacter(value[2]) {
-			return prefix, true
+			return prefix, false, true
 		}
-		return "", true
+		return "", false, true
 	}
 	if prefix, attached := attachedSensitiveLongFlag(value); attached {
-		return prefix, true
+		return prefix, prefix != "" && len(prefix) == len(value), true
 	}
 	if separator := strings.IndexAny(value, "=:"); separator > 2 {
 		key := value[:separator]
 		if sensitiveLongFlag(key) || sensitiveName(key) {
-			return value[:separator+1], true
+			return value[:separator+1], separator+1 == len(value), true
 		}
 	}
 	for _, flag := range []string{"--api-key", "--apikey", "--token"} {
 		if strings.HasPrefix(lower, flag) && len(value) > len(flag) {
 			if flag == "--token" && strings.HasPrefix(lower[len(flag):], "izer") {
-				return "", false
+				return "", false, false
 			}
-			return value[:len(flag)], true
+			return value[:len(flag)], false, true
 		}
 	}
-	return "", false
+	return "", false, false
 }
 
 func sensitiveLongFlag(value string) bool {
@@ -941,51 +951,7 @@ func sensitiveName(value string) bool {
 }
 
 func hasSensitiveComponent(value string) bool {
-	if value == "authorizationHelper" || value == "AuthorizationHelper" {
-		return false
-	}
-	if strings.EqualFold(value, "authorizationhelper") {
-		return true
-	}
-	for _, component := range semanticComponents(value) {
-		switch component {
-		case "token", "secret", "password", "passwd", "credential", "credentials",
-			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key",
-			"authorization", "auth", "header", "headers", "env":
-			return true
-		}
-	}
-	return false
-}
-
-func semanticComponents(value string) []string {
-	runes := []rune(value)
-	components := make([]string, 0, 4)
-	for start := 0; start < len(runes); {
-		for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsDigit(runes[start]) {
-			start++
-		}
-		if start == len(runes) {
-			break
-		}
-		end := start
-		for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end])) {
-			end++
-		}
-		word := runes[start:end]
-		wordStart := 0
-		for index := 1; index < len(word); index++ {
-			lowerToUpper := (unicode.IsLower(word[index-1]) || unicode.IsDigit(word[index-1])) && unicode.IsUpper(word[index])
-			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) && index+1 < len(word) && unicode.IsLower(word[index+1])
-			if lowerToUpper || acronymToWord {
-				components = append(components, strings.ToLower(string(word[wordStart:index])))
-				wordStart = index
-			}
-		}
-		components = append(components, strings.ToLower(string(word[wordStart:])))
-		start = end
-	}
-	return components
+	return privacy.ContainsCredentialComponent(value)
 }
 
 func redactHomeText(home, value string) string {

@@ -16,6 +16,8 @@ import (
 
 const semanticMCPDomain = "ssc-init.semantic-mcp.v1"
 
+const semanticMCPRedacted = "[redacted]"
+
 const maxSemanticMCPFieldBytes = 4096
 
 var semanticMCPKeys = []string{
@@ -88,7 +90,7 @@ func validSemanticMCPStructure(transport string, metadata map[string]string) boo
 }
 
 func validSemanticMCPValue(key, value string) bool {
-	if !validSemanticMCPText(value, key == "args", maxSemanticMCPFieldBytes) || containsSemanticSensitiveValue(key, value) || ((key == "command" || key == "args") && semanticHasUnredactedCredential(value)) || containsSemanticRawAbsolutePath(value) {
+	if !validSemanticMCPText(value, key == "args", maxSemanticMCPFieldBytes) || !validSemanticMCPRedactionSpelling(key, value) || containsSemanticSensitiveValue(key, value) || ((key == "command" || key == "args") && semanticHasUnredactedCredential(value)) || containsSemanticRawAbsolutePath(value) {
 		return false
 	}
 	switch key {
@@ -97,9 +99,9 @@ func validSemanticMCPValue(key, value string) bool {
 	case "enabled":
 		return value == "" || value == "true" || value == "false"
 	case "url_shape":
-		return value == "" || privacy.IsRedactedPlaceholder(value) || validSanitizedURLShape(value)
+		return value == "" || value == semanticMCPRedacted || validSanitizedURLShape(value)
 	case "cwd_ref":
-		return value == "" || privacy.IsRedactedPlaceholder(value) || validSanitizedCWDRef(value)
+		return value == "" || value == semanticMCPRedacted || validSanitizedCWDRef(value)
 	case "env_keys":
 		return validSemanticMCPList(value, validSemanticMCPEnvKey)
 	case "header_keys":
@@ -109,10 +111,24 @@ func validSemanticMCPValue(key, value string) bool {
 	case "args":
 		return validSemanticMCPArgumentList(value)
 	case "command":
-		return value == "" || privacy.IsRedactedPlaceholder(value) || validSemanticMCPFreeText(value)
+		return value == "" || value == semanticMCPRedacted || validSemanticMCPFreeText(value)
 	default:
 		return false
 	}
+}
+
+func validSemanticMCPRedactionSpelling(key, value string) bool {
+	switch key {
+	case "command", "url_shape", "cwd_ref":
+		return !privacy.IsRedactedPlaceholder(value) || value == semanticMCPRedacted
+	case "args":
+		for _, item := range strings.Split(value, "\x1f") {
+			if privacy.IsRedactedPlaceholder(item) && item != semanticMCPRedacted {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func containsSemanticSensitiveValue(key, value string) bool {
@@ -167,10 +183,12 @@ func validSemanticMCPList(value string, validItem func(string) bool) bool {
 	if value == "" {
 		return true
 	}
+	previous := ""
 	for _, item := range strings.Split(value, ",") {
-		if !validItem(item) {
+		if !validItem(item) || (previous != "" && item <= previous) {
 			return false
 		}
+		previous = item
 	}
 	return true
 }
@@ -226,18 +244,18 @@ func semanticHasUnredactedCredential(value string) bool {
 	for index, item := range items {
 		if candidate, combined := semanticCombinedCredential(item); combined {
 			if candidate == "" {
-				if index+1 >= len(items) || !privacy.IsRedactedPlaceholder(items[index+1]) {
+				if index+1 >= len(items) || items[index+1] != semanticMCPRedacted {
 					return true
 				}
 				continue
 			}
-			if !privacy.IsRedactedPlaceholder(candidate) {
+			if candidate != semanticMCPRedacted {
 				return true
 			}
 			continue
 		}
 		if semanticCredentialFlag(item) {
-			if index+1 >= len(items) || !privacy.IsRedactedPlaceholder(items[index+1]) {
+			if index+1 >= len(items) || items[index+1] != semanticMCPRedacted {
 				return true
 			}
 		}
@@ -252,7 +270,7 @@ func semanticCombinedCredential(value string) (candidate string, combined bool) 
 			remainder = remainder[1:]
 			return remainder, true
 		}
-		if privacy.IsRedactedPlaceholder(remainder) {
+		if remainder == semanticMCPRedacted {
 			return remainder, true
 		}
 		return value, true
@@ -329,17 +347,7 @@ func validSemanticCredentialWord(value string) bool {
 }
 
 func semanticCredentialKey(value string) bool {
-	normalized := strings.ToLower(strings.TrimLeft(value, "-"))
-	normalized = strings.NewReplacer("-", "_", ".", "_").Replace(normalized)
-	components := strings.FieldsFunc(normalized, func(character rune) bool { return character == '_' })
-	for _, component := range components {
-		switch component {
-		case "token", "secret", "password", "passwd", "credential", "credentials", "authorization", "auth",
-			"bearer", "header", "headers", "env", "signature", "apikey", "accesskey", "privatekey", "clientsecret":
-			return true
-		}
-	}
-	return strings.Contains(normalized, "api_key") || strings.Contains(normalized, "access_key")
+	return privacy.ContainsCredentialComponent(strings.TrimLeft(value, "-"))
 }
 
 func containsSemanticRawAbsolutePath(value string) bool {

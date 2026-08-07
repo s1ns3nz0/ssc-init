@@ -164,6 +164,7 @@ func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths
 		"--auth/actualvalue", "--header;actualvalue", "--env|actualvalue", "--token'actualvalue",
 		`--client-secret"actualvalue`, "-H/actualvalue", "-e|actualvalue",
 		"--auth/actualvalue:[redacted]", "--header;actualvalue=[redacted]", "--auth.actualvalue:[redacted]",
+		"--key=actualvalue", "--githubToken=actualvalue", "--githubTOKEN=actualvalue", "--GitHubToken=actualvalue",
 		"--root:/private/key", "x;/private/key",
 	}
 	for _, value := range unsafe {
@@ -180,6 +181,8 @@ func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths
 		"--client-secret=[redacted]", "-H[redacted]", "-H:[redacted]", "-e[redacted]", "-e:[redacted]", "--tokenizer",
 		"[redacted]", "Authorization: [redacted]", "Proxy-Authorization: [redacted]",
 		"Authorization:\x1f[redacted]", "Proxy-Authorization:\x1f[redacted]",
+		"--key=[redacted]", "--githubToken=[redacted]", "--githubTOKEN=[redacted]",
+		"--authorizationHelper=safe", "--AuthorizationHelper=safe",
 	} {
 		t.Run("safe "+value, func(t *testing.T) {
 			candidate := safeMCPObservation()
@@ -203,8 +206,50 @@ func TestHashMCPObservationDefensivelyRejectsCombinedCredentialsAndEmbeddedPaths
 	}
 }
 
+func TestHashMCPObservationRequiresExactCanonicalRedaction(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*model.Observation, string)
+	}{
+		{"command", func(candidate *model.Observation, value string) { candidate.Metadata["command"] = value }},
+		{"argument", func(candidate *model.Observation, value string) { candidate.Metadata["args"] = value }},
+		{"combined argument", func(candidate *model.Observation, value string) { candidate.Metadata["args"] = "--auth:" + value }},
+		{"cwd", func(candidate *model.Observation, value string) { candidate.Metadata["cwd_ref"] = value }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, forged := range []string{"[REDACTED]", "redacted", "[ReDaCtEd]"} {
+				candidate := safeMCPObservation()
+				test.mutate(&candidate, forged)
+				if _, err := HashMCPObservation(candidate); err == nil {
+					t.Fatalf("forged placeholder %q accepted", forged)
+				}
+			}
+			candidate := safeMCPObservation()
+			test.mutate(&candidate, "[redacted]")
+			if _, err := HashMCPObservation(candidate); err != nil {
+				t.Fatalf("canonical placeholder rejected: %v", err)
+			}
+		})
+	}
+
+	for _, forged := range []string{"[REDACTED]", "redacted", "[ReDaCtEd]"} {
+		candidate := model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http", "url_shape": forged}}
+		if _, err := HashMCPObservation(candidate); err == nil {
+			t.Fatalf("forged URL placeholder %q accepted", forged)
+		}
+	}
+	candidate := model.Observation{Host: "codex", Source: "mcp.codex.user", Metadata: map[string]string{"transport": "http", "url_shape": "[redacted]"}}
+	if _, err := HashMCPObservation(candidate); err != nil {
+		t.Fatalf("canonical URL placeholder rejected: %v", err)
+	}
+}
+
 func TestHashMCPObservationAppliesFieldSpecificListGrammars(t *testing.T) {
 	for _, test := range []struct{ key, value string }{
+		{"env_keys", "A,B"},
+		{"header_keys", "A,B"},
+		{"enabled_tools", "A,B"},
+		{"disabled_tools", "A,B"},
 		{"env_keys", "API_TOKEN,_PRIVATE2"},
 		{"header_keys", "Authorization,X-Client_2"},
 		{"enabled_tools", "read_file,tool-name,tool.name"},
@@ -220,6 +265,14 @@ func TestHashMCPObservationAppliesFieldSpecificListGrammars(t *testing.T) {
 	}
 
 	for _, test := range []struct{ key, value string }{
+		{"env_keys", "B,A"},
+		{"env_keys", "A,A"},
+		{"header_keys", "B,A"},
+		{"header_keys", "A,A"},
+		{"enabled_tools", "B,A"},
+		{"enabled_tools", "A,A"},
+		{"disabled_tools", "B,A"},
+		{"disabled_tools", "A,A"},
 		{"env_keys", "API_TOKEN,BAD=actualvalue"},
 		{"env_keys", "API_TOKEN,BAD/value"},
 		{"env_keys", "2INVALID"},
@@ -276,6 +329,10 @@ func TestHashMCPObservationRejectsUnsafeDecodedURLPaths(t *testing.T) {
 		"https://example.invalid/password%253Dactualvalue",
 		"https://example.invalid/password%253dactualvalue",
 		"https://example.invalid/password%252Factualvalue",
+		"https://example.invalid/key=actualvalue",
+		"https://example.invalid/githubToken=actualvalue",
+		"https://example.invalid/githubTOKEN=actualvalue",
+		"https://example.invalid/authorizationhelper=actualvalue",
 		"https://example.invalid/api/%0av1",
 		"https://user:actualvalue@example.invalid/api/v1/mcp",
 		"https://example.invalid/api/v1/mcp?mode=safe",
@@ -295,6 +352,8 @@ func TestHashMCPObservationRejectsUnsafeDecodedURLPaths(t *testing.T) {
 		"https://example.invalid/auth/callback",
 		"https://example.invalid/token/refresh",
 		"https://example.invalid/api%2Dv1/mcp",
+		"https://example.invalid/authorizationHelper=value",
+		"https://example.invalid/AuthorizationHelper=value",
 		"https://example.invalid/api/v1/mcp?query_keys=access_token,mode",
 		"[redacted]",
 	} {

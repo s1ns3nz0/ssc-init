@@ -134,6 +134,11 @@ func TestMCPPunctuationAttachedCredentialsAndCanonicalHeadersAreRedacted(t *test
 		{"proxy authorization header", []string{"Proxy-Authorization: proxy-marker"}, "Proxy-Authorization: [redacted]", []string{"proxy-marker"}},
 		{"split authorization header", []string{"Authorization:", "split-marker"}, "Authorization: [redacted]\x1f[redacted]", []string{"split-marker"}},
 		{"split proxy authorization header", []string{"Proxy-Authorization:", "split-proxy-marker"}, "Proxy-Authorization: [redacted]\x1f[redacted]", []string{"split-proxy-marker"}},
+		{"generic key", []string{"--key=key-marker"}, "--key=[redacted]", []string{"key-marker"}},
+		{"camel token", []string{"--githubToken=camel-marker"}, "--githubToken=[redacted]", []string{"camel-marker"}},
+		{"acronym token", []string{"--githubTOKEN=acronym-marker"}, "--githubTOKEN=[redacted]", []string{"acronym-marker"}},
+		{"legacy helper safelist", []string{"--authorizationHelper=safe"}, "--authorizationHelper=safe", nil},
+		{"legacy capitalized helper safelist", []string{"--AuthorizationHelper=safe"}, "--AuthorizationHelper=safe", nil},
 		{"safe tokenizer", []string{"--tokenizer"}, "--tokenizer", nil},
 	}
 	for _, test := range cases {
@@ -155,6 +160,67 @@ func TestMCPPunctuationAttachedCredentialsAndCanonicalHeadersAreRedacted(t *test
 			assertJSONExcludes(t, result, test.forbidden...)
 			assertJSONExcludes(t, collection, test.forbidden...)
 		})
+	}
+}
+
+func TestMCPStandaloneAndEmptyCombinedCredentialsConsumeFollowingValues(t *testing.T) {
+	config := func(marker string) string {
+		contents, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fixture": map[string]any{
+			"command": "runner",
+			"args": []string{
+				"--auth", marker, "--header", marker, "--token", marker, "--key", marker, "-H", marker, "-e", marker,
+				"--auth:", marker, "--token=", marker, "-H:", marker, "-e=", marker,
+				"Authorization:", marker, "Proxy-Authorization:", marker,
+			},
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(contents)
+	}
+	firstResult, firstCollection := collectMCPConfigEvidence(t, config("next-marker-one"))
+	secondResult, secondCollection := collectMCPConfigEvidence(t, config("next-marker-two"))
+	if len(firstResult.Observations) != 1 || len(secondResult.Observations) != 1 || len(firstCollection.Evidence) != 1 || len(secondCollection.Evidence) != 1 {
+		t.Fatalf("first=%+v firstCollection=%+v second=%+v secondCollection=%+v", firstResult, firstCollection, secondResult, secondCollection)
+	}
+	want := strings.Join([]string{
+		"--auth", "[redacted]", "--header", "[redacted]", "--token", "[redacted]", "--key", "[redacted]", "-H", "[redacted]", "-e", "[redacted]",
+		"--auth:[redacted]", "[redacted]", "--token=[redacted]", "[redacted]", "-H:[redacted]", "[redacted]", "-e=[redacted]", "[redacted]",
+		"Authorization: [redacted]", "[redacted]", "Proxy-Authorization: [redacted]", "[redacted]",
+	}, "\x1f")
+	if got := firstResult.Observations[0].Metadata["args"]; got != want {
+		t.Fatalf("args=%q want=%q", got, want)
+	}
+	if firstCollection.Evidence[0].Status != model.EvidenceComplete || secondCollection.Evidence[0].Status != model.EvidenceComplete || firstCollection.Evidence[0].Digest != secondCollection.Evidence[0].Digest {
+		t.Fatalf("first=%+v second=%+v", firstCollection, secondCollection)
+	}
+	assertJSONExcludes(t, firstResult, "next-marker-one", "next-marker-two")
+	assertJSONExcludes(t, secondResult, "next-marker-one", "next-marker-two")
+}
+
+func TestMCPDanglingCredentialFlagsAreQuarantinedBeforeObservationFinalization(t *testing.T) {
+	servers := map[string]any{"safe": map[string]any{"command": "node"}}
+	for name, argument := range map[string]string{
+		"auth": "--auth", "header": "--header", "token": "--token", "key": "--key", "short-header": "-H", "short-env": "-e",
+		"empty-auth": "--auth:", "empty-token": "--token=", "empty-short-header": "-H:", "empty-short-env": "-e=",
+		"authorization": "Authorization:", "proxy-authorization": "Proxy-Authorization:",
+	} {
+		servers[name] = map[string]any{"command": "node", "args": []string{argument}}
+	}
+	contents, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, collection := collectMCPConfigEvidence(t, string(contents))
+	target := assertTarget(t, result.Targets, "mcp.cursor.user", "")
+	if target.Status != model.TargetPartial || target.Assets != 1 || target.Observations != 1 || !hasErrorCode(target.Errors, "rejected_metadata") {
+		t.Fatalf("target=%+v", target)
+	}
+	if len(result.Assets) != 1 || len(result.Observations) != 1 || result.Observations[0].AssetID != "mcp:cursor:safe" || len(result.LocalEvidenceTargets) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", collection)
 	}
 }
 
@@ -216,11 +282,17 @@ func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
 "encoded-separator":{"url":"https://example.invalid/token%2Fencoded-segment-marker"},
 "double-encoded":{"url":"https://example.invalid/password%253Ddouble-encoded-marker"},
 "double-encoded-lower":{"url":"https://example.invalid/password%253ddouble-lower-marker"},
+"key-assignment":{"url":"https://example.invalid/key=key-path-marker"},
+"camel-assignment":{"url":"https://example.invalid/githubToken=camel-path-marker"},
+"acronym-assignment":{"url":"https://example.invalid/githubTOKEN=acronym-path-marker"},
+"lower-helper-assignment":{"url":"https://example.invalid/authorizationhelper=lower-helper-marker"},
+"helper-safelist":{"url":"https://example.invalid/authorizationHelper=value"},
+"capitalized-helper-safelist":{"url":"https://example.invalid/AuthorizationHelper=value"},
 "control":{"url":"https://example.invalid/api/%0av1"},
 "invalid-escape":{"url":"https://example.invalid/%zz"}
 }}`
 	result, collection := collectMCPConfigEvidence(t, config)
-	if len(result.Observations) != 12 || len(collection.Evidence) != 12 {
+	if len(result.Observations) != 18 || len(collection.Evidence) != 18 {
 		t.Fatalf("observations=%+v collection=%+v", result.Observations, collection)
 	}
 	for _, observation := range result.Observations {
@@ -242,6 +314,14 @@ func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
 			if shape != "https://example.invalid/api%2Dv1/mcp" {
 				t.Fatalf("ordinary escape shape=%q", shape)
 			}
+		case "mcp:cursor:helper-safelist":
+			if shape != "https://example.invalid/authorizationHelper=value" {
+				t.Fatalf("helper safelist shape=%q", shape)
+			}
+		case "mcp:cursor:capitalized-helper-safelist":
+			if shape != "https://example.invalid/AuthorizationHelper=value" {
+				t.Fatalf("capitalized helper safelist shape=%q", shape)
+			}
 		default:
 			if shape != "[redacted]" {
 				t.Fatalf("asset=%q shape=%q", observation.AssetID, shape)
@@ -255,7 +335,8 @@ func TestMCPURLPathsAreDecodedAndSanitizedBeforeSemanticEvidence(t *testing.T) {
 	}
 	assertJSONExcludes(t, result,
 		"userinfo-marker", "query-marker", "fragment-marker", "assignment-marker",
-		"colon-assignment-marker", "encoded-assignment-marker", "encoded-segment-marker", "double-encoded-marker", "double-lower-marker", "%0a", "%zz",
+		"colon-assignment-marker", "encoded-assignment-marker", "encoded-segment-marker", "double-encoded-marker", "double-lower-marker",
+		"key-path-marker", "camel-path-marker", "acronym-path-marker", "lower-helper-marker", "%0a", "%zz",
 	)
 }
 
