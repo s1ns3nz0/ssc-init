@@ -46,8 +46,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 	}
 	repositoryRoot := repositoryRoot(t)
 	script := filepath.Join(repositoryRoot, "scripts", "build-darwin.sh")
-	revision := worktreeRevision(t, repositoryRoot)
-	wantVersion := "dev+git." + revision
+	wantVersion := expectedReleaseVersion(t, repositoryRoot)
 	runBuild := func() map[string][32]byte {
 		t.Helper()
 		command := exec.Command("sh", script)
@@ -67,8 +66,8 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 				t.Fatalf("%s contains absolute repository path %q", name, repositoryRoot)
 			}
 			if name != "checksums.txt" {
-				if !bytes.Contains(content, []byte(revision)) {
-					t.Fatalf("%s does not contain worktree revision %q", name, revision)
+				if !bytes.Contains(content, []byte(wantVersion)) {
+					t.Fatalf("%s does not contain release version %q", name, wantVersion)
 				}
 				assertNoAutomaticVCSSettings(t, path)
 			}
@@ -200,6 +199,68 @@ func TestBuildScriptRejectsInvalidRevision(t *testing.T) {
 	}
 }
 
+func TestBuildScriptVersionsFromExactTag(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		want func(revision string) string
+	}{
+		{
+			name: "release tag versions the binary",
+			tag:  "v9.9.9",
+			want: func(string) string { return "v9.9.9" },
+		},
+		{
+			name: "non-release tag falls back to commit version",
+			tag:  "experiment",
+			want: func(revision string) string { return "dev+git." + revision },
+		},
+		{
+			name: "untagged commit keeps commit version",
+			tag:  "",
+			want: func(revision string) string { return "dev+git." + revision },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, script, environment := newVersionRecordingReleaseRepository(t)
+			if test.tag != "" {
+				runGit(t, root, "tag", "-a", test.tag, "-m", test.tag)
+			}
+			command := exec.Command("sh", script)
+			command.Dir = t.TempDir()
+			command.Env = environment
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("build failed: %v\n%s", err, output)
+			}
+			recorded, err := os.ReadFile(filepath.Join(root, "dist", "ssc-init-darwin-arm64"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "-X main.version=" + test.want(worktreeRevision(t, root))
+			if !strings.Contains(string(recorded), want) {
+				t.Fatalf("linker flags missing %q:\n%s", want, recorded)
+			}
+		})
+	}
+}
+
+// newVersionRecordingReleaseRepository builds the isolated fixture with a fake
+// go binary that records its full argument list into the output artifact, so
+// tests can assert the exact linker version flag the script passed.
+func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []string) {
+	t.Helper()
+	root, script, _ := newIsolatedReleaseRepository(t)
+	binDirectory := t.TempDir()
+	fakeGo := filepath.Join(binDirectory, "go")
+	fakeGoSource := "#!/bin/sh\noutput=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
+	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
+}
+
 func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	t.Helper()
 	root := t.TempDir()
@@ -252,6 +313,22 @@ func environmentWith(name, value string) []string {
 		}
 	}
 	return append(environment, prefix+value)
+}
+
+// expectedReleaseVersion mirrors the build script's version selection: an
+// exact v-prefixed tag with a safe character set versions the binary, anything
+// else falls back to the committed revision.
+func expectedReleaseVersion(t *testing.T, repositoryRoot string) string {
+	t.Helper()
+	command := exec.Command("git", "-C", repositoryRoot, "describe", "--tags", "--exact-match")
+	output, err := command.Output()
+	if err == nil {
+		tag := strings.TrimSpace(string(output))
+		if regexp.MustCompile(`^v[0-9][0-9A-Za-z.+-]*$`).MatchString(tag) {
+			return tag
+		}
+	}
+	return "dev+git." + worktreeRevision(t, repositoryRoot)
 }
 
 func worktreeRevision(t *testing.T, repositoryRoot string) string {

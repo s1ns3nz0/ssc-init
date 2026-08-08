@@ -44,6 +44,15 @@ if [ "${#REVISION}" -ne 40 ]; then
 fi
 
 VERSION="dev+git.$REVISION"
+EXACT_TAG=$(git -C "$REPOSITORY_ROOT" describe --tags --exact-match 2>/dev/null) || EXACT_TAG=
+case "$EXACT_TAG" in
+	v[0-9]*)
+		case "$EXACT_TAG" in
+			*[!0-9A-Za-z.+-]*) ;;
+			*) VERSION="$EXACT_TAG" ;;
+		esac
+		;;
+esac
 LINKER_FLAGS="-s -w -buildid= -X main.version=$VERSION"
 
 mkdir -p "$DIST_DIR"

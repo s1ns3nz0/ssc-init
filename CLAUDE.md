@@ -19,7 +19,7 @@ go test ./scripts -count=1                             # build-script tests (nee
 go mod download && sh scripts/build-darwin.sh          # release build → dist/ (arm64 + amd64 + checksums.txt)
 ```
 
-The release build script disables network/toolchain downloads and requires a clean tracked worktree; binaries report `dev+git.<full-commit>` from committed HEAD.
+The release build script disables network/toolchain downloads and requires a clean tracked worktree; binaries report the exact `v*` tag when HEAD is tagged, else `dev+git.<full-commit>` from committed HEAD.
 
 ## Architecture
 
