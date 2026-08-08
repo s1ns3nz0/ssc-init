@@ -80,11 +80,39 @@ const (
 	HashUnavailable HashStatus = "unavailable"
 )
 
+// ScanStatus is the closed set of overall scan outcomes (design §11).
+type ScanStatus string
+
+const (
+	// ScanComplete means every collector and every accepted evidence target
+	// reached a terminal successful result.
+	ScanComplete ScanStatus = "complete"
+	// ScanPartial means discovery or evidence coverage is incomplete; the
+	// unscanned targets are named in coverage.
+	ScanPartial ScanStatus = "partial"
+	// ScanStale means the scan completed but its inputs are past their
+	// freshness window. Unreachable until the TI manager ships (design §7.2);
+	// present so the vocabulary is complete and cannot be reordered later.
+	ScanStale ScanStatus = "stale"
+	// ScanBlocked means the scan could not produce a usable result at all.
+	ScanBlocked ScanStatus = "blocked"
+)
+
+// Valid reports whether status is one of the four documented outcomes.
+func (s ScanStatus) Valid() bool {
+	switch s {
+	case ScanComplete, ScanPartial, ScanStale, ScanBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
 // ScanResult contains the complete scan result.
 type ScanResult struct {
 	SchemaVersion    string            `json:"schemaVersion"`
 	ScanID           string            `json:"scanId"`
-	Status           string            `json:"status"`
+	Status           ScanStatus        `json:"status"`
 	StartedAt        time.Time         `json:"startedAt"`
 	FinishedAt       time.Time         `json:"finishedAt"`
 	Coverage         []CollectorResult `json:"coverage"`

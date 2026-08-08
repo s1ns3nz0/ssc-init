@@ -33,7 +33,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	for field, value := range map[string]string{
 		"scan schema version": scan.SchemaVersion,
 		"scan id":             scan.ScanID,
-		"scan status":         scan.Status,
+		"scan status":         string(scan.Status),
 	} {
 		if err := validateRequiredString(field, value); err != nil {
 			return err

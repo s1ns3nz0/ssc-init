@@ -12,7 +12,7 @@ import (
 type baselinePayload struct {
 	SchemaVersion    string                  `json:"schemaVersion"`
 	ScanID           string                  `json:"scanId"`
-	Status           string                  `json:"status"`
+	Status           model.ScanStatus        `json:"status"`
 	StartedAt        time.Time               `json:"startedAt"`
 	FinishedAt       time.Time               `json:"finishedAt"`
 	Scope            model.ScanScope         `json:"scope"`

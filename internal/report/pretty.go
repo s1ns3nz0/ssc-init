@@ -40,7 +40,7 @@ func WritePretty(writer io.Writer, scan model.ScanResult, inventory model.Invent
 	printer.line("SSC Init baseline scan")
 	printer.field("schema", scan.SchemaVersion)
 	printer.field("scan", scan.ScanID)
-	printer.field("status", scan.Status)
+	printer.field("status", string(scan.Status))
 	printer.field("started", scan.StartedAt.UTC().Format(time.RFC3339))
 	printer.field("finished", scan.FinishedAt.UTC().Format(time.RFC3339))
 	if scan.Scope.Platform != "" {

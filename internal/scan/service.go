@@ -225,19 +225,19 @@ func buildScope(environment collector.Environment) model.ScanScope {
 	return scope
 }
 
-func overallStatus(results []model.CollectorResult, current model.Inventory, evidenceStatus model.CoverageStatus) string {
+func overallStatus(results []model.CollectorResult, current model.Inventory, evidenceStatus model.CoverageStatus) model.ScanStatus {
 	if evidenceStatus != model.CoverageComplete {
-		return "partial"
+		return model.ScanPartial
 	}
 	if len(results) == 0 || len(current.Errors) > 0 {
-		return "partial"
+		return model.ScanPartial
 	}
 	for _, result := range results {
 		if result.Status != model.CoverageComplete {
-			return "partial"
+			return model.ScanPartial
 		}
 	}
-	return "complete"
+	return model.ScanComplete
 }
 
 func randomUUIDv4() string {

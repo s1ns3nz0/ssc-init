@@ -67,6 +67,21 @@ func TestProjectEvidenceSubjectsAreClosedToExactCatalog(t *testing.T) {
 	}
 }
 
+func TestScanStatusVocabularyIsClosed(t *testing.T) {
+	for _, status := range []ScanStatus{
+		ScanComplete, ScanPartial, ScanStale, ScanBlocked,
+	} {
+		if !status.Valid() {
+			t.Fatalf("documented status %q rejected", status)
+		}
+	}
+	for _, invalid := range []ScanStatus{"", "COMPLETE", "ok", "failed", "unknown"} {
+		if invalid.Valid() {
+			t.Fatalf("undocumented status %q accepted", invalid)
+		}
+	}
+}
+
 func TestScanV3MarshalsNonNilEmptyEvidenceContracts(t *testing.T) {
 	value := struct {
 		Scan      ScanResult `json:"scan"`
