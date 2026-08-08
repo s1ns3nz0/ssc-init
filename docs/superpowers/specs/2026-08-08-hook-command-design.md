@@ -52,15 +52,16 @@ Rules:
 - Privacy identical to `--pretty`: asset type, name, version, host/source, and
   closed-vocabulary statuses only. Never digests, paths, leaf names, link
   targets, secrets, or file contents.
-- Asset and observation rows are rendered from the delta `entityId` structure
-  (`<type>:<host>:<name>@<version>`), so removed entities render without
-  needing the previous inventory. Evidence IDs are opaque
-  (`evidence:sha256:…`); added/changed evidence resolves its asset name
-  through the current inventory and is **grouped per asset with a count**
-  (collapsing the one-time cache-warm flood); removed evidence that cannot be
-  resolved is summarized as one `removed  N evidence records` line.
-- Deterministic ordering: kind (added, changed, removed), then entity type,
-  then name.
+- Asset rows are rendered from the delta `entityId` structure
+  (`<type>:<host>:<name>@<version>`), so removed assets render without
+  needing the previous inventory. Observation and evidence IDs are opaque
+  hashes; added/changed ones resolve their asset name through the current
+  inventory and are **grouped per asset with a count** (collapsing the
+  one-time cache-warm flood); removed ones that cannot be resolved are
+  summarized as one `removed  N observation/evidence records` line per
+  entity type.
+- Deterministic ordering: kind (added, changed, removed), then rendered
+  label.
 - Hard cap: 20 detail rows, then `…and N more changes`.
 - The `issues:` line renders only when drift output is already being printed
   (an empty delta stays fully silent even if non-complete evidence exists) and
@@ -71,9 +72,10 @@ Rules:
 ## Implementation shape
 
 - `internal/cli/options.go`: accept `{"hook"}` (single argument form).
-- `internal/report/hook.go`: `WriteHookSummary(w io.Writer, scan
-  model.ScanResult, inventory model.Inventory, delta model.Delta) error` —
-  pure renderer, no I/O beyond the writer, deterministic.
+- `internal/report/hook.go`: `WriteHookSummary(w io.Writer, inventory
+  model.Inventory, delta model.Delta) error` — pure renderer, no I/O beyond
+  the writer, deterministic. The scan result is not needed: the issues line
+  derives from inventory evidence statuses.
 - `internal/cli/run.go`: `hook` case calls the existing `BaselineScanner`,
   then `WriteHookSummary`; failure path prints the fixed stderr line and
   returns 0.
