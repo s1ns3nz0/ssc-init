@@ -105,7 +105,7 @@ func runAdversarialBaseline(t *testing.T, options adversarialOptions) adversaria
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	scanResult, inventory, delta, scanErr := service.Baseline(ctx)
+	scanResult, inventory, delta, _, scanErr := service.Baseline(ctx)
 	result := adversarialBaseline{Scan: scanResult, Inventory: inventory, Delta: delta, Err: scanErr}
 	if scanErr == nil {
 		var output bytes.Buffer

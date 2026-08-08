@@ -75,7 +75,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	})
 
-	result, inventory, delta, err := service.Baseline(context.Background())
+	result, inventory, delta, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestBaselineBuildsAndPersistsV3ScopeAndDropsLocalTargets(t *testing.T) {
 	}, env)
 	projectRoots[0] = "$HOME/Mutated"
 
-	result, _, _, err := service.Baseline(context.Background())
+	result, _, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestBaselineRejectsInvalidInjectedIDBeforePersistence(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{}, snapshots, fixedTime, func() string { return "not-a-uuid" })
 
-	if _, _, _, err := service.Baseline(context.Background()); err == nil {
+	if _, _, _, _, err := service.Baseline(context.Background()); err == nil {
 		t.Fatal("Baseline error=nil")
 	}
 	if len(snapshots.saved) != 0 {
@@ -186,7 +186,7 @@ func TestBaselineDefaultIDIsRFC4122Version4(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{}, snapshots, fixedTime, nil)
 
-	result, _, _, err := service.Baseline(context.Background())
+	result, _, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestBaselinePersistsEmptyCoverageAsPartial(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	})
 
-	result, _, _, err := service.Baseline(context.Background())
+	result, _, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestBaselineClampsBackwardFinishedTime(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	})
 
-	result, _, _, err := service.Baseline(context.Background())
+	result, _, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestBaselineRejectsZeroClockBeforePersistence(t *testing.T) {
 				return "00000000-0000-4000-8000-000000000001"
 			})
 
-			if _, _, _, err := service.Baseline(context.Background()); err == nil {
+			if _, _, _, _, err := service.Baseline(context.Background()); err == nil {
 				t.Fatal("Baseline error=nil")
 			}
 			if len(snapshots.saved) != 0 {
@@ -271,7 +271,7 @@ func TestBaselineRejectsMultipleEnvironments(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{}, snapshots, fixedTime, nil, collector.Environment{}, collector.Environment{})
 
-	if _, _, _, err := service.Baseline(context.Background()); err == nil {
+	if _, _, _, _, err := service.Baseline(context.Background()); err == nil {
 		t.Fatal("Baseline error=nil")
 	}
 	if len(snapshots.saved) != 0 {
@@ -301,7 +301,7 @@ func TestBaselineFollowsProjectLocalTargetsAndReplacesInitialMCPResult(t *testin
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestBaselineClearsRuntimeStateOfReplacedInitialMCPResult(t *testing.T) {
 	}}
 	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{mcpish}}, &memorySnapshots{}, fixedTime, fixedUUID, testEnvironment(t))
 
-	if _, _, _, err := service.Baseline(context.Background()); err != nil {
+	if _, _, _, _, err := service.Baseline(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !issuerCleared || !provenanceCleared {
@@ -374,7 +374,7 @@ func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestBaselineParsesProjectLocalTargetsAndClearsRawPaths(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestBaselineOpensExternalProjectMCPThroughFreshVerifiedRoot(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestBaselineCopiesOnlyValidatedProjectLocalTargets(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +737,7 @@ func TestBaselineCollectsEvidenceAfterGraphNormalization(t *testing.T) {
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.fileCollector("agents")}}
 	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
 
-	scanResult, inventoryResult, delta, err := service.Baseline(context.Background())
+	scanResult, inventoryResult, delta, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -812,7 +812,7 @@ func TestBaselineRejectsEvidenceForObservationRemovedByGraphNormalizationWithout
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{orphanCollector}}, snapshots, fixedTime, fixedUUID, env)
 
-	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	scanResult, inventoryResult, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,7 +856,7 @@ func TestBaselineProjectMCPFollowUpPreservesProjectsAndMCPEvidenceTargets(t *tes
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{projects.New(roots)}}, snapshots, fixedTime, fixedUUID, env)
 
-	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	scanResult, inventoryResult, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,7 +897,7 @@ func TestBaselineEvidenceChangeContributesToDelta(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{mcpSemanticCollector(t)}}
 
-	_, firstInventory, firstDelta, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
+	_, firstInventory, firstDelta, _, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,7 +916,7 @@ func TestBaselineEvidenceChangeContributesToDelta(t *testing.T) {
 	evidenceID := firstInventory.Evidence[0].ID
 	snapshots.latest.Inventory.Evidence[0].Digest = strings.Repeat("f", 64)
 
-	_, _, secondDelta, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
+	_, _, secondDelta, _, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestBaselinePartialEvidenceMakesCompleteDiscoveryPartial(t *testing.T) {
 	snapshots := &memorySnapshots{}
 	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{presetCollector}}, snapshots, fixedTime, fixedUUID)
 
-	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	scanResult, inventoryResult, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +974,7 @@ func TestBaselineZeroAcceptedTargetsYieldsCompleteEmptyEvidenceCoverage(t *testi
 	}}
 	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID)
 
-	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	scanResult, inventoryResult, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1016,7 @@ func TestBaselineCacheHandoffIsBestEffortAfterSave(t *testing.T) {
 		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
 		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
 
-		scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+		scanResult, inventoryResult, _, _, err := service.Baseline(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1037,7 +1037,7 @@ func TestBaselineCacheHandoffIsBestEffortAfterSave(t *testing.T) {
 		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
 		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
 
-		if _, _, _, err := service.Baseline(context.Background()); err == nil {
+		if _, _, _, _, err := service.Baseline(context.Background()); err == nil {
 			t.Fatal("Baseline error=nil")
 		}
 		if len(snapshots.stored) != 0 {
@@ -1050,7 +1050,7 @@ func TestBaselineCacheHandoffIsBestEffortAfterSave(t *testing.T) {
 		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
 		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
 
-		_, inventoryResult, _, err := service.Baseline(context.Background())
+		_, inventoryResult, _, _, err := service.Baseline(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}

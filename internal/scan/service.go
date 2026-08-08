@@ -64,29 +64,32 @@ func NewService(orchestrator collector.Orchestrator, snapshots SnapshotStore, no
 }
 
 // Baseline collects, normalizes, compares, and atomically saves one snapshot.
-func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+// The reported bool is true when no previous snapshot existed — the first run
+// on this machine. A delta cannot carry that fact, because a first snapshot
+// recording zero assets makes the run after it look like a first run.
+func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
 	if s == nil || s.snapshots == nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("scan service is not configured")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("scan service is not configured")
 	}
 	if s.configErr != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, s.configErr
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, s.configErr
 	}
 	if err := ctx.Err(); err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 
 	startedAt := s.now().UTC()
 	if startedAt.IsZero() {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("capture scan start time")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("capture scan start time")
 	}
 	results := s.orchestrator.Collect(ctx, s.environment)
 	if err := ctx.Err(); err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 	if s.hasEnv {
 		results = s.collectProjectMCP(ctx, results)
 		if err := ctx.Err(); err != nil {
-			return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
+			return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 		}
 	}
 	for index := range results {
@@ -99,7 +102,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	}
 	collection := s.collectLocalEvidence(ctx, current, results)
 	if err := ctx.Err(); err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 	current.Evidence = append(current.Evidence, collection.Evidence...)
 	sort.SliceStable(current.Evidence, func(i, j int) bool {
@@ -108,7 +111,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 
 	previousSnapshot, exists, err := s.snapshots.LatestSnapshot(ctx)
 	if err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("load previous inventory")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("load previous inventory")
 	}
 	previous := previousSnapshot.Inventory
 	if !exists {
@@ -118,11 +121,11 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 
 	scanID := s.newID()
 	if !validUUIDv4(scanID) {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("create scan identifier")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("create scan identifier")
 	}
 	finishedAt := s.now().UTC()
 	if finishedAt.IsZero() {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("capture scan finish time")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("capture scan finish time")
 	}
 	if finishedAt.Before(startedAt) {
 		finishedAt = startedAt
@@ -138,12 +141,12 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		Scope:            s.environment.Scope,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("save baseline snapshot")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("save baseline snapshot")
 	}
 	if writer, ok := s.snapshots.(evidence.CacheWriter); ok && len(collection.CacheWrites) > 0 {
 		_ = writer.StoreContentCache(ctx, collection.CacheWrites)
 	}
-	return result, current, delta, nil
+	return result, current, delta, !exists, nil
 }
 
 // collectLocalEvidence runs the bounded local evidence engine against the

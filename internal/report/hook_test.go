@@ -59,10 +59,10 @@ func TestWriteHookSummaryRendersLadder(t *testing.T) {
 	}}
 
 	var first, second bytes.Buffer
-	if err := report.WriteHookSummary(&first, inventory, delta); err != nil {
+	if err := report.WriteHookSummary(&first, inventory, delta, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := report.WriteHookSummary(&second, inventory, delta); err != nil {
+	if err := report.WriteHookSummary(&second, inventory, delta, false); err != nil {
 		t.Fatal(err)
 	}
 	if first.String() != second.String() {
@@ -85,7 +85,9 @@ func TestWriteHookSummaryRendersLadder(t *testing.T) {
 	}
 }
 
-func TestWriteHookSummaryReportsInitialBaselineWithoutRungs(t *testing.T) {
+// firstBaselineFixture is the state of a machine whose very first scan found
+// one asset: the delta is all additions and covers the whole inventory.
+func firstBaselineFixture() (model.Inventory, model.Delta) {
 	inventory := model.Inventory{
 		Assets:   []model.Asset{{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"}},
 		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", Status: model.EvidenceComplete}},
@@ -94,8 +96,13 @@ func TestWriteHookSummaryReportsInitialBaselineWithoutRungs(t *testing.T) {
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:docx"},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
 	}}
+	return inventory, delta
+}
+
+func TestWriteHookSummaryReportsInitialBaselineWithoutRungs(t *testing.T) {
+	inventory, delta := firstBaselineFixture()
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
+	if err := report.WriteHookSummary(&buffer, inventory, delta, true); err != nil {
 		t.Fatal(err)
 	}
 	output := buffer.String()
@@ -107,14 +114,35 @@ func TestWriteHookSummaryReportsInitialBaselineWithoutRungs(t *testing.T) {
 	}
 }
 
-func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
-	inventory, _ := hookFixture()
+// TestWriteHookSummaryReportsFirstAssetAfterEmptyBaseline covers the machine
+// whose first snapshot recorded nothing: the delta then looks identical to an
+// initial baseline, but a previous snapshot exists, so the first tool ever
+// installed is a genuine NEW and must climb the ladder.
+func TestWriteHookSummaryReportsFirstAssetAfterEmptyBaseline(t *testing.T) {
+	inventory, delta := firstBaselineFixture()
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, inventory, model.Delta{}); err != nil {
+	if err := report.WriteHookSummary(&buffer, inventory, delta, false); err != nil {
 		t.Fatal(err)
 	}
-	if buffer.Len() != 0 {
-		t.Fatalf("expected silence, got:\n%s", buffer.String())
+	output := buffer.String()
+	if strings.Contains(output, "initial baseline") {
+		t.Fatalf("a recorded predecessor must not be called an initial baseline:\n%s", output)
+	}
+	if !regexp.MustCompile(`(?m)^  NEW\s+agent-skill\s+docx \(claude\)$`).MatchString(output) {
+		t.Fatalf("first asset after an empty baseline must be NEW:\n%s", output)
+	}
+}
+
+func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
+	inventory, _ := hookFixture()
+	for _, firstRun := range []bool{false, true} {
+		var buffer bytes.Buffer
+		if err := report.WriteHookSummary(&buffer, inventory, model.Delta{}, firstRun); err != nil {
+			t.Fatal(err)
+		}
+		if buffer.Len() != 0 {
+			t.Fatalf("expected silence (firstRun=%v), got:\n%s", firstRun, buffer.String())
+		}
 	}
 }
 
@@ -132,7 +160,7 @@ func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 				EntityID: "mcp:cursor:" + name})
 	}
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
+	if err := report.WriteHookSummary(&buffer, inventory, delta, false); err != nil {
 		t.Fatal(err)
 	}
 	output := buffer.String()
@@ -155,7 +183,7 @@ func TestWriteHookSummaryIsSilentWhenEveryChangeIsUnattributable(t *testing.T) {
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:gone"},
 	}}
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
+	if err := report.WriteHookSummary(&buffer, inventory, delta, false); err != nil {
 		t.Fatal(err)
 	}
 	if buffer.Len() != 0 {

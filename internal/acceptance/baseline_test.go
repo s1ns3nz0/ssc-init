@@ -52,7 +52,7 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 		env,
 	)
 
-	result, inventory, delta, err := service.Baseline(context.Background())
+	result, inventory, delta, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

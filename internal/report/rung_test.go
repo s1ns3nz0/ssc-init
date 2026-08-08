@@ -212,7 +212,7 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 	}}
 
 	var hook, pretty bytes.Buffer
-	if err := WriteHookSummary(&hook, inventory, delta); err != nil {
+	if err := WriteHookSummary(&hook, inventory, delta, false); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
 	if err := WritePretty(&pretty, model.ScanResult{}, inventory, delta); err != nil {

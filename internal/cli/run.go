@@ -11,9 +11,10 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 )
 
-// BaselineScanner performs and persists one baseline scan.
+// BaselineScanner performs and persists one baseline scan. The reported bool
+// is true when no previous snapshot existed, which only the scanner knows.
 type BaselineScanner interface {
-	Baseline(context.Context) (model.ScanResult, model.Inventory, model.Delta, error)
+	Baseline(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error)
 }
 
 // StatusReader loads the latest persisted scan and inventory, if one exists.
@@ -67,7 +68,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "baseline scan is unavailable")
 			return 1
 		}
-		scan, inventory, delta, err := a.BaselineScanner.Baseline(ctx)
+		scan, inventory, delta, _, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "baseline scan failed")
 			return 1
@@ -152,12 +153,12 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
-		_, inventory, delta, err := a.BaselineScanner.Baseline(ctx)
+		_, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
-		if err := report.WriteHookSummary(stdout, inventory, delta); err != nil {
+		if err := report.WriteHookSummary(stdout, inventory, delta, firstRun); err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}

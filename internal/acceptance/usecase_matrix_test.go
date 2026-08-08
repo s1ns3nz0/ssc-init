@@ -975,7 +975,7 @@ func runIsolatedBaseline(t *testing.T, options baselineOptions) isolatedBaseline
 		func() string { return scanID },
 		environment,
 	)
-	scanResult, inventory, delta, err := service.Baseline(context.Background())
+	scanResult, inventory, delta, _, err := service.Baseline(context.Background())
 	if err != nil {
 		_ = snapshots.Close()
 		t.Fatal(err)

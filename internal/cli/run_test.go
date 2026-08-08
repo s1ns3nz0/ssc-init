@@ -61,17 +61,17 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
-type baselineScannerFunc func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error)
+type baselineScannerFunc func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error)
 
-func (f baselineScannerFunc) Baseline(ctx context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+func (f baselineScannerFunc) Baseline(ctx context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
 	return f(ctx)
 }
 
 func TestRunOptionsUsesAlreadyParsedCommand(t *testing.T) {
 	called := false
-	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
 		called = true
-		return model.ScanResult{}, model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}, model.Delta{Changes: []model.Change{}}, nil
+		return model.ScanResult{}, model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}, model.Delta{Changes: []model.Change{}}, true, nil
 	})}
 	var out, errOut bytes.Buffer
 	options := Options{
@@ -147,8 +147,8 @@ func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
 		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidencePartial,
 			Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}}},
 	}
-	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
-		return scanResult, inventory, model.Delta{}, nil
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scanResult, inventory, model.Delta{}, true, nil
 	})}
 
 	var out, errOut bytes.Buffer
@@ -354,6 +354,40 @@ func TestOperationalCommandsFailGenericallyWhenDependencyMissing(t *testing.T) {
 	}
 }
 
+// TestHookPassesFirstRunToTheRenderer proves the scanner's first-run signal —
+// not a guess made from the delta — decides between the initial-baseline line
+// and the ladder. Both cases send an identical all-additions delta.
+func TestHookPassesFirstRunToTheRenderer(t *testing.T) {
+	inventory := model.Inventory{Assets: []model.Asset{
+		{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
+	}}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:docx"},
+	}}
+	scanner := func(firstRun bool) App {
+		return App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			return model.ScanResult{}, inventory, delta, firstRun, nil
+		})}
+	}
+
+	var out, errOut bytes.Buffer
+	if code := scanner(true).Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("first run: code=%d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "initial baseline recorded") || strings.Contains(out.String(), "NEW") {
+		t.Fatalf("first run must report an initial baseline without rungs:\n%s", out.String())
+	}
+
+	out.Reset()
+	if code := scanner(false).Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("later run: code=%d stderr=%q", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "initial baseline") ||
+		!regexp.MustCompile(`(?m)^  NEW\s+agent-skill\s+docx \(claude\)$`).MatchString(out.String()) {
+		t.Fatalf("a run with a predecessor must climb the ladder:\n%s", out.String())
+	}
+}
+
 func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	drift := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:alpha@1.0.0"}}}
 	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}
@@ -366,8 +400,8 @@ func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	}}
 
 	var out, errOut bytes.Buffer
-	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
-		return scan, drifted, drift, nil
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scan, drifted, drift, false, nil
 	})}
 	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
 		t.Fatalf("drift: code=%d stderr=%q", code, errOut.String())
@@ -378,15 +412,15 @@ func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	}
 
 	out.Reset()
-	clean := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
-		return scan, model.Inventory{}, model.Delta{}, nil
+	clean := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scan, model.Inventory{}, model.Delta{}, false, nil
 	})}
 	if code := clean.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 || out.Len() != 0 || errOut.Len() != 0 {
 		t.Fatalf("clean: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 
-	failing := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("store locked at /private/path")
+	failing := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("store locked at /private/path")
 	})}
 	out.Reset()
 	errOut.Reset()

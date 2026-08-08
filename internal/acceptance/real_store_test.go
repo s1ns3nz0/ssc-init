@@ -53,7 +53,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 		return "00000000-0000-4000-8000-000000000001"
 	}, env)
 
-	result, inventory, delta, err := service.Baseline(context.Background())
+	result, inventory, delta, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestBaselinePersistsSameMCPServerFromTwoProjectsWithRealStore(t *testing.T)
 		Collectors: []collector.Collector{projects.New(roots)},
 	}, snapshots, env.Now, func() string { return "00000000-0000-4000-8000-000000000002" }, env)
 
-	result, inventory, _, err := service.Baseline(context.Background())
+	result, inventory, _, _, err := service.Baseline(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

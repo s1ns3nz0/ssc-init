@@ -116,6 +116,19 @@ prints exactly one line and no rungs:
 ssc-init: initial baseline recorded — 314 assets, 934 evidence records, 11 unverified
 ```
 
+"First run" is a fact the scan service holds — `LatestSnapshot` reported no
+previous snapshot — and it is plumbed to the renderer as a flag. It is **not**
+inferred from the delta. The original inference ("every change is an addition
+and the additions cover the whole inventory") is wrong whenever the first
+baseline recorded zero assets: on a clean machine the run that finds the first
+tool ever installed produces exactly that delta, and the inference swallowed a
+genuine `NEW` behind a line claiming to be the initial baseline — the opposite
+of the rationale above. Only the absence of a predecessor suppresses the
+ladder; a predecessor recording zero assets does not.
+
+An empty delta stays byte-silent either way: silence is decided before the
+first-run flag is consulted.
+
 ## Required upstream fix: cache provenance must not be a change signal
 
 `internal/inventory/graph.go:245` `canonicalEvidence` marshals the whole
@@ -150,9 +163,15 @@ and are corrected in the same change.
 
 ## Data available to the renderer
 
-`WriteHookSummary(inventory, delta)` stays a pure function of the current
-inventory and the delta. No previous inventory is plumbed through, so the
-`BaselineScanner` interface is unchanged.
+`WriteHookSummary(inventory, delta, firstRun)` is a pure function of the
+current inventory, the delta, and one boolean the scan service already knows:
+whether a previous snapshot existed. No previous inventory is plumbed through.
+
+Carrying `firstRun` widens the internal `BaselineScanner` interface and
+`scan.Service.Baseline` by one return value. That is deliberate: it is an
+internal Go interface, not a published contract, and the alternative — a field
+on `model.ScanResult` or `model.Delta` — would change a serialized, persisted
+`ssc-init.scan.v3` shape to carry a renderer hint.
 
 `UNVERIFIED` is therefore approximate: it fires on added/changed evidence
 whose current status is not `complete`, which conflates "was complete, now

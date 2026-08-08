@@ -12,14 +12,20 @@ const maxHookDetailRows = 20
 // WriteHookSummary renders an advisory severity ladder. An empty delta writes
 // nothing. Output carries asset types, names, hosts, versions, rungs, and
 // counts only — never digests, paths, or contents, and never a safety verdict.
-func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.Delta) error {
+//
+// firstRun says whether the scan found no previous snapshot at all. On a first
+// run "NEW" would describe the absence of history, not the machine, so the run
+// reports counts instead. The delta cannot answer this — a first snapshot that
+// recorded zero assets makes the next run look identical — so the caller must
+// pass the fact.
+func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.Delta, firstRun bool) error {
 	if len(delta.Changes) == 0 {
 		return nil
 	}
 	printer := &prettyPrinter{writer: writer}
 	unverified := standingUnverified(inventory)
 
-	if isInitialBaseline(inventory, delta) {
+	if firstRun {
 		printer.line(fmt.Sprintf("ssc-init: initial baseline recorded — %d assets, %d evidence records, %d unverified",
 			len(inventory.Assets), len(inventory.Evidence), unverified))
 		return printer.err
@@ -56,20 +62,4 @@ func standingUnverified(inventory model.Inventory) int {
 		}
 	}
 	return count
-}
-
-// isInitialBaseline reports whether this delta is the first snapshot: every
-// change is an addition and every asset in the inventory is among them. On a
-// first run "NEW" would describe the absence of history, not the machine.
-func isInitialBaseline(inventory model.Inventory, delta model.Delta) bool {
-	addedAssets := 0
-	for _, change := range delta.Changes {
-		if change.Kind != model.ChangeAdded {
-			return false
-		}
-		if change.Entity == model.ChangeEntityAsset {
-			addedAssets++
-		}
-	}
-	return addedAssets == len(inventory.Assets)
 }
