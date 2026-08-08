@@ -122,6 +122,7 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
+	reclaimPrunedSpace(ctx, db)
 	return secureSQLiteFiles(s.path, guard)
 }
 
@@ -171,6 +172,43 @@ func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
 		return fmt.Errorf("prune expired snapshots: %w", err)
 	}
 	return nil
+}
+
+// Reclamation thresholds. Deleting rows only moves pages onto SQLite's
+// freelist, where they are reusable but still occupy disk against the design's
+// 500 MB storage budget. A full rewrite is the only way to hand them back
+// without auto_vacuum, which cannot be enabled on the already-shipped stores
+// without that same rewrite, so it is gated instead of scheduled: reclaim only
+// when the waste is both absolutely and proportionally worth one. Steady-state
+// saves free about as many pages as they consume and stay under both bounds.
+const (
+	reclaimMinimumFreePages = 256 // 1 MB at SQLite's 4 KiB default page size.
+	reclaimFreePageDivisor  = 4   // ... and at least a quarter of the file.
+)
+
+// reclaimPrunedSpace returns pruned pages to the filesystem. It runs after the
+// snapshot transaction commits because VACUUM cannot run inside one, and it is
+// best effort: the snapshot is already durable, so a failure here must not
+// report a successful save as failed. Nothing is lost by giving up either — the
+// freelist that tripped the threshold survives, so the next save retries.
+func reclaimPrunedSpace(ctx context.Context, db *sql.DB) {
+	var pageCount, freePages int
+	if err := db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return
+	}
+	if err := db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		return
+	}
+	if freePages < reclaimMinimumFreePages || freePages*reclaimFreePageDivisor < pageCount {
+		return
+	}
+	if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
+		return
+	}
+	// VACUUM writes the rewritten database through the write-ahead log, so the
+	// freed space leaves the filesystem only once the log is checkpointed and
+	// truncated. Without this the footprint grows instead of shrinking.
+	_, _ = db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
 }
 
 // LatestInventory loads the inventory from the newest complete snapshot.

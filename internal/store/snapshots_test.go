@@ -2130,3 +2130,66 @@ func TestSaveScanRetentionLeavesNoOrphanRows(t *testing.T) {
 		t.Fatalf("evidence table holds %d rows, want 4 (one surviving snapshot)", rows)
 	}
 }
+
+// bulkySnapshot pads a valid v3 snapshot with filler assets so each saved
+// snapshot occupies enough database pages for a file-size change to be
+// observable at page granularity.
+func bulkySnapshot(t *testing.T, scanID string, finishedAt time.Time) (model.ScanResult, model.Inventory) {
+	t.Helper()
+	scan, inventory := validV3Snapshot(t, scanID)
+	scan.StartedAt, scan.FinishedAt = finishedAt.Add(-time.Second), finishedAt
+	filler := strings.Repeat("f", 512)
+	for index := 0; index < 200; index++ {
+		inventory.Assets = append(inventory.Assets, model.Asset{
+			ID:       fmt.Sprintf("filler-%s-%d", scanID, index),
+			Type:     model.AssetAgentPlugin,
+			Name:     fmt.Sprintf("filler-%d", index),
+			Metadata: map[string]string{"note": filler},
+		})
+	}
+	return scan, inventory
+}
+
+// storeDiskBytes reports the store's full on-disk footprint, which is what the
+// design's storage budget bounds: the main database plus its write-ahead log.
+func storeDiskBytes(t *testing.T, s *Store) int64 {
+	t.Helper()
+	var total int64
+	for _, suffix := range []string{"", "-wal"} {
+		info, err := os.Stat(s.Path() + suffix)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += info.Size()
+	}
+	return total
+}
+
+func TestSaveScanRetentionReclaimsFileSpace(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var peak int64
+	for index := 0; index < 20; index++ {
+		scan, inventory := bulkySnapshot(t, fmt.Sprintf("reclaim-%d", index), now.Add(-time.Duration(29-index)*24*time.Hour))
+		if err := s.saveScanAt(context.Background(), scan, inventory, now); err != nil {
+			t.Fatal(err)
+		}
+		if size := storeDiskBytes(t, s); size > peak {
+			peak = size
+		}
+	}
+	later := now.Add(60 * 24 * time.Hour)
+	scan, inventory := bulkySnapshot(t, "reclaim-fresh", later)
+	if err := s.saveScanAt(context.Background(), scan, inventory, later); err != nil {
+		t.Fatal(err)
+	}
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("retention kept %d snapshots, want 1", remaining)
+	}
+	if size := storeDiskBytes(t, s); size >= peak {
+		t.Fatalf("store occupies %d bytes after pruning 20 snapshots, want less than the %d byte peak", size, peak)
+	}
+}
