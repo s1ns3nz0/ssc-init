@@ -99,7 +99,8 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 		`(?m)packages\.pip\s+1\s+0`,
 		`(?m)alpha\s+payload-tree\s+partial\s+symlink_rejected`,
 		`(?m)bravo\s+entrypoint-main\s+unavailable\s+path_invalid`,
-		`(?m)added=1\s+changed=1\s+removed=0`,
+		`(?m)^  NEW\s+ide-extension\s+bravo \(vscode\)$`,
+		`(?m)^  UNVERIFIED\s+agent-plugin\s+alpha \(claude\)$`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(output) {
 			t.Fatalf("pretty output missing pattern %q:\n%s", pattern, output)
@@ -135,8 +136,33 @@ func TestWritePrettyHandlesEmptyScanWithoutPlaceholderRows(t *testing.T) {
 	if !strings.Contains(output, "(none)") {
 		t.Fatalf("empty sections must say (none):\n%s", output)
 	}
-	if !regexp.MustCompile(`(?m)added=0\s+changed=0\s+removed=0`).MatchString(output) {
+	if !strings.Contains(output, "DELTA\n  (no changes)") {
 		t.Fatalf("empty delta summary missing:\n%s", output)
+	}
+}
+
+func TestWritePrettyRendersDeltaAsLadderAndAlwaysPrintsIt(t *testing.T) {
+	scan, inventory, delta := prettyFixture()
+	var buffer bytes.Buffer
+	if err := report.WritePretty(&buffer, scan, inventory, delta); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+	if !regexp.MustCompile(`(?m)^DELTA$`).MatchString(output) ||
+		!regexp.MustCompile(`(?m)^  NEW\s+ide-extension\s+bravo \(vscode\)$`).MatchString(output) {
+		t.Fatalf("delta ladder missing:\n%s", output)
+	}
+	if regexp.MustCompile(`added=\d+`).MatchString(output) {
+		t.Fatalf("bare delta counts still rendered:\n%s", output)
+	}
+
+	// Unlike the hook, an interactive scan states "no changes" explicitly.
+	var quiet bytes.Buffer
+	if err := report.WritePretty(&quiet, scan, inventory, model.Delta{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(quiet.String(), "DELTA\n  (no changes)") {
+		t.Fatalf("quiet delta must say so:\n%s", quiet.String())
 	}
 }
 

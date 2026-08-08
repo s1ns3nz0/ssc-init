@@ -53,7 +53,7 @@ func WritePretty(writer io.Writer, scan model.ScanResult, inventory model.Invent
 	}
 	printer.collectorTable(scan.Coverage)
 	printer.evidenceSections(&scan.EvidenceCoverage, inventory)
-	printer.deltaSummary(delta)
+	printer.deltaSummary(inventory, delta)
 	return printer.err
 }
 
@@ -236,12 +236,25 @@ func (p *prettyPrinter) evidenceSections(coverage *model.EvidenceCoverage, inven
 	p.table("ISSUES", []string{"ASSET", "SUBJECT", "STATUS", "ERROR"}, issueRows)
 }
 
-func (p *prettyPrinter) deltaSummary(delta model.Delta) {
-	counts := map[model.ChangeKind]int{}
-	for _, change := range delta.Changes {
-		counts[change.Kind]++
-	}
+// deltaSummary renders the same severity ladder as the hook. Unlike the hook it
+// is uncapped and never silent: an interactive scan states its result, so an
+// empty delta prints "(no changes)" rather than nothing.
+func (p *prettyPrinter) deltaSummary(inventory model.Inventory, delta model.Delta) {
 	p.line("")
-	p.line(fmt.Sprintf("DELTA  added=%d changed=%d removed=%d",
-		counts[model.ChangeAdded], counts[model.ChangeChanged], counts[model.ChangeRemoved]))
+	p.line("DELTA")
+	rows := classify(inventory, delta)
+	if len(rows) == 0 {
+		p.line("  (no changes)")
+		return
+	}
+	for _, row := range rows {
+		line := fmt.Sprintf("  %-10s %-13s %s", rungLabels[row.Rung], row.Type, row.Name)
+		if row.Host != "" {
+			line += fmt.Sprintf(" (%s)", row.Host)
+		}
+		if row.Rung == rungUpgraded {
+			line += fmt.Sprintf("  %s → %s", row.From, row.To)
+		}
+		p.line(line)
+	}
 }
