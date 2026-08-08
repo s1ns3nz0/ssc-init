@@ -14,6 +14,7 @@ var ErrInvalidOptions = errors.New("invalid command arguments")
 type Options struct {
 	Command        string
 	JSON           bool
+	Pretty         bool
 	Baseline       bool
 	ExternalProbes bool
 	ProjectRoots   []string
@@ -30,7 +31,19 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parseScanOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
-	case "doctor", "status", "version":
+	case "status":
+		if len(args) != 2 {
+			return Options{}, ErrInvalidOptions
+		}
+		switch args[1] {
+		case "--json":
+			options.JSON = true
+		case "--pretty":
+			options.Pretty = true
+		default:
+			return Options{}, ErrInvalidOptions
+		}
+	case "doctor", "version":
 		if len(args) != 2 || args[1] != "--json" {
 			return Options{}, ErrInvalidOptions
 		}
@@ -56,6 +69,11 @@ func parseScanOptions(args []string, options *Options) error {
 				return ErrInvalidOptions
 			}
 			options.JSON = true
+		case argument == "--pretty":
+			if options.Pretty {
+				return ErrInvalidOptions
+			}
+			options.Pretty = true
 		case argument == "--external-probes":
 			if options.ExternalProbes {
 				return ErrInvalidOptions
@@ -74,7 +92,7 @@ func parseScanOptions(args []string, options *Options) error {
 			return ErrInvalidOptions
 		}
 	}
-	if !options.Baseline || !options.JSON {
+	if !options.Baseline || options.JSON == options.Pretty {
 		return ErrInvalidOptions
 	}
 	return nil

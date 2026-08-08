@@ -30,10 +30,12 @@ ssc-init doctor --json
 ssc-init scan --baseline --json
 ssc-init scan --baseline --json --external-probes
 ssc-init scan --baseline --json --project-root '$HOME/Projects' --project-root '$HOME/Developer'
+ssc-init scan --baseline --pretty
 ssc-init status --json
+ssc-init status --pretty
 ```
 
-`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim.
+`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract.
 
 State is local-first and stored at:
 

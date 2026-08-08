@@ -130,6 +130,72 @@ type fakeDoctor struct{ result doctor.Result }
 
 func (d fakeDoctor) Check(context.Context) doctor.Result { return d.result }
 
+func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
+	scanResult := model.ScanResult{
+		SchemaVersion: "ssc-init.scan.v3",
+		ScanID:        "00000000-0000-4000-8000-000000000009",
+		Status:        "partial",
+		Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoveragePartial}},
+		EvidenceCoverage: model.EvidenceCoverage{Status: model.CoveragePartial, Targets: []model.EvidenceTargetResult{
+			{TargetID: "agents.claude.plugins.manifest", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", EvidenceID: "evidence:sha256:aaaa", Status: model.EvidencePartial, Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}},
+		}},
+	}
+	inventory := model.Inventory{
+		Assets:       []model.Asset{{ID: "agent-plugin:claude:alpha@1.0.0", Type: model.AssetAgentPlugin, Name: "alpha", Version: "1.0.0", Source: "claude"}},
+		Observations: []model.Observation{{ID: "observation:sha256:1111", AssetID: "agent-plugin:claude:alpha@1.0.0", Collector: "agents", Source: "agents.claude.plugins"}},
+		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidencePartial,
+			Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}}},
+	}
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+		return scanResult, inventory, model.Delta{}, nil
+	})}
+
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	scanOutput := out.String()
+	for _, want := range []string{"SSC Init baseline scan", "COLLECTOR COVERAGE", "alpha", "symlink_rejected", "DELTA"} {
+		if !strings.Contains(scanOutput, want) {
+			t.Fatalf("scan pretty missing %q:\n%s", want, scanOutput)
+		}
+	}
+	if strings.Contains(scanOutput, "\"schemaVersion\"") {
+		t.Fatalf("scan pretty leaked JSON:\n%s", scanOutput)
+	}
+
+	snapshots := &cliMemorySnapshots{latest: model.Snapshot{Scan: scanResult, Inventory: inventory}, hasLatest: true}
+	statusApp := App{StatusReader: snapshots}
+	out.Reset()
+	if code := statusApp.Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	statusOutput := out.String()
+	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v3", "COLLECTOR COVERAGE", "symlink_rejected"} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("status pretty missing %q:\n%s", want, statusOutput)
+		}
+	}
+
+	legacySnapshots := &cliMemorySnapshots{latest: model.Snapshot{Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v2"}, Inventory: inventory}, hasLatest: true}
+	out.Reset()
+	if code := (App{StatusReader: legacySnapshots}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	legacyOutput := out.String()
+	if !strings.Contains(legacyOutput, "legacy inventory") || strings.Contains(legacyOutput, "COLLECTOR COVERAGE") {
+		t.Fatalf("legacy status pretty wrong:\n%s", legacyOutput)
+	}
+
+	out.Reset()
+	if code := (App{StatusReader: &cliMemorySnapshots{}}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "not initialized") {
+		t.Fatalf("uninitialized status pretty wrong:\n%s", out.String())
+	}
+}
+
 func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	snapshots := &cliMemorySnapshots{}
 	orchestrator := collector.Orchestrator{Timeout: time.Second, MaxConcurrent: 2, Collectors: []collector.Collector{

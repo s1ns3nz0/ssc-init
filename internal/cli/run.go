@@ -72,6 +72,13 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "baseline scan failed")
 			return 1
 		}
+		if options.Pretty {
+			if err := report.WritePretty(stdout, scan, inventory, delta); err != nil {
+				fmt.Fprintln(stderr, "failed to write baseline output")
+				return 1
+			}
+			return 0
+		}
 		if err := report.WriteJSON(stdout, scan, inventory, delta); err != nil {
 			fmt.Fprintln(stderr, "failed to write baseline output")
 			return 1
@@ -103,6 +110,22 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				// evidence coverage they could not have collected.
 				status.LegacyInventory = true
 			}
+		}
+		if options.Pretty {
+			err := report.WriteStatusPretty(stdout, report.StatusData{
+				Initialized:            status.Initialized,
+				LegacyInventory:        status.LegacyInventory,
+				InventorySchemaVersion: status.InventorySchemaVersion,
+				Scope:                  status.Scope,
+				Coverage:               status.Coverage,
+				EvidenceCoverage:       status.EvidenceCoverage,
+				Inventory:              status.Inventory,
+			})
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to write status output")
+				return 1
+			}
+			return 0
 		}
 		if err := writeJSON(stdout, status); err != nil {
 			fmt.Fprintln(stderr, "failed to write status output")
