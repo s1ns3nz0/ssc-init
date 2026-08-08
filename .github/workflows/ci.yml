@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify and download modules
+        run: |
+          go mod verify
+          go mod download
+
+      - name: Static gates
+        run: |
+          go vet ./...
+          test -z "$(gofmt -l ./cmd ./internal ./scripts)"
+          git diff --check
+
+      - name: Unit and race gates
+        run: go test -race -count=1 ./internal/... ./cmd/...
+
+      - name: Release build gates
+        run: |
+          git status --porcelain
+          go test -count=1 ./scripts
