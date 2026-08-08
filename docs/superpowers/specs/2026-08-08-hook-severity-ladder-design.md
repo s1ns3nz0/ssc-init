@@ -14,11 +14,18 @@ cache-metadata echo look identical. The reader cannot triage.
 
 ## Non-goal, and the invariant that forbids it
 
-No rung expresses a safety verdict. SSC Init hashes bytes; it performs no
-content analysis, so it has no basis for `DANGER`, `BLOCKED`, or any risk
-claim, and `README.md` promises exactly that ("no malware verdicts, no safety
-guarantees"). Every rung below is a **fact the tool established**: either a
-change classification derived from the delta, or an evidence-confidence
+No rung expresses a safety verdict. A rung states what changed and how well it
+could be verified — never whether anything is safe. That invariant is
+permanent: it is a property of what a *rung* means, and it survives the arrival
+of verdicts.
+
+The *reason* the tool currently has no basis for `DANGER`, `BLOCKED`, or any
+risk claim is narrower and temporary: this build hashes bytes, performs no
+content analysis, and has no threat intelligence. The foundation design does
+define verdicts (§7.3), automatic blocking (§9.1), and reversible quarantine
+(§9.4); when those ship they will surface as their own vocabulary, not by
+overloading a rung. Every rung below is a **fact the tool established**: either
+a change classification derived from the delta, or an evidence-confidence
 statement derived from a terminal status.
 
 ## The ladder

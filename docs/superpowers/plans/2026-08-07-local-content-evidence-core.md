@@ -1336,7 +1336,7 @@ Expected before final fixture wiring: FAIL on missing v3 golden or evidence delt
 
 - [ ] **Step 4: Update README and validation report with exact boundaries**
 
-README must say that default scans hash supported plugin/skill manifests and bounded payload trees, supported IDE manifests/entry points/trees, secret-free MCP semantics, and exact project manifest/lockfile catalogs. It must also state that package payloads, immutable Docker identity, code signatures, TI, behavior analysis, policy, warnings, blocking, and host adapters remain unimplemented. Preserve “not an EDR,” “no malware verdict,” and “no safety guarantee.”
+README must say that default scans hash supported plugin/skill manifests and bounded payload trees, supported IDE manifests/entry points/trees, secret-free MCP semantics, and exact project manifest/lockfile catalogs. It must also state that package payloads, immutable Docker identity, code signatures, TI, behavior analysis, policy, warnings, blocking, and host adapters remain unimplemented. Preserve “not an EDR” and “no safety guarantee” — both are permanent non-goals (design §3, §7.3). **Superseded for the verdict clause:** state the absence of malware verdicts and blocking as *current capability* (“this build performs no content analysis and has no threat intelligence, so it produces no malware verdicts and blocks nothing”), not as a permanent principle — design §7.3, §9.1, and §9.4 define verdicts, blocking, and quarantine as future work.
 
 Append a dated v3 revalidation section to the use-case report with command outputs, fixture scope, false-negative boundaries, and no-contact proof. Do not rewrite the historical foundation results.
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-SSC Init (`ssc-init`) is a standalone, dependency-minimized, CGO-free, Darwin-only Go binary for developer supply-chain inventory and bounded local content evidence. It is snapshot-based and local-first, and explicitly not an EDR: no daemon, no kernel sensor, no malware verdicts, no safety guarantees. Missing or failed coverage stays visible instead of being treated as success. All commands emit JSON (`scan --baseline` and `status` also accept `--pretty` for human summary tables). State lives at `$HOME/Library/Application Support/SSC Init/state.db`.
+SSC Init (`ssc-init`) is a standalone, dependency-minimized, CGO-free, Darwin-only Go binary for developer supply-chain inventory and bounded local content evidence. It is snapshot-based and local-first, and explicitly not an EDR: no daemon, no kernel sensor, no continuous monitoring, and no scan result is a guarantee that an asset is safe. This build performs no content analysis and has no threat intelligence, so it produces no malware verdicts and blocks nothing — those are designed (foundation design §7.3, §9.1, §9.4) but unbuilt, so state the limitation as current capability rather than as a permanent principle. Missing or failed coverage stays visible instead of being treated as success. All commands emit JSON (`scan --baseline` and `status` also accept `--pretty` for human summary tables). State lives at `$HOME/Library/Application Support/SSC Init/state.db`.
 
 ## Commands
 
