@@ -27,13 +27,18 @@ One line per asset, highest rung wins, rendered in this order:
 
 | Rung | Means | Derived from |
 |---|---|---|
-| `NEW` | a surface exists that never existed before | added asset whose `type:host:name` has no removed counterpart |
+| `NEW` | a surface exists that never existed before | added asset that did not pair with a removed one |
 | `CHANGED` | same version, different bytes | changed evidence/observation attributed to an existing asset |
-| `UNVERIFIED` | something moved in a place that cannot be fully verified | added/changed evidence whose current status is not `complete` |
-| `UPGRADED` | version moved and bytes moved with it | added+removed asset pair sharing `type:host:name`, **both carrying a version** |
-| `REMOVED` | a surface disappeared with no replacement | removed asset with no added counterpart |
+| `UNVERIFIED` | something moved in a place that cannot be fully verified | added/changed evidence whose current status is neither `complete` nor `unsupported` |
+| `UPGRADED` | version moved and bytes moved with it | added+removed asset pair sharing `type:host:name`, **both carrying a version**, **one on each side** |
+| `REMOVED` | a surface disappeared with no replacement | removed asset that did not pair with an added one |
 
-Four merge rules follow from "highest rung wins" and are worth stating,
+`unsupported` is excluded from `UNVERIFIED` because it is a deliberate
+non-claim (package payloads, container identities), not a coverage gap — the
+same exclusion `standingUnverified` and the `status --pretty` ISSUES table
+already make. A moved `unsupported` record still reports `CHANGED`.
+
+Five merge rules follow from "highest rung wins" and are worth stating,
 because each one is a place the renderer could otherwise assert more than it
 established:
 
@@ -58,6 +63,22 @@ established:
   asset is absent from the current inventory, so no current record can belong
   to it. Where its `type:host:name` collides with a current asset's, the two
   are distinct assets and each gets its own line.
+- **One identity can cover several live assets, and every one of them gets a
+  row.** `type:host:name` is the pairing key, not the row key: every family
+  that appends `@<version>` (`agent-plugin`, `agent-skill`, `ide-extension`,
+  `pkg`) keeps the version in the ID and out of the identity, and
+  `~/.vscode/extensions` holds one directory per installed version with stale
+  ones routinely left behind. So rows are keyed by **asset ID**: two removals
+  under one identity print two `REMOVED` lines and count 2 in the header, two
+  additions print two `NEW` lines, and a record-level `CHANGED`/`UNVERIFIED`
+  attaches to the asset that owns the record rather than to every asset sharing
+  its identity. Pairing an `UPGRADED` therefore requires **exactly one addition
+  against exactly one removal**; at any other multiplicity (2+1, 1+2, 2+2, …)
+  the tool never established *which* asset replaced *which*, so choosing a
+  predecessor by ID sort order would be an unearned claim of the same family as
+  `DANGER`, and each side is reported as the `NEW` or `REMOVED` event it is.
+  Collapsing any of these would drop a deleted surface from the report
+  entirely, which is the one thing this report exists to prevent.
 
 Ordering rationale: `NEW` is the actual supply-chain event. `CHANGED`
 outranks `UPGRADED` because a byte change under a frozen version number is
@@ -88,7 +109,9 @@ ssc-init: 3 changes since last snapshot
 - Asset type is retained — it is the risk-surface tell; an `mcp-server`
   appearing is categorically different from an `agent-skill` appearing.
 - Host in parentheses disambiguates the same name under several hosts
-  (`superpowers` exists five times on the reference machine).
+  (`superpowers` exists five times on the reference machine). It is the asset's
+  recorded `Source` verbatim, which for `project-config` is a collector tag
+  rather than a host — see "Name and host vocabulary on REMOVED rows".
 - Versions appear only on `UPGRADED`, where they carry the meaning.
 - The NAME column reads `(unnamed)` when the row's asset ID is digest-anchored
   and the asset is gone. Three types have such IDs — `project` and
@@ -210,32 +233,51 @@ If exact regression detection is ever needed, the honest upgrade path is to
 classify the change at diff time in `internal/inventory`, where both
 inventories are already in hand, and carry the class on the delta entry.
 
-### Name vocabulary on REMOVED rows
+### Name and host vocabulary on REMOVED rows
 
 The same missing previous inventory costs one more thing, and it is accepted
 rather than papered over. Every other rung describes an asset that is present
 in the current inventory, so its NAME column is `asset.Name`. A removed asset
 is absent from the current inventory by definition, so its row is built from
-its ID — and for two asset types the ID carries a **more qualified name** than
-the inventory record does:
+its ID — and for three asset types the ID carries a **more qualified name**, or
+a host, that the inventory record does not:
 
-| Type | Inventory `Name` | Name recovered from the ID |
+| Type | Inventory `Name` / `Source` | Recovered from the ID |
 |---|---|---|
-| `ide-extension` | `errorlens` | `usernamehw.errorlens` |
-| `pkg` | `@scope/server` | `npm/%40scope/server` |
+| `ide-extension` | name `errorlens` | name `usernamehw.errorlens` |
+| `pkg` | name `@scope/server` | name `npm/%40scope/server` |
+| `tool` (package-path assets) | host *(empty)* | host `go` — `tool:go:cosign` prints no host when present, `(go)` when removed |
 
 An `ide-extension` ID is `publisher.name` (`internal/collector/ide/manifest.go`
-sets `Name` to the name alone), and a `pkg` ID is a PURL whose name segment is
-`ecosystem/percent-encoded-name` (`internal/collector/packages` clears
-`Source`, so the ecosystem survives nowhere else). So the same extension prints
-`errorlens` when it is upgraded and `usernamehw.errorlens` when it is removed.
+sets `Name` to the name alone), a `pkg` ID is a PURL whose name segment is
+`ecosystem/percent-encoded-name`, and `internal/collector/packages/collector.go`
+`appendPackageEvidence` clears `Source` on every package-path asset — so for
+those the host survives only in the ID. So the same extension prints
+`errorlens` when it is upgraded and `usernamehw.errorlens` when it is removed,
+and the same Go tool prints no host when it is present and `(go)` when it is
+removed.
 
 This asymmetry is **known and accepted**, not a defect to normalise in the
 renderer. Stripping a `publisher.` prefix by last-dot is unreliable — extension
-names legitimately contain dots — and percent-decoding a PURL segment would
-reconstruct a name the tool never observed in this snapshot. Either would be an
-unearned claim of the same family as `DANGER`: output asserting something the
-tool did not establish. A removed row prints what the ID actually says.
+names legitimately contain dots — percent-decoding a PURL segment would
+reconstruct a name the tool never observed in this snapshot, and blanking a
+host the ID does state would delete a fact to make two rungs look alike. Each
+would be an unearned claim of the same family as `DANGER`: output asserting
+something the tool did not establish. A removed row prints what the ID actually
+says, and every other row prints what the inventory record actually says.
+
+The HOST column carries one further exception, in the other direction: a
+`project-config` asset records `Source: "project-config"`
+(`internal/collector/projects/collector.go`), which is a collector tag rather
+than a host, so its row reads `.mcp.json (project-config)`. That is also what
+the record says, and it does disambiguate — it separates a project's recognised
+MCP configuration files from the `project` asset of the directory holding them,
+which the TYPE column collapses into one `project`. Suppressing one hard-coded
+string in the renderer would make the ladder print something other than the
+snapshot it was given, for a cosmetic gain. So the column's job is stated
+precisely: **HOST renders the asset's recorded `Source` verbatim, or the host
+segment of its ID when the asset is gone.** For most types that is a host; for
+`project-config` it is a collector tag.
 
 The only honest way to remove the asymmetry is to plumb the previous inventory
 into the renderer, which the section above declines for the same reason it

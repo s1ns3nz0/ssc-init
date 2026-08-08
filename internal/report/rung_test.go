@@ -20,13 +20,13 @@ func TestClassifyPairsUpgradesAndRanksRungs(t *testing.T) {
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
-			{ID: "ide-extension:vscode:big@1.0.0", Type: model.AssetIDEExtension, Name: "big", Version: "1.0.0", Source: "vscode"},
+			{ID: "ide-extension:vscode:usernamehw.errorlens@1.0.0", Type: model.AssetIDEExtension, Name: "errorlens", Version: "1.0.0", Source: "vscode"},
 			{ID: "mcp:claude-code:github", Type: model.AssetMCP, Name: "github", Source: "claude-code"},
 			{ID: "agent-plugin:claude:superpowers@6.2.0", Type: model.AssetAgentPlugin, Name: "superpowers", Version: "6.2.0", Source: "claude"},
 		},
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-skill:claude:docx"},
-			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:big@1.0.0"},
+			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:usernamehw.errorlens@1.0.0"},
 		},
 		Evidence: []model.ContentEvidence{
 			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete},
@@ -47,7 +47,7 @@ func TestClassifyPairsUpgradesAndRanksRungs(t *testing.T) {
 	want := []rungRow{
 		{key: "mcp:claude-code:github", Rung: rungNew, Type: "mcp-server", Name: "github", Host: "claude-code"},
 		{key: "agent-skill:claude:docx", Rung: rungChanged, Type: "agent-skill", Name: "docx", Host: "claude"},
-		{key: "ide-extension:vscode:big@1.0.0", Rung: rungUnverified, Type: "ide-extension", Name: "big", Host: "vscode"},
+		{key: "ide-extension:vscode:usernamehw.errorlens@1.0.0", Rung: rungUnverified, Type: "ide-extension", Name: "errorlens", Host: "vscode"},
 		{key: "agent-plugin:claude:superpowers@6.2.0", Rung: rungUpgraded, Type: "agent-plugin", Name: "superpowers", Host: "claude", From: "6.1.1", To: "6.2.0"},
 		{key: "mcp:cursor:stale", Rung: rungRemoved, Type: "mcp-server", Name: "stale", Host: "cursor"},
 	}
@@ -185,7 +185,7 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
-			{ID: "ide-extension:vscode:big@1.0.0", Type: model.AssetIDEExtension, Name: "big", Version: "1.0.0", Source: "vscode"},
+			{ID: "ide-extension:vscode:usernamehw.errorlens@1.0.0", Type: model.AssetIDEExtension, Name: "errorlens", Version: "1.0.0", Source: "vscode"},
 			{ID: "mcp:claude-code:github", Type: model.AssetMCP, Name: "github", Source: "claude-code"},
 			// appendPackageEvidence clears Source on a package asset and the
 			// name is the bare package name; the ecosystem lives only in the ID.
@@ -194,7 +194,7 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 		},
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-skill:claude:docx"},
-			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:big@1.0.0"},
+			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:usernamehw.errorlens@1.0.0"},
 		},
 		Evidence: []model.ContentEvidence{
 			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete},
@@ -227,7 +227,7 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 		// "Name vocabulary on REMOVED rows").
 		"  NEW        package       moto",
 		"  CHANGED    agent-skill   docx (claude)",
-		"  UNVERIFIED ide-extension big (vscode)",
+		"  UNVERIFIED ide-extension errorlens (vscode)",
 		"  UPGRADED   agent-plugin  superpowers (claude)  6.1.1 → 6.2.0",
 		"  REMOVED    mcp-server    stale (cursor)",
 	}
@@ -419,6 +419,155 @@ func TestClassifyOrdersRowsTotallyWhenDisplayColumnsCollide(t *testing.T) {
 		sort.Strings(outputs)
 		t.Fatalf("row order is not deterministic: %d distinct renderings:\n%s",
 			len(seen), strings.Join(outputs, "\n---\n"))
+	}
+}
+
+// errorlensAsset builds the inventory record the IDE collector writes for one
+// installed version of a real extension. ~/.vscode/extensions keeps one
+// directory per installed version and VS Code routinely leaves stale version
+// directories behind, so several of these are live under one type:host:name.
+func errorlensAsset(version string) model.Asset {
+	return model.Asset{ID: "ide-extension:vscode:usernamehw.errorlens@" + version,
+		Type: model.AssetIDEExtension, Name: "errorlens", Version: version, Source: "vscode"}
+}
+
+// TestClassifyReportsEveryRemovedAssetUnderOneIdentity: for a supply-chain
+// tool a silently dropped deletion is the worst failure in this family.
+func TestClassifyReportsEveryRemovedAssetUnderOneIdentity(t *testing.T) {
+	rows := classify(model.Inventory{}, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset,
+			EntityID: "ide-extension:vscode:usernamehw.errorlens@3.14.0"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset,
+			EntityID: "ide-extension:vscode:usernamehw.errorlens@3.15.0"},
+	}})
+	if len(rows) != 2 {
+		t.Fatalf("two removed assets produced %d row(s); a deleted surface went unreported", len(rows))
+	}
+}
+
+func TestClassifyReportsEveryAddedAssetUnderOneIdentity(t *testing.T) {
+	stale, fresh := errorlensAsset("3.15.0"), errorlensAsset("3.16.0")
+	rows := classify(model.Inventory{Assets: []model.Asset{stale, fresh}}, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: stale.ID},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: fresh.ID},
+	}})
+	if len(rows) != 2 || rows[0].Rung != rungNew || rows[1].Rung != rungNew {
+		t.Fatalf("two added assets produced %d row(s): %+v", len(rows), rows)
+	}
+	if rows[0].key == rows[1].key {
+		t.Fatalf("both rows describe the same asset: %+v", rows)
+	}
+}
+
+// TestClassifyPairsAnUpgradeOnlyWhenTheTransitionIsUnambiguous pins the
+// multiplicity rule. Exactly one addition against exactly one removal is a
+// transition the tool established; with more candidates on either side it never
+// established which asset replaced which, and picking one by string order would
+// assert a move that did not happen. Every unpaired side stays its own row.
+func TestClassifyPairsAnUpgradeOnlyWhenTheTransitionIsUnambiguous(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		added, removed []string
+		wantRows       int
+		wantUpgrade    bool
+	}{
+		{"one to one", []string{"3.16.0"}, []string{"3.15.0"}, 1, true},
+		{"two added one removed", []string{"3.16.0", "3.17.0"}, []string{"3.15.0"}, 3, false},
+		{"one added two removed", []string{"3.16.0"}, []string{"3.14.0", "3.15.0"}, 3, false},
+		{"two added two removed", []string{"3.16.0", "3.17.0"}, []string{"3.14.0", "3.15.0"}, 4, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var inventory model.Inventory
+			var delta model.Delta
+			for _, version := range test.added {
+				asset := errorlensAsset(version)
+				inventory.Assets = append(inventory.Assets, asset)
+				delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeAdded,
+					Entity: model.ChangeEntityAsset, EntityID: asset.ID})
+			}
+			for _, version := range test.removed {
+				delta.Changes = append(delta.Changes, model.Change{Kind: model.ChangeRemoved,
+					Entity: model.ChangeEntityAsset, EntityID: errorlensAsset(version).ID})
+			}
+			rows := classify(inventory, delta)
+			if len(rows) != test.wantRows {
+				t.Fatalf("got %d row(s), want %d: %+v", len(rows), test.wantRows, rows)
+			}
+			upgraded := false
+			for _, row := range rows {
+				if row.Rung == rungUpgraded {
+					upgraded = true
+				}
+			}
+			if upgraded != test.wantUpgrade {
+				t.Fatalf("upgraded=%v want %v: %+v", upgraded, test.wantUpgrade, rows)
+			}
+		})
+	}
+}
+
+// TestClassifyKeepsAChangedAssetAndItsAddedSibling: a stale version directory
+// whose bytes moved and a newly installed version are two events on two assets.
+func TestClassifyKeepsAChangedAssetAndItsAddedSibling(t *testing.T) {
+	stale, fresh := errorlensAsset("3.15.0"), errorlensAsset("3.16.0")
+	rows := classify(model.Inventory{Assets: []model.Asset{stale, fresh}}, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: stale.ID},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: fresh.ID},
+	}})
+	want := []rungRow{
+		{key: fresh.ID, Rung: rungNew, Type: string(model.AssetIDEExtension), Name: "errorlens", Host: "vscode"},
+		{key: stale.ID, Rung: rungChanged, Type: string(model.AssetIDEExtension), Name: "errorlens", Host: "vscode"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("got=%+v\nwant=%+v", rows, want)
+	}
+}
+
+// TestClassifyAttachesRecordRungsToTheAssetTheyBelongTo: a record speaks for
+// its own asset only. Two live versions share one type:host:name, so keying
+// record rungs by identity would let one version's complete record mask the
+// other version's unverifiable one.
+func TestClassifyAttachesRecordRungsToTheAssetTheyBelongTo(t *testing.T) {
+	stale, fresh := errorlensAsset("3.15.0"), errorlensAsset("3.16.0")
+	inventory := model.Inventory{
+		Assets: []model.Asset{stale, fresh},
+		Observations: []model.Observation{
+			{ID: "observation:sha256:1111", AssetID: stale.ID},
+			{ID: "observation:sha256:2222", AssetID: fresh.ID},
+		},
+		Evidence: []model.ContentEvidence{
+			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete},
+			{ID: "evidence:sha256:bbbb", ObservationID: "observation:sha256:2222", Status: model.EvidencePartial},
+		},
+	}
+	rows := classify(inventory, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
+	}})
+	want := []rungRow{
+		{key: stale.ID, Rung: rungChanged, Type: string(model.AssetIDEExtension), Name: "errorlens", Host: "vscode"},
+		{key: fresh.ID, Rung: rungUnverified, Type: string(model.AssetIDEExtension), Name: "errorlens", Host: "vscode"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("got=%+v\nwant=%+v", rows, want)
+	}
+}
+
+// TestClassifyDoesNotRaiseUnverifiedForUnsupportedEvidence keeps the ladder
+// consistent with standingUnverified and the pretty ISSUES table, which both
+// treat unsupported as a deliberate non-claim rather than a coverage gap.
+func TestClassifyDoesNotRaiseUnverifiedForUnsupportedEvidence(t *testing.T) {
+	const assetID = "pkg:pypi/moto@5.1.22"
+	inventory := model.Inventory{
+		Assets:       []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "moto", Version: "5.1.22"}},
+		Observations: []model.Observation{{ID: "observation:sha256:1111", AssetID: assetID}},
+		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111",
+			Status: model.EvidenceUnsupported}},
+	}
+	rows := classify(inventory, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"}}})
+	if len(rows) != 1 || rows[0].Rung != rungChanged {
+		t.Fatalf("unsupported evidence must not raise UNVERIFIED: %+v", rows)
 	}
 }
 

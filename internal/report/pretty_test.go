@@ -33,29 +33,29 @@ func prettyFixture() (model.ScanResult, model.Inventory, model.Delta) {
 			Targets: []model.EvidenceTargetResult{
 				{TargetID: "agents.claude.plugins.manifest", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", EvidenceID: "evidence:sha256:aaaa", Status: model.EvidenceComplete},
 				{TargetID: "agents.claude.plugins.payload-tree", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", EvidenceID: "evidence:sha256:bbbb", Status: model.EvidencePartial, Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}},
-				{TargetID: "ide.vscode.extensions.entrypoint-main", AssetID: "ide-extension:vscode:bravo@2.0.0", ObservationID: "observation:sha256:2222", EvidenceID: "evidence:sha256:cccc", Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}}},
+				{TargetID: "ide.vscode.extensions.entrypoint-main", AssetID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0", ObservationID: "observation:sha256:2222", EvidenceID: "evidence:sha256:cccc", Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}}},
 			},
 		},
 	}
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "agent-plugin:claude:alpha@1.0.0", Type: model.AssetAgentPlugin, Name: "alpha", Version: "1.0.0", Source: "claude"},
-			{ID: "ide-extension:vscode:bravo@2.0.0", Type: model.AssetIDEExtension, Name: "bravo", Version: "2.0.0", Source: "vscode"},
+			{ID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0", Type: model.AssetIDEExtension, Name: "vscode-eslint", Version: "2.0.0", Source: "vscode"},
 		},
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-plugin:claude:alpha@1.0.0", Collector: "agents", Source: "agents.claude.plugins"},
-			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:bravo@2.0.0", Collector: "ide", Source: "ide.vscode.extensions"},
+			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0", Collector: "ide", Source: "ide.vscode.extensions"},
 			{ID: "observation:sha256:3333", AssetID: "pkg:pypi/charlie@3.0.0", Collector: "packages", Source: "packages.pip"},
 		},
 		Evidence: []model.ContentEvidence{
 			{ID: "evidence:sha256:aaaa", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest, Status: model.EvidenceComplete, Algorithm: "sha256", Digest: strings.Repeat("a", 64), Size: 497},
 			{ID: "evidence:sha256:bbbb", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidencePartial, Algorithm: "sha256", Digest: strings.Repeat("b", 64), Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}},
-			{ID: "evidence:sha256:cccc", AssetID: "ide-extension:vscode:bravo@2.0.0", ObservationID: "observation:sha256:2222", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectEntrypointMain, Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}}},
+			{ID: "evidence:sha256:cccc", AssetID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0", ObservationID: "observation:sha256:2222", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectEntrypointMain, Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}}},
 			{ID: "evidence:sha256:dddd", AssetID: "pkg:pypi/charlie@3.0.0", ObservationID: "observation:sha256:3333", Kind: model.EvidencePackageContent, Subject: model.EvidenceSubjectPackageContent, Status: model.EvidenceUnsupported},
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "ide-extension:vscode:bravo@2.0.0"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
 	}}
 	return scan, inventory, delta
@@ -99,8 +99,8 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 		`(?m)ide\.vscode\.extensions\s+1\s+0`,
 		`(?m)packages\.pip\s+1\s+0`,
 		`(?m)alpha\s+payload-tree\s+partial\s+symlink_rejected`,
-		`(?m)bravo\s+entrypoint-main\s+unavailable\s+path_invalid`,
-		`(?m)^  NEW\s+ide-extension\s+bravo \(vscode\)$`,
+		`(?m)vscode-eslint\s+entrypoint-main\s+unavailable\s+path_invalid`,
+		`(?m)^  NEW\s+ide-extension\s+vscode-eslint \(vscode\)$`,
 		`(?m)^  UNVERIFIED\s+agent-plugin\s+alpha \(claude\)$`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(output) {
@@ -188,7 +188,7 @@ func TestWritePrettyRendersDeltaAsLadderAndAlwaysPrintsIt(t *testing.T) {
 	}
 	output := buffer.String()
 	if !regexp.MustCompile(`(?m)^DELTA$`).MatchString(output) ||
-		!regexp.MustCompile(`(?m)^  NEW\s+ide-extension\s+bravo \(vscode\)$`).MatchString(output) {
+		!regexp.MustCompile(`(?m)^  NEW\s+ide-extension\s+vscode-eslint \(vscode\)$`).MatchString(output) {
 		t.Fatalf("delta ladder missing:\n%s", output)
 	}
 	if regexp.MustCompile(`added=\d+`).MatchString(output) {

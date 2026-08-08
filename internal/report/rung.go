@@ -141,6 +141,12 @@ func displayFor(assets map[string]model.Asset, id string) (assetType, name, host
 // assetIdentity pairs an added asset with its removed predecessor. It stays
 // derived from the full asset ID: substituting display names would collapse
 // every digest-anchored project into a single identity.
+//
+// An identity is not an asset. Every family that appends "@<version>" keeps the
+// version in the ID and out of the identity, so one identity legitimately
+// covers several live assets — ~/.vscode/extensions holds a directory per
+// installed version and stale ones are routinely left behind. Identity is used
+// for the pairing decision only; rows are always keyed by asset ID.
 type assetIdentity struct{ assetType, host, name string }
 
 // assetChange records what an added or removed asset contributes to its row.
@@ -171,13 +177,16 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		assets[asset.ID] = asset
 	}
 
-	added := make(map[assetIdentity]assetChange)
-	removed := make(map[assetIdentity]assetChange)
-	best := make(map[assetIdentity]rungRow)
+	added := make(map[assetIdentity][]assetChange)
+	removed := make(map[assetIdentity][]assetChange)
+	addedAssets := make(map[string]struct{})
+	best := make(map[string]rungRow)
 
-	note := func(identity assetIdentity, row rungRow) {
-		if existing, ok := best[identity]; !ok || row.Rung < existing.Rung {
-			best[identity] = row
+	// note keeps the highest rung per asset ID. Keying it by identity instead
+	// would let one live version of an extension silence another's row.
+	note := func(assetID string, row rungRow) {
+		if existing, ok := best[assetID]; !ok || row.Rung < existing.Rung {
+			best[assetID] = row
 		}
 	}
 
@@ -191,12 +200,13 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		identity := assetIdentity{assetType, host, name}
 		switch change.Kind {
 		case model.ChangeAdded:
-			added[identity] = assetChange{id: change.EntityID, version: version}
+			added[identity] = append(added[identity], assetChange{id: change.EntityID, version: version})
+			addedAssets[change.EntityID] = struct{}{}
 		case model.ChangeRemoved:
-			removed[identity] = assetChange{id: change.EntityID, version: version}
+			removed[identity] = append(removed[identity], assetChange{id: change.EntityID, version: version})
 		case model.ChangeChanged:
 			displayType, displayName, displayHost := displayFor(assets, change.EntityID)
-			note(identity, rungRow{key: change.EntityID, Rung: rungChanged, Type: displayType, Name: displayName, Host: displayHost})
+			note(change.EntityID, rungRow{key: change.EntityID, Rung: rungChanged, Type: displayType, Name: displayName, Host: displayHost})
 		}
 	}
 
@@ -218,10 +228,11 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		if assetID == "" {
 			continue // unattributable: no actionable line (see design doc)
 		}
-		assetType, host, name, _ := parseAssetID(assetID)
-		identity := assetIdentity{assetType, host, name}
 		level := rungChanged
-		if status != model.EvidenceComplete {
+		// Unsupported is a deliberate non-claim (package payloads, container
+		// identities), not a coverage gap — the same exclusion standingUnverified
+		// and the pretty ISSUES table already make.
+		if status != model.EvidenceComplete && status != model.EvidenceUnsupported {
 			level = rungUnverified
 		}
 		// An upgrade mints a new asset ID and therefore new observation and
@@ -230,28 +241,43 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		// CHANGED claim — CHANGED means "same version, different bytes", which
 		// a new asset ID contradicts. A record that could not be fully hashed
 		// still speaks: UNVERIFIED reports a gap the asset-level rung cannot.
-		if _, isAddedAsset := added[identity]; isAddedAsset && level == rungChanged {
+		// The test is the record's own asset, not its identity: a sibling
+		// version being installed says nothing about this asset's bytes.
+		if _, isAddedAsset := addedAssets[assetID]; isAddedAsset && level == rungChanged {
 			continue
 		}
 		displayType, displayName, displayHost := displayFor(assets, assetID)
-		note(identity, rungRow{key: assetID, Rung: level, Type: displayType, Name: displayName, Host: displayHost})
+		note(assetID, rungRow{key: assetID, Rung: level, Type: displayType, Name: displayName, Host: displayHost})
 	}
 
-	for identity, addition := range added {
-		displayType, displayName, displayHost := displayFor(assets, addition.id)
-		row := rungRow{key: addition.id, Rung: rungNew, Type: displayType, Name: displayName, Host: displayHost}
-		// A transition is only reported when both endpoints are known. The
-		// agents collector appends "@<version>" only when a version is known,
-		// so a plugin that gains or loses its manifest version field yields two
-		// genuine assets under one identity with one version between them.
-		// Rendering that as UPGRADED would print an arrow with nothing on one
-		// side and assert a move the tool never established; the honest report
-		// is the pair of events it did establish, NEW and REMOVED.
-		if removal, paired := removed[identity]; paired && removal.version != "" && addition.version != "" {
-			row.Rung, row.From, row.To = rungUpgraded, removal.version, addition.version
+	for identity, additions := range added {
+		// A transition is only reported when the tool established it, which
+		// takes exactly one addition against exactly one removal, both carrying
+		// a version.
+		//
+		// Both endpoints must be known: the agents collector appends
+		// "@<version>" only when a version is known, so a plugin that gains or
+		// loses its manifest version field yields two genuine assets under one
+		// identity with one version between them, and an arrow with nothing on
+		// one side asserts a move that was never established.
+		//
+		// The multiplicity must be one to one for the same reason: with two
+		// removals and one addition there is no single established transition,
+		// and choosing a predecessor by string order would be an unearned
+		// claim. Every candidate is then reported as the event it is.
+		removals := removed[identity]
+		if len(additions) == 1 && len(removals) == 1 && additions[0].version != "" && removals[0].version != "" {
+			displayType, displayName, displayHost := displayFor(assets, additions[0].id)
+			note(additions[0].id, rungRow{key: additions[0].id, Rung: rungUpgraded, Type: displayType,
+				Name: displayName, Host: displayHost, From: removals[0].version, To: additions[0].version})
 			delete(removed, identity)
+			continue
 		}
-		note(identity, row) // highest rung wins, including over its own records
+		for _, addition := range additions {
+			displayType, displayName, displayHost := displayFor(assets, addition.id)
+			// Highest rung wins, including over the asset's own records.
+			note(addition.id, rungRow{key: addition.id, Rung: rungNew, Type: displayType, Name: displayName, Host: displayHost})
+		}
 	}
 
 	rows := make([]rungRow, 0, len(best)+len(removed))
@@ -261,10 +287,14 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 	// A removed asset is absent from the current inventory by definition, so no
 	// current record can belong to it and it never shares a row with one: when
 	// its identity collides with a current asset's, the two are distinct assets
-	// and each gets its own line.
-	for _, removal := range removed {
-		displayType, displayName, displayHost := displayFor(assets, removal.id)
-		rows = append(rows, rungRow{key: removal.id, Rung: rungRemoved, Type: displayType, Name: displayName, Host: displayHost, From: removal.version})
+	// and each gets its own line. Two removals under one identity are likewise
+	// two deleted surfaces and get two lines — dropping either would hide a
+	// deletion, which is the one thing this report exists to show.
+	for _, removals := range removed {
+		for _, removal := range removals {
+			displayType, displayName, displayHost := displayFor(assets, removal.id)
+			rows = append(rows, rungRow{key: removal.id, Rung: rungRemoved, Type: displayType, Name: displayName, Host: displayHost, From: removal.version})
+		}
 	}
 	sort.Slice(rows, func(a, b int) bool {
 		if rows[a].Rung != rows[b].Rung {

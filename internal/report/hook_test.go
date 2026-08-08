@@ -14,7 +14,7 @@ func hookFixture() (model.Inventory, model.Delta) {
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "agent-plugin:claude:alpha@1.0.0", Type: model.AssetAgentPlugin, Name: "alpha", Version: "1.0.0", Source: "claude"},
-			{ID: "ide-extension:vscode:bravo@2.0.0", Type: model.AssetIDEExtension, Name: "bravo", Version: "2.0.0", Source: "vscode"},
+			{ID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0", Type: model.AssetIDEExtension, Name: "vscode-eslint", Version: "2.0.0", Source: "vscode"},
 		},
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-plugin:claude:alpha@1.0.0", Collector: "agents", Source: "agents.claude.plugins"},
@@ -26,7 +26,7 @@ func hookFixture() (model.Inventory, model.Delta) {
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "ide-extension:vscode:bravo@2.0.0"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "ide-extension:vscode:dbaeumer.vscode-eslint@2.0.0"},
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:github"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
