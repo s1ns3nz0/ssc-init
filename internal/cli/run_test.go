@@ -357,10 +357,17 @@ func TestOperationalCommandsFailGenericallyWhenDependencyMissing(t *testing.T) {
 func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	drift := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:alpha@1.0.0"}}}
 	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}
+	// A scan diffs the snapshot it just wrote, so the added asset is in the
+	// inventory it hands the renderer. A second asset keeps the delta from
+	// looking like an initial baseline.
+	drifted := model.Inventory{Assets: []model.Asset{
+		{ID: "agent-plugin:claude:alpha@1.0.0", Type: model.AssetAgentPlugin, Name: "alpha", Version: "1.0.0", Source: "claude"},
+		{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
+	}}
 
 	var out, errOut bytes.Buffer
 	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
-		return scan, model.Inventory{}, drift, nil
+		return scan, drifted, drift, nil
 	})}
 	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
 		t.Fatalf("drift: code=%d stderr=%q", code, errOut.String())

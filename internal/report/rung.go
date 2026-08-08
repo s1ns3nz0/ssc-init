@@ -29,8 +29,11 @@ var rungLabels = map[rung]string{
 	rungRemoved:    "REMOVED",
 }
 
-// rungRow is one rendered line: one asset, its highest rung.
+// rungRow is one rendered line: one asset, its highest rung. key is the asset
+// ID the row describes; it is never rendered and exists only to make the row
+// order total (see the comparator in classify).
 type rungRow struct {
+	key      string
 	Rung     rung
 	Type     string
 	Name     string
@@ -178,61 +181,90 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		}
 	}
 
+	// Asset-level changes are collected first: whether a record belongs to an
+	// asset that is itself new decides what that record is allowed to claim.
+	for _, change := range delta.Changes {
+		if change.Entity != model.ChangeEntityAsset {
+			continue
+		}
+		assetType, host, name, version := parseAssetID(change.EntityID)
+		identity := assetIdentity{assetType, host, name}
+		switch change.Kind {
+		case model.ChangeAdded:
+			added[identity] = assetChange{id: change.EntityID, version: version}
+		case model.ChangeRemoved:
+			removed[identity] = assetChange{id: change.EntityID, version: version}
+		case model.ChangeChanged:
+			displayType, displayName, displayHost := displayFor(assets, change.EntityID)
+			note(identity, rungRow{key: change.EntityID, Rung: rungChanged, Type: displayType, Name: displayName, Host: displayHost})
+		}
+	}
+
 	for _, change := range delta.Changes {
 		switch change.Entity {
-		case model.ChangeEntityAsset:
-			assetType, host, name, version := parseAssetID(change.EntityID)
-			identity := assetIdentity{assetType, host, name}
-			switch change.Kind {
-			case model.ChangeAdded:
-				added[identity] = assetChange{id: change.EntityID, version: version}
-			case model.ChangeRemoved:
-				removed[identity] = assetChange{id: change.EntityID, version: version}
-			case model.ChangeChanged:
-				displayType, displayName, displayHost := displayFor(assets, change.EntityID)
-				note(identity, rungRow{Rung: rungChanged, Type: displayType, Name: displayName, Host: displayHost})
-			}
 		case model.ChangeEntityEvidence, model.ChangeEntityObservation:
-			if change.Kind == model.ChangeRemoved {
-				continue // rolls into its asset's UPGRADED/REMOVED row, or is an orphan
-			}
-			assetID := observationAsset[change.EntityID]
-			status := model.EvidenceComplete
-			if change.Entity == model.ChangeEntityEvidence {
-				assetID = evidenceAsset[change.EntityID]
-				status = evidenceStatus[change.EntityID]
-			}
-			if assetID == "" {
-				continue // unattributable: no actionable line (see design doc)
-			}
-			assetType, host, name, _ := parseAssetID(assetID)
-			identity := assetIdentity{assetType, host, name}
-			level := rungChanged
-			if status != model.EvidenceComplete {
-				level = rungUnverified
-			}
-			displayType, displayName, displayHost := displayFor(assets, assetID)
-			note(identity, rungRow{Rung: level, Type: displayType, Name: displayName, Host: displayHost})
+		default:
+			continue
 		}
+		if change.Kind == model.ChangeRemoved {
+			continue // rolls into its asset's UPGRADED/REMOVED row, or is an orphan
+		}
+		assetID := observationAsset[change.EntityID]
+		status := model.EvidenceComplete
+		if change.Entity == model.ChangeEntityEvidence {
+			assetID = evidenceAsset[change.EntityID]
+			status = evidenceStatus[change.EntityID]
+		}
+		if assetID == "" {
+			continue // unattributable: no actionable line (see design doc)
+		}
+		assetType, host, name, _ := parseAssetID(assetID)
+		identity := assetIdentity{assetType, host, name}
+		level := rungChanged
+		if status != model.EvidenceComplete {
+			level = rungUnverified
+		}
+		// An upgrade mints a new asset ID and therefore new observation and
+		// evidence IDs, so every record of an added asset arrives as added.
+		// Such a record is part of that asset-level event, not a separate
+		// CHANGED claim — CHANGED means "same version, different bytes", which
+		// a new asset ID contradicts. A record that could not be fully hashed
+		// still speaks: UNVERIFIED reports a gap the asset-level rung cannot.
+		if _, isAddedAsset := added[identity]; isAddedAsset && level == rungChanged {
+			continue
+		}
+		displayType, displayName, displayHost := displayFor(assets, assetID)
+		note(identity, rungRow{key: assetID, Rung: level, Type: displayType, Name: displayName, Host: displayHost})
 	}
 
 	for identity, addition := range added {
 		displayType, displayName, displayHost := displayFor(assets, addition.id)
-		row := rungRow{Rung: rungNew, Type: displayType, Name: displayName, Host: displayHost}
-		if removal, paired := removed[identity]; paired {
+		row := rungRow{key: addition.id, Rung: rungNew, Type: displayType, Name: displayName, Host: displayHost}
+		// A transition is only reported when both endpoints are known. The
+		// agents collector appends "@<version>" only when a version is known,
+		// so a plugin that gains or loses its manifest version field yields two
+		// genuine assets under one identity with one version between them.
+		// Rendering that as UPGRADED would print an arrow with nothing on one
+		// side and assert a move the tool never established; the honest report
+		// is the pair of events it did establish, NEW and REMOVED.
+		if removal, paired := removed[identity]; paired && removal.version != "" && addition.version != "" {
 			row.Rung, row.From, row.To = rungUpgraded, removal.version, addition.version
 			delete(removed, identity)
 		}
-		best[identity] = row // an asset-level event outranks any of its records
-	}
-	for identity, removal := range removed {
-		displayType, displayName, displayHost := displayFor(assets, removal.id)
-		best[identity] = rungRow{Rung: rungRemoved, Type: displayType, Name: displayName, Host: displayHost, From: removal.version}
+		note(identity, row) // highest rung wins, including over its own records
 	}
 
-	rows := make([]rungRow, 0, len(best))
+	rows := make([]rungRow, 0, len(best)+len(removed))
 	for _, row := range best {
 		rows = append(rows, row)
+	}
+	// A removed asset is absent from the current inventory by definition, so no
+	// current record can belong to it and it never shares a row with one: when
+	// its identity collides with a current asset's, the two are distinct assets
+	// and each gets its own line.
+	for _, removal := range removed {
+		displayType, displayName, displayHost := displayFor(assets, removal.id)
+		rows = append(rows, rungRow{key: removal.id, Rung: rungRemoved, Type: displayType, Name: displayName, Host: displayHost, From: removal.version})
 	}
 	sort.Slice(rows, func(a, b int) bool {
 		if rows[a].Rung != rows[b].Rung {
@@ -244,7 +276,15 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		if rows[a].Name != rows[b].Name {
 			return rows[a].Name < rows[b].Name
 		}
-		return rows[a].Host < rows[b].Host
+		if rows[a].Host != rows[b].Host {
+			return rows[a].Host < rows[b].Host
+		}
+		// Display columns are not unique: an IDE extension's Name drops the
+		// publisher its ID keeps, and package rows carry no host. Two such rows
+		// differ only in their versions, so without this the order came out of
+		// map iteration and the report was not byte-identical run to run. The
+		// key is the asset ID, unique per row, which makes the order total.
+		return rows[a].key < rows[b].key
 	})
 	return rows
 }

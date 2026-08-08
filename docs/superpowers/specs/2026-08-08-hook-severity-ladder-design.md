@@ -30,8 +30,34 @@ One line per asset, highest rung wins, rendered in this order:
 | `NEW` | a surface exists that never existed before | added asset whose `type:host:name` has no removed counterpart |
 | `CHANGED` | same version, different bytes | changed evidence/observation attributed to an existing asset |
 | `UNVERIFIED` | something moved in a place that cannot be fully verified | added/changed evidence whose current status is not `complete` |
-| `UPGRADED` | version moved and bytes moved with it | added+removed asset pair sharing `type:host:name` |
+| `UPGRADED` | version moved and bytes moved with it | added+removed asset pair sharing `type:host:name`, **both carrying a version** |
 | `REMOVED` | a surface disappeared with no replacement | removed asset with no added counterpart |
+
+Four merge rules follow from "highest rung wins" and are worth stating,
+because each one is a place the renderer could otherwise assert more than it
+established:
+
+- **A transition needs both endpoints.** `agent-plugin` and `agent-skill` IDs
+  append `@<version>` only when a version is known, so a plugin that gains or
+  loses the `version` field in its `plugin.json` produces two genuine IDs under
+  one identity with one version between them. That is reported as the two
+  events it is — `NEW` and `REMOVED` — never as `UPGRADED` with an empty side
+  of the arrow.
+- **`UNVERIFIED` is never masked by `UPGRADED`.** A plugin whose version moved
+  while its payload tree came back `partial` reports `UNVERIFIED`: the version
+  bump is the less useful of the two facts, and hiding "the new bytes could not
+  be hashed" is exactly the failure the rung exists to prevent. `NEW` still
+  outranks it — a surface that did not exist before is the stronger statement.
+- **An added asset's own new records make no `CHANGED` claim.** An upgrade
+  mints a new asset ID, hence new observation and evidence IDs, so all of the
+  asset's records arrive as *added*. `CHANGED` means "same version, different
+  bytes", which a new asset ID contradicts, so those records are subsumed by
+  the asset-level rung — unless one of them is not `complete`, which still
+  raises `UNVERIFIED`.
+- **A `REMOVED` row is never merged with a current asset's row.** A removed
+  asset is absent from the current inventory, so no current record can belong
+  to it. Where its `type:host:name` collides with a current asset's, the two
+  are distinct assets and each gets its own line.
 
 Ordering rationale: `NEW` is the actual supply-chain event. `CHANGED`
 outranks `UPGRADED` because a byte change under a frozen version number is
@@ -68,6 +94,11 @@ ssc-init: 3 changes since last snapshot
   and in JSON.
 - Cap stays at 20 detail rows plus `…and N more changes`. Because rows sort by
   rung, the cap can never drop a `NEW` to make room for a `REMOVED`.
+- Row order is total: rung, then type, name and host, then the asset ID. The
+  display columns are not unique — an `ide-extension` name drops the publisher
+  its ID keeps, and package rows carry no host — so without the ID tiebreaker
+  colliding rows would order by map iteration and the report would not be
+  byte-identical run to run, breaking a release-blocking invariant.
 
 ### Standing unverified line
 
@@ -134,6 +165,44 @@ tree stays silent.
 If exact regression detection is ever needed, the honest upgrade path is to
 classify the change at diff time in `internal/inventory`, where both
 inventories are already in hand, and carry the class on the delta entry.
+
+### Name vocabulary on REMOVED rows
+
+The same missing previous inventory costs one more thing, and it is accepted
+rather than papered over. Every other rung describes an asset that is present
+in the current inventory, so its NAME column is `asset.Name`. A removed asset
+is absent from the current inventory by definition, so its row is built from
+its ID — and for two asset types the ID carries a **more qualified name** than
+the inventory record does:
+
+| Type | Inventory `Name` | Name recovered from the ID |
+|---|---|---|
+| `ide-extension` | `errorlens` | `usernamehw.errorlens` |
+| `pkg` | `@scope/server` | `npm/%40scope/server` |
+
+An `ide-extension` ID is `publisher.name` (`internal/collector/ide/manifest.go`
+sets `Name` to the name alone), and a `pkg` ID is a PURL whose name segment is
+`ecosystem/percent-encoded-name` (`internal/collector/packages` clears
+`Source`, so the ecosystem survives nowhere else). So the same extension prints
+`errorlens` when it is upgraded and `usernamehw.errorlens` when it is removed.
+
+This asymmetry is **known and accepted**, not a defect to normalise in the
+renderer. Stripping a `publisher.` prefix by last-dot is unreliable — extension
+names legitimately contain dots — and percent-decoding a PURL segment would
+reconstruct a name the tool never observed in this snapshot. Either would be an
+unearned claim of the same family as `DANGER`: output asserting something the
+tool did not establish. A removed row prints what the ID actually says.
+
+The only honest way to remove the asymmetry is to plumb the previous inventory
+into the renderer, which the section above declines for the same reason it
+declines exact `UNVERIFIED` classification. If that plumbing ever lands, removed
+rows should read their names from the previous inventory and this section goes
+away.
+
+Note that the asymmetry is invisible whenever an asset is upgraded rather than
+removed: the added side is in the inventory and wins the row. It shows up only
+on a bare `REMOVED`, and on a removed asset whose identity collides with a
+current one (each gets its own line).
 
 ## Surfaces
 

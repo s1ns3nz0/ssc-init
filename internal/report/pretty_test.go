@@ -225,7 +225,7 @@ func TestWritePrettyDeltaLadderIsNotCapped(t *testing.T) {
 	delta := model.Delta{}
 	for i := 0; i < 30; i++ {
 		name := fmt.Sprintf("srv%02d", i)
-		id := "mcp-server:claude-code:" + name
+		id := "mcp:claude-code:" + name // the prefix the mcp collector actually mints
 		inventory.Assets = append(inventory.Assets, model.Asset{
 			ID: id, Type: model.AssetMCP, Name: name, Source: "claude-code",
 		})

@@ -14,6 +14,7 @@ func hookFixture() (model.Inventory, model.Delta) {
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "agent-plugin:claude:alpha@1.0.0", Type: model.AssetAgentPlugin, Name: "alpha", Version: "1.0.0", Source: "claude"},
+			{ID: "ide-extension:vscode:bravo@2.0.0", Type: model.AssetIDEExtension, Name: "bravo", Version: "2.0.0", Source: "vscode"},
 		},
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-plugin:claude:alpha@1.0.0", Collector: "agents", Source: "agents.claude.plugins"},
@@ -35,8 +36,14 @@ func hookFixture() (model.Inventory, model.Delta) {
 }
 
 func TestWriteHookSummaryRendersLadder(t *testing.T) {
+	// An added asset is always in the inventory the scan just wrote, so every
+	// added ID here has a record; only the removed predecessor is absent.
 	inventory := model.Inventory{
-		Assets:       []model.Asset{{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"}},
+		Assets: []model.Asset{
+			{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
+			{ID: "mcp:claude-code:github", Type: model.AssetMCP, Name: "github", Source: "claude-code"},
+			{ID: "agent-plugin:claude:superpowers@6.2.0", Type: model.AssetAgentPlugin, Name: "superpowers", Version: "6.2.0", Source: "claude"},
+		},
 		Observations: []model.Observation{{ID: "observation:sha256:1111", AssetID: "agent-skill:claude:docx"}},
 		Evidence: []model.ContentEvidence{
 			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete, Digest: strings.Repeat("a", 64)},
@@ -113,15 +120,19 @@ func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
 
 func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 	var delta model.Delta
+	var inventory model.Inventory
 	for index := 0; index < 25; index++ {
+		name := string(rune('a' + index))
+		inventory.Assets = append(inventory.Assets, model.Asset{
+			ID: "agent-skill:claude:" + name, Type: model.AssetSkill, Name: name, Source: "claude"})
 		delta.Changes = append(delta.Changes,
 			model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset,
-				EntityID: "agent-skill:claude:" + string(rune('a'+index))},
+				EntityID: "agent-skill:claude:" + name},
 			model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset,
-				EntityID: "mcp:cursor:" + string(rune('a'+index))})
+				EntityID: "mcp:cursor:" + name})
 	}
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, model.Inventory{Assets: []model.Asset{{ID: "x"}}}, delta); err != nil {
+	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
 		t.Fatal(err)
 	}
 	output := buffer.String()
