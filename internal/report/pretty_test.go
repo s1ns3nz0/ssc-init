@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -211,5 +212,39 @@ func TestWriteStatusPrettyCoversInitializedLegacyAndEmptyStates(t *testing.T) {
 	}
 	if !strings.Contains(empty.String(), "not initialized") {
 		t.Fatalf("uninitialized status must say so:\n%s", empty.String())
+	}
+}
+
+// TestWritePrettyDeltaLadderIsNotCapped locks the design contract that the
+// interactive ladder is uncapped: `scan --pretty` is a command the operator
+// asked for, not a session interrupt, so it never truncates the diff nor
+// borrows the hook's "…and N more changes" overflow line.
+func TestWritePrettyDeltaLadderIsNotCapped(t *testing.T) {
+	scan, _, _ := prettyFixture()
+	inventory := model.Inventory{}
+	delta := model.Delta{}
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("srv%02d", i)
+		id := "mcp-server:claude-code:" + name
+		inventory.Assets = append(inventory.Assets, model.Asset{
+			ID: id, Type: model.AssetMCP, Name: name, Source: "claude-code",
+		})
+		delta.Changes = append(delta.Changes, model.Change{
+			Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: id,
+		})
+	}
+
+	var buffer bytes.Buffer
+	if err := report.WritePretty(&buffer, scan, inventory, delta); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+
+	rows := regexp.MustCompile(`(?m)^  NEW\s+mcp-server\s+srv\d\d \(claude-code\)$`).FindAllString(output, -1)
+	if len(rows) != 30 {
+		t.Fatalf("interactive scan must not cap the ladder: got %d rows:\n%s", len(rows), output)
+	}
+	if strings.Contains(output, "more changes") {
+		t.Fatalf("hook overflow line leaked into pretty:\n%s", output)
 	}
 }
