@@ -72,10 +72,31 @@ var digestSegment = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // digest-anchored ID that is gone from the current inventory.
 const unnamedAsset = "(unnamed)"
 
+// assetTypeByIDPrefix maps an asset-ID prefix to the model.AssetType its
+// collector records. Several prefixes are finer-grained than the type
+// ("project-config" and "project" are both model.AssetProject), and two spell
+// it differently ("mcp"/"pkg"). A removed asset is gone from the inventory, so
+// its row is built from the ID alone: without this map the TYPE column would
+// print one vocabulary for removals and another for every other rung. An
+// unrecognised prefix is printed verbatim rather than guessed at.
+var assetTypeByIDPrefix = map[string]string{
+	"agent-plugin":    string(model.AssetAgentPlugin),
+	"agent-skill":     string(model.AssetSkill),
+	"ide-extension":   string(model.AssetIDEExtension),
+	"mcp":             string(model.AssetMCP),
+	"pkg":             string(model.AssetPackage),
+	"project":         string(model.AssetProject),
+	"project-config":  string(model.AssetProject),
+	"tool":            string(model.AssetTool),
+	"tool-executable": string(model.AssetTool),
+}
+
 // parseAssetID splits "<type>:<host>:<name>[@<version>]" into the parts that
 // identify an asset across snapshots. Package IDs carry no host
-// ("pkg:pypi/moto@5.1.22"); names may contain "@" (npm scopes), so the version
-// splits on the last "@" — and only for prefixes that carry one at all.
+// ("pkg:pypi/moto@5.1.22"). Every versioned prefix escapes "@" out of the name
+// (percent-encoding for pkg, outright rejection for the rest), so a versioned
+// ID holds exactly one literal "@" and splitting on the last one is the same
+// as splitting on the first.
 func parseAssetID(id string) (assetType, host, name, version string) {
 	parts := strings.SplitN(id, ":", 3)
 	switch len(parts) {
@@ -98,12 +119,16 @@ func parseAssetID(id string) (assetType, host, name, version string) {
 // place a digest-anchored asset has a readable name, so a present asset is
 // described by its record. A removed asset is absent from the current
 // inventory by definition and falls back to its ID, which for a digest-
-// anchored form yields no name rather than a digest.
+// anchored form yields no name rather than a digest. Its ID prefix is mapped
+// back to the asset type so both branches print one vocabulary.
 func displayFor(assets map[string]model.Asset, id string) (assetType, name, host string) {
 	if asset, present := assets[id]; present {
 		return string(asset.Type), asset.Name, asset.Source
 	}
 	assetType, host, name, _ = parseAssetID(id)
+	if mapped, known := assetTypeByIDPrefix[assetType]; known {
+		assetType = mapped
+	}
 	if digestSegment.MatchString(name) {
 		return assetType, unnamedAsset, ""
 	}

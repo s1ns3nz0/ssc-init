@@ -45,7 +45,7 @@ func TestWriteHookSummaryRendersLadder(t *testing.T) {
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:claude-code:github"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:github"},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.2.0"},
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.1.1"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
@@ -118,7 +118,7 @@ func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 			model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset,
 				EntityID: "agent-skill:claude:" + string(rune('a'+index))},
 			model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset,
-				EntityID: "mcp-server:cursor:" + string(rune('a'+index))})
+				EntityID: "mcp:cursor:" + string(rune('a'+index))})
 	}
 	var buffer bytes.Buffer
 	if err := report.WriteHookSummary(&buffer, model.Inventory{Assets: []model.Asset{{ID: "x"}}}, delta); err != nil {

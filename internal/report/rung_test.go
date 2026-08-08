@@ -28,10 +28,10 @@ func TestClassifyPairsUpgradesAndRanksRungs(t *testing.T) {
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:claude-code:github"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:github"},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.2.0"},
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.1.1"},
-		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:cursor:stale"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp:cursor:stale"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:orphan"},
@@ -75,7 +75,8 @@ func TestParseAssetIDHandlesRealWorldForms(t *testing.T) {
 		{"agent-skill:claude:docx", "agent-skill", "claude", "docx", ""},
 		{"ide-extension:vscode:usernamehw.errorlens@3.16.0", "ide-extension", "vscode", "usernamehw.errorlens", "3.16.0"},
 		{"pkg:pypi/moto@5.1.22", "pkg", "", "pypi/moto", "5.1.22"},
-		{"pkg:npm/@scope/server@1.0.0", "pkg", "", "npm/@scope/server", "1.0.0"},
+		// escapePURLName percent-encodes an npm scope, so a real ID carries "%40".
+		{"pkg:npm/%40scope/server@1.0.0", "pkg", "", "npm/%40scope/server", "1.0.0"},
 		// mcp IDs never carry a version, so "@" belongs to the server name.
 		{"mcp:claude-code:ctx@prod", "mcp", "claude-code", "ctx@prod", ""},
 		{"project:sha256:77f9e938", "project", "sha256", "77f9e938", ""},
@@ -124,7 +125,7 @@ func TestClassifyDoesNotRenderDigestForRemovedProjectAssets(t *testing.T) {
 	if digestName.MatchString(rows[0].Name) || rows[0].Host == "sha256" {
 		t.Fatalf("digest reached the removed-asset row: %+v", rows[0])
 	}
-	if rows[0].Type != "project-config" || rows[0].Name != "(unnamed)" || rows[0].Host != "" {
+	if rows[0].Type != string(model.AssetProject) || rows[0].Name != "(unnamed)" || rows[0].Host != "" {
 		t.Fatalf("removed digest-anchored asset must render as unnamed: %+v", rows[0])
 	}
 }
@@ -138,8 +139,11 @@ func TestClassifyDoesNotInventVersionsForVersionlessIDs(t *testing.T) {
 	}
 }
 
+// TestParseAssetIDKeepsLeadingAtNames covers the "@" position guard on a
+// synthetic ID: normalizeIdentity rejects "@" in a publisher, so no collector
+// can emit this form. The guard is defensive and stays under test regardless.
 func TestParseAssetIDKeepsLeadingAtNames(t *testing.T) {
-	_, _, name, version := parseAssetID("ide-extension:vscode:@internal")
+	_, _, name, version := parseAssetID("ide-extension:vscode:@internal") // synthetic
 	if name != "@internal" || version != "" {
 		t.Fatalf("got name=%q version=%q", name, version)
 	}
@@ -184,11 +188,11 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
-		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:claude-code:github"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:github"},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "pkg:pypi/moto@5.1.22"},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.2.0"},
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.1.1"},
-		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:cursor:stale"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp:cursor:stale"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:docx"},
 		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
 	}}
@@ -204,7 +208,7 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 	hookRows, prettyRows := ladderRows(hook.String()), ladderRows(pretty.String())
 	want := []string{
 		"  NEW        mcp-server    github (claude-code)",
-		"  NEW        pkg           pypi/moto",
+		"  NEW        package       pypi/moto",
 		"  CHANGED    agent-skill   docx (claude)",
 		"  UNVERIFIED ide-extension big (vscode)",
 		"  UPGRADED   agent-plugin  superpowers (claude)  6.1.1 → 6.2.0",
@@ -219,6 +223,43 @@ func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
 	for _, row := range hookRows {
 		if strings.Contains(row, "()") {
 			t.Fatalf("hostless asset rendered empty parens: %q", row)
+		}
+	}
+}
+
+// TestRemovedRowsUseTheSameTypeVocabularyAsAddedRows pins the TYPE column to a
+// single vocabulary. A removed asset is absent from the inventory by
+// definition, so its row is built from the ID prefix; four prefixes differ from
+// the model.AssetType every other rung prints.
+func TestRemovedRowsUseTheSameTypeVocabularyAsAddedRows(t *testing.T) {
+	for _, c := range []struct {
+		id    string
+		asset model.Asset
+	}{
+		{"mcp:claude-code:srv", model.Asset{Type: model.AssetMCP, Name: "srv", Source: "claude-code"}},
+		{"pkg:npm/left-pad@1.0.0", model.Asset{Type: model.AssetPackage, Name: "left-pad"}},
+		{"project-config:sha256:" + strings.Repeat("b", 64),
+			model.Asset{Type: model.AssetProject, Name: ".mcp.json", Source: "project-config"}},
+		{"tool-executable:sha256:" + strings.Repeat("a", 64),
+			model.Asset{Type: model.AssetTool, Name: "executable"}},
+	} {
+		c.asset.ID = c.id
+		added := classify(model.Inventory{Assets: []model.Asset{c.asset}}, model.Delta{Changes: []model.Change{
+			{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: c.id}}})
+		removed := classify(model.Inventory{}, model.Delta{Changes: []model.Change{
+			{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: c.id}}})
+		if added[0].Type != removed[0].Type {
+			t.Errorf("id=%q NEW prints Type=%q but REMOVED prints Type=%q", c.id, added[0].Type, removed[0].Type)
+		}
+	}
+}
+
+// TestRungTypesFitTheScannableColumn guards the alignment the design document
+// calls a scannable column: every printed type must fit the %-13s field.
+func TestRungTypesFitTheScannableColumn(t *testing.T) {
+	for prefix, assetType := range assetTypeByIDPrefix {
+		if len(assetType) > 13 {
+			t.Errorf("prefix %q maps to %q (%d chars), overflowing the type column", prefix, assetType, len(assetType))
 		}
 	}
 }
