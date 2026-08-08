@@ -352,3 +352,48 @@ func TestOperationalCommandsFailGenericallyWhenDependencyMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
+	drift := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:alpha@1.0.0"}}}
+	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}
+
+	var out, errOut bytes.Buffer
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+		return scan, model.Inventory{}, drift, nil
+	})}
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("drift: code=%d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "toolchain drift") || !strings.Contains(out.String(), "agent-plugin alpha@1.0.0 (claude)") {
+		t.Fatalf("drift output wrong:\n%s", out.String())
+	}
+
+	out.Reset()
+	clean := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+		return scan, model.Inventory{}, model.Delta{}, nil
+	})}
+	if code := clean.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 || out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("clean: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	failing := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("store locked at /private/path")
+	})}
+	out.Reset()
+	errOut.Reset()
+	if code := failing.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("failure must stay advisory: code=%d", code)
+	}
+	if out.Len() != 0 || errOut.String() != "ssc-init hook: baseline scan failed\n" {
+		t.Fatalf("failure output wrong: stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := (App{}).Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("nil scanner must stay advisory: code=%d", code)
+	}
+	if out.Len() != 0 || errOut.String() != "ssc-init hook: baseline scan failed\n" {
+		t.Fatalf("nil scanner output wrong: stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+}

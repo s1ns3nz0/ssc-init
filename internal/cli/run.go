@@ -147,6 +147,21 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		return 0
+	case "hook":
+		if a.BaselineScanner == nil {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		_, inventory, delta, err := a.BaselineScanner.Baseline(ctx)
+		if err != nil {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		if err := report.WriteHookSummary(stdout, inventory, delta); err != nil {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		return 0
 	default:
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
