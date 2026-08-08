@@ -2388,6 +2388,133 @@ func TestSaveScanPrunesAssetHistoryBeyondNinetyDays(t *testing.T) {
 	}
 }
 
+// saveHistorySnapshotWithoutCompleteEvidence saves a snapshot in which
+// asset-one's complete evidence and its coverage target are dropped, leaving
+// the asset present but carrying only non-complete evidence: exactly the shape
+// a target that became unreadable on a later scan produces.
+func saveHistorySnapshotWithoutCompleteEvidence(t *testing.T, s *Store, scanID string, finishedAt, now time.Time) {
+	t.Helper()
+	scan, inventory := validV3Snapshot(t, scanID)
+	scan.StartedAt, scan.FinishedAt = finishedAt.Add(-time.Second), finishedAt
+	kept := make([]model.ContentEvidence, 0, len(inventory.Evidence))
+	removed := ""
+	for _, evidence := range inventory.Evidence {
+		if evidence.AssetID == "asset-one" && evidence.Status == model.EvidenceComplete {
+			removed = evidence.ID
+			continue
+		}
+		kept = append(kept, evidence)
+	}
+	if removed == "" {
+		t.Fatal("fixture carries no complete evidence for asset-one")
+	}
+	inventory.Evidence = kept
+	targets := make([]model.EvidenceTargetResult, 0, len(scan.EvidenceCoverage.Targets))
+	for _, target := range scan.EvidenceCoverage.Targets {
+		if target.EvidenceID == removed {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	scan.EvidenceCoverage.Targets = targets
+	if err := s.saveScanAt(context.Background(), scan, inventory, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSaveScanEmptyDigestNeverOverwritesKnownDigest pins two rules the upsert
+// promises in its comment: a scan that produces no trusted digest for an asset
+// neither erases the last known digest nor forges a content change, and only
+// complete evidence is a trusted digest, so the asset's surviving partial
+// evidence must not stand in for the complete evidence it lost.
+func TestSaveScanEmptyDigestNeverOverwritesKnownDigest(t *testing.T) {
+	s := openTestStore(t)
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "digest-known", "", strings.Repeat("a", 64), first, first)
+	_, _, digest, changedAt, ok := assetHistoryRow(t, s, "asset-one")
+	if !ok || digest == "" {
+		t.Fatalf("first scan recorded no digest: ok=%v digest=%q", ok, digest)
+	}
+	if changedAt != formatTime(first) {
+		t.Fatalf("changed at = %q, want %q", changedAt, formatTime(first))
+	}
+
+	later := first.Add(24 * time.Hour)
+	saveHistorySnapshotWithoutCompleteEvidence(t, s, "digest-unreadable", later, later)
+	_, lastSeen, gotDigest, gotChanged, _ := assetHistoryRow(t, s, "asset-one")
+	if lastSeen != formatTime(later) {
+		t.Fatalf("last seen = %q, want %q", lastSeen, formatTime(later))
+	}
+	if gotDigest != digest {
+		t.Fatalf("digest = %q, want the last known digest %q", gotDigest, digest)
+	}
+	if gotChanged != formatTime(first) {
+		t.Fatalf("changed at = %q, want %q: a scan without a trusted digest forged a content change", gotChanged, formatTime(first))
+	}
+}
+
+// TestSaveScanBackdatedScanDoesNotRewriteAssetHistory pins the history record
+// to scan order: a snapshot saved out of order and finished before the newest
+// stored one must not become the reported content digest, and must not date a
+// content change backwards. Written against literal times rather than the
+// upsert's shape so it survives a rewrite of the statement.
+func TestSaveScanBackdatedScanDoesNotRewriteAssetHistory(t *testing.T) {
+	s := openTestStore(t)
+	newest := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "history-newest", "", strings.Repeat("a", 64), newest, newest)
+	_, _, digest, _, ok := assetHistoryRow(t, s, "asset-one")
+	if !ok || digest == "" {
+		t.Fatalf("first scan recorded no digest: ok=%v digest=%q", ok, digest)
+	}
+
+	backdated := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "history-backdated", "", strings.Repeat("c", 64), backdated, newest)
+	firstSeen, lastSeen, gotDigest, gotChanged, _ := assetHistoryRow(t, s, "asset-one")
+	if firstSeen != formatTime(backdated) {
+		t.Fatalf("first seen = %q, want the earliest sighting %q", firstSeen, formatTime(backdated))
+	}
+	if lastSeen != formatTime(newest) {
+		t.Fatalf("last seen = %q, want the newest sighting %q", lastSeen, formatTime(newest))
+	}
+	if gotDigest != digest {
+		t.Fatalf("digest = %q, want the newest snapshot's digest %q", gotDigest, digest)
+	}
+	if gotChanged != formatTime(newest) {
+		t.Fatalf("changed at = %q, want %q: a backdated scan dated a content change before the change it reports", gotChanged, formatTime(newest))
+	}
+}
+
+// TestSaveScanAssetHistoryRetentionEdge pins the history window to 90 days at
+// its own edge. Every bound is a literal duration: a test written in terms of
+// the retention constant pins nothing, because the constant is what a mistake
+// would change.
+func TestSaveScanAssetHistoryRetentionEdge(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		assetID string
+		age     time.Duration
+		kept    bool
+	}{
+		{assetID: "edge-91d", age: 91 * 24 * time.Hour},
+		{assetID: "edge-90d-1ns", age: 90*24*time.Hour + time.Nanosecond},
+		{assetID: "edge-90d", age: 90 * 24 * time.Hour, kept: true},
+		{assetID: "edge-89d", age: 89 * 24 * time.Hour, kept: true},
+	}
+	for _, tt := range cases {
+		at := now.Add(-tt.age)
+		saveHistorySnapshot(t, s, "retention-"+tt.assetID, tt.assetID, "", at, at)
+	}
+	saveHistorySnapshot(t, s, "retention-now", "", "", now, now)
+
+	for _, tt := range cases {
+		_, _, _, _, ok := assetHistoryRow(t, s, tt.assetID)
+		if ok != tt.kept {
+			t.Fatalf("history last seen %v ago: kept=%v, want kept=%v", tt.age, ok, tt.kept)
+		}
+	}
+}
+
 // TestSaveScanKeepsAssetHistoryForRetainedSnapshots covers the interaction
 // between the two windows: the newest snapshot is retained regardless of age,
 // so the assets it still names must keep their history too.

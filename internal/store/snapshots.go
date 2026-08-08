@@ -240,14 +240,22 @@ func recordAssetHistory(ctx context.Context, tx *sql.Tx, scan model.ScanResult, 
 		// for the asset, which is not the same as its content having changed:
 		// the last known digest and its transition time are kept so a target
 		// that is temporarily unreadable does not forge a change record.
+		//
+		// The digest columns also only advance forwards in scan time. Nothing
+		// stops a snapshot finished before the newest stored one from being
+		// saved, and such a scan describes older content: letting it win would
+		// report a digest that is not the newest snapshot's and date the change
+		// to it backwards.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO asset_history(asset_id, first_seen_at, last_seen_at, content_digest, content_changed_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(asset_id) DO UPDATE SET
     first_seen_at = min(asset_history.first_seen_at, excluded.first_seen_at),
     last_seen_at = max(asset_history.last_seen_at, excluded.last_seen_at),
-    content_changed_at = CASE WHEN excluded.content_digest <> '' AND excluded.content_digest <> asset_history.content_digest
+    content_changed_at = CASE WHEN excluded.last_seen_at >= asset_history.last_seen_at
+        AND excluded.content_digest <> '' AND excluded.content_digest <> asset_history.content_digest
         THEN excluded.content_changed_at ELSE asset_history.content_changed_at END,
-    content_digest = CASE WHEN excluded.content_digest <> '' THEN excluded.content_digest ELSE asset_history.content_digest END`,
+    content_digest = CASE WHEN excluded.last_seen_at >= asset_history.last_seen_at AND excluded.content_digest <> ''
+        THEN excluded.content_digest ELSE asset_history.content_digest END`,
 			asset.ID, seenAt, seenAt, digests[asset.ID], seenAt); err != nil {
 			return fmt.Errorf("record asset history %q: %w", asset.ID, err)
 		}
