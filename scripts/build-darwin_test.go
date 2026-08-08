@@ -36,6 +36,7 @@ func TestBuildScriptDeclaresStaticTargets(t *testing.T) {
 		"shasum -a 256",
 		"go version -m",
 		"bomFormat",
+		"in-toto.io/Statement/v1",
 	} {
 		if !bytes.Contains(raw, []byte(want)) {
 			t.Fatalf("build script missing %q", want)
@@ -110,6 +111,79 @@ var releaseArtifactNames = []string{
 	"ssc-init-darwin-universal",
 	"sbom.cdx.json",
 	"checksums.txt",
+	"provenance.json",
+}
+
+func TestBuildScriptEmitsProvenanceMatchingChecksums(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cross-build smoke test")
+	}
+	repositoryRoot := repositoryRoot(t)
+	command := exec.Command("sh", filepath.Join(repositoryRoot, "scripts", "build-darwin.sh"))
+	command.Dir = t.TempDir()
+	command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(filepath.Join(repositoryRoot, "dist", "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statement struct {
+		Type          string `json:"_type"`
+		PredicateType string `json:"predicateType"`
+		Subject       []struct {
+			Name   string            `json:"name"`
+			Digest map[string]string `json:"digest"`
+		} `json:"subject"`
+		Predicate struct {
+			BuildDefinition struct {
+				BuildType          string            `json:"buildType"`
+				ExternalParameters map[string]string `json:"externalParameters"`
+				InternalParameters map[string]string `json:"internalParameters"`
+			} `json:"buildDefinition"`
+		} `json:"predicate"`
+	}
+	if err := json.Unmarshal(raw, &statement); err != nil {
+		t.Fatalf("provenance is not valid JSON: %v\n%s", err, raw)
+	}
+	if statement.Type != "https://in-toto.io/Statement/v1" ||
+		statement.PredicateType != "https://slsa.dev/provenance/v1" {
+		t.Fatalf("unexpected provenance envelope: %+v", statement)
+	}
+	if statement.Predicate.BuildDefinition.ExternalParameters["version"] != expectedReleaseVersion(t, repositoryRoot) {
+		t.Fatalf("provenance version mismatch: %+v", statement.Predicate.BuildDefinition.ExternalParameters)
+	}
+	if statement.Predicate.BuildDefinition.ExternalParameters["revision"] != worktreeRevision(t, repositoryRoot) {
+		t.Fatal("provenance revision does not match the committed HEAD")
+	}
+	if statement.Predicate.BuildDefinition.InternalParameters["cgoEnabled"] != "0" {
+		t.Fatal("provenance does not record a CGO-free build")
+	}
+
+	checksums, err := os.ReadFile(filepath.Join(repositoryRoot, "dist", "checksums.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(checksums)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("unexpected checksum line %q", line)
+		}
+		recorded[filepath.Base(fields[1])] = fields[0]
+	}
+	if len(statement.Subject) != len(recorded) {
+		t.Fatalf("provenance covers %d subjects, checksums cover %d", len(statement.Subject), len(recorded))
+	}
+	for _, subject := range statement.Subject {
+		if subject.Digest["sha256"] != recorded[subject.Name] {
+			t.Fatalf("provenance digest for %s does not match checksums.txt", subject.Name)
+		}
+	}
+	if bytes.Contains(raw, []byte(repositoryRoot)) {
+		t.Fatal("provenance contains an absolute repository path")
+	}
 }
 
 func TestBuildScriptEmitsCycloneDXSBOM(t *testing.T) {
@@ -379,12 +453,17 @@ func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []strin
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
 }
 
-// fakeGoVersionBranch answers `go version -m` for the isolated fixtures, whose
-// fake go writes text the real toolchain cannot read module metadata out of.
-// It prefixes the fixtures' argument-scanning bodies, which exit 2 without -o.
+// fakeGoVersionBranch answers `go version -m` and `go env GOVERSION` for the
+// isolated fixtures, whose fake go writes text the real toolchain cannot read
+// module metadata out of. It prefixes the fixtures' argument-scanning bodies,
+// which exit 2 without -o.
 const fakeGoVersionBranch = `#!/bin/sh
 if [ "$1" = version ]; then
   printf '%s: go1.26.5\n\tpath\tfixture\n\tdep\texample.com/fixture\tv1.0.0\th1:fixture=\n' "$3"
+  exit 0
+fi
+if [ "$1" = env ] && [ "$2" = GOVERSION ]; then
+  printf 'go1.26.5\n'
   exit 0
 fi
 `

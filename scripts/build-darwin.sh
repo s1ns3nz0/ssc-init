@@ -115,3 +115,47 @@ shasum -a 256 \
 	dist/ssc-init-darwin-amd64 \
 	dist/ssc-init-darwin-arm64 \
 	dist/ssc-init-darwin-universal | sort -k 2 > "$DIST_DIR/checksums.txt"
+
+# Unsigned in-toto Statement wrapping a SLSA v1 provenance predicate: it names
+# the commit, toolchain and flags that produced the digests, so a third party
+# who clones the same commit and re-runs this script can confirm the digests
+# match. It carries no wall-clock time and no invocation ID, both of which
+# would destroy reproducibility and neither of which is verifiable without a
+# hosted builder. This is the last step: the subjects are read out of
+# checksums.txt, and nothing writes into checksums.txt afterwards, so the
+# statement can never become a subject of itself.
+GO_VERSION=$(go env GOVERSION)
+
+awk -v version="$VERSION" \
+	-v revision="$REVISION" \
+	-v epoch="$SOURCE_DATE_EPOCH" \
+	-v goversion="$GO_VERSION" \
+	-v ldflags="$LINKER_FLAGS" '
+	BEGIN {
+		printf "{\n"
+		printf "  \"_type\": \"https://in-toto.io/Statement/v1\",\n"
+		printf "  \"predicateType\": \"https://slsa.dev/provenance/v1\",\n"
+		printf "  \"subject\": ["
+	}
+	NF == 2 {
+		name = $2
+		sub(/^.*\//, "", name)
+		if (count++) printf ","
+		printf "\n    {\"name\": \"%s\", \"digest\": {\"sha256\": \"%s\"}}", name, $1
+	}
+	END {
+		if (count) printf "\n  "
+		printf "],\n"
+		printf "  \"predicate\": {\n"
+		printf "    \"buildDefinition\": {\n"
+		printf "      \"buildType\": \"https://github.com/s1ns3nz0/ssc-init/scripts/build-darwin.sh@v1\",\n"
+		printf "      \"externalParameters\": {\"version\": \"%s\", \"revision\": \"%s\", \"sourceDateEpoch\": \"%s\"},\n", version, revision, epoch
+		printf "      \"internalParameters\": {\"goVersion\": \"%s\", \"cgoEnabled\": \"0\", \"goos\": \"darwin\", \"goarch\": \"arm64 amd64\", \"buildFlags\": \"-mod=readonly -trimpath -buildvcs=false\", \"ldflags\": \"%s\"},\n", goversion, ldflags
+		printf "      \"resolvedDependencies\": [{\"uri\": \"git+https://github.com/s1ns3nz0/ssc-init\", \"digest\": {\"gitCommit\": \"%s\"}}]\n", revision
+		printf "    },\n"
+		printf "    \"runDetails\": {\n"
+		printf "      \"builder\": {\"id\": \"https://github.com/s1ns3nz0/ssc-init/scripts/build-darwin.sh\"}\n"
+		printf "    }\n"
+		printf "  }\n"
+		printf "}\n"
+	}' "$DIST_DIR/checksums.txt" > "$DIST_DIR/provenance.json"
