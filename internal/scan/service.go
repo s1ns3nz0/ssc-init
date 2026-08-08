@@ -20,6 +20,12 @@ import (
 
 const schemaVersion = "ssc-init.scan.v3"
 
+// DefaultBudget bounds one baseline scan. Design §12 allows the initial
+// baseline at most 10 minutes; exceeding a time budget must produce a partial
+// result naming the unscanned targets rather than a silently truncated
+// complete one.
+const DefaultBudget = 10 * time.Minute
+
 // SnapshotStore is the persistence boundary required by a baseline scan.
 type SnapshotStore interface {
 	SaveScan(context.Context, model.ScanResult, model.Inventory) error
@@ -28,6 +34,10 @@ type SnapshotStore interface {
 
 // Service runs collectors and persists their normalized result.
 type Service struct {
+	// Budget bounds collection and evidence for one scan. It is a
+	// construction-time value — NewService sets DefaultBudget — and is not
+	// user-configurable. A non-positive value disables the budget.
+	Budget       time.Duration
 	orchestrator collector.Orchestrator
 	snapshots    SnapshotStore
 	now          func() time.Time
@@ -42,7 +52,7 @@ type Service struct {
 // useful for collectors whose tests do not access the host. More than one is
 // ambiguous and causes Baseline to fail before persistence.
 func NewService(orchestrator collector.Orchestrator, snapshots SnapshotStore, now func() time.Time, newID func() string, environments ...collector.Environment) *Service {
-	service := &Service{orchestrator: orchestrator, snapshots: snapshots, now: now, newID: newID}
+	service := &Service{Budget: DefaultBudget, orchestrator: orchestrator, snapshots: snapshots, now: now, newID: newID}
 	if service.now == nil {
 		service.now = func() time.Time { return time.Now().UTC() }
 	}
@@ -82,13 +92,22 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	if startedAt.IsZero() {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("capture scan start time")
 	}
-	results := s.orchestrator.Collect(ctx, s.environment)
+	// Collection and evidence run under the budget; persistence runs under the
+	// caller's context so an overrun still commits its partial result. Only the
+	// caller's own context distinguishes the two outcomes: while it is live, a
+	// done budget context means the budget bound, never a caller cancellation.
+	budgetCtx, cancelBudget := s.withBudget(ctx)
+	defer cancelBudget()
+
+	results := s.orchestrator.Collect(budgetCtx, s.environment)
 	if err := ctx.Err(); err != nil {
+		clearRuntimeState(results)
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 	if s.hasEnv {
-		results = s.collectProjectMCP(ctx, results)
+		results = s.collectProjectMCP(budgetCtx, results)
 		if err := ctx.Err(); err != nil {
+			clearRuntimeState(results)
 			return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 		}
 	}
@@ -100,8 +119,9 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	if current.Observations == nil {
 		current.Observations = []model.Observation{}
 	}
-	collection := s.collectLocalEvidence(ctx, current, results)
+	collection := s.collectLocalEvidence(budgetCtx, current, results)
 	if err := ctx.Err(); err != nil {
+		clearRuntimeState(results)
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 	current.Evidence = append(current.Evidence, collection.Evidence...)
@@ -147,6 +167,28 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		_ = writer.StoreContentCache(ctx, collection.CacheWrites)
 	}
 	return result, current, delta, !exists, nil
+}
+
+// withBudget bounds collection and evidence. A caller context that is already
+// bounded more tightly keeps its own deadline, so a caller deadline stays a
+// cancellation rather than becoming a budget overrun.
+func (s *Service) withBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.Budget <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.Budget)
+}
+
+// clearRuntimeState drops the runtime-only evidence and target state of results
+// abandoned by a cancellation, which never reach the normal clearing path.
+func clearRuntimeState(results []model.CollectorResult) {
+	collector.ClearLocalEvidenceTargets(results)
+	for index := range results {
+		for targetIndex := range results[index].LocalTargets {
+			results[index].LocalTargets[targetIndex] = model.LocalTarget{}
+		}
+		results[index].LocalTargets = nil
+	}
 }
 
 // collectLocalEvidence runs the bounded local evidence engine against the

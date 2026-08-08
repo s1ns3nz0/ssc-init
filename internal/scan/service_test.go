@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1058,6 +1059,116 @@ func TestBaselineCacheHandoffIsBestEffortAfterSave(t *testing.T) {
 			t.Fatalf("disabled cache expected: %+v", inventoryResult.Evidence)
 		}
 	})
+}
+
+// blockingCollector stays inside Collect until its context is done, standing in
+// for a collector that outlives the scan budget on a slow machine. The fallback
+// bounds a broken budget so the suite fails instead of hanging.
+func blockingCollector(name string) collector.Collector {
+	return collectorFunc{name: name, fn: func(ctx context.Context, _ collector.Environment) (model.CollectorResult, error) {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		return model.CollectorResult{Status: model.CoverageComplete}, nil
+	}}
+}
+
+func TestBaselineBudgetOverrunPersistsPartialAndNamesUnfinishedCollectors(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	orchestrator := collector.Orchestrator{MaxConcurrent: 2, Collectors: []collector.Collector{
+		fixedCollector{name: "agents", result: model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{{ID: "tool:new", Type: model.AssetTool, Name: "new"}}}},
+		blockingCollector("slow"),
+	}}
+	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID)
+	service.Budget = time.Millisecond
+
+	result, _, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatalf("budget overrun must not be an error: %v", err)
+	}
+	if result.Status != model.ScanPartial {
+		t.Fatalf("scan=%+v", result)
+	}
+	if len(snapshots.saved) != 1 || snapshots.saved[0].Status != model.ScanPartial {
+		t.Fatalf("saved=%+v", snapshots.saved)
+	}
+	unfinished := false
+	for _, coverage := range result.Coverage {
+		if coverage.Collector != "slow" {
+			continue
+		}
+		if coverage.Status == model.CoverageComplete {
+			t.Fatalf("unscanned collector reported complete: %+v", coverage)
+		}
+		unfinished = true
+	}
+	if !unfinished {
+		t.Fatalf("unscanned collector missing from coverage: %+v", result.Coverage)
+	}
+}
+
+func TestBaselineCancellationReturnsErrorAndClearsRuntimeState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	issuerCleared, provenanceCleared := false, false
+	cancelling := collectorFunc{name: "mcp", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		cancel()
+		result := model.CollectorResult{Status: model.CoverageComplete}
+		result.LocalEvidenceIssuer = reproClearer{cleared: &issuerCleared}
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{{TargetID: "mcp.fake", Provenance: reproClearer{cleared: &provenanceCleared}}}
+		return result, nil
+	}}
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{cancelling}}, snapshots, fixedTime, fixedUUID)
+
+	_, _, _, _, err := service.Baseline(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Baseline error=%v", err)
+	}
+	if len(snapshots.saved) != 0 {
+		t.Fatalf("cancelled scan persisted: %+v", snapshots.saved)
+	}
+	if !issuerCleared || !provenanceCleared {
+		t.Fatalf("cancelled scan kept runtime state: issuer=%v provenance=%v", issuerCleared, provenanceCleared)
+	}
+}
+
+func TestBaselineCallerDeadlineIsCancellationNotBudgetOverrun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{blockingCollector("slow")}}, snapshots, fixedTime, fixedUUID)
+	service.Budget = time.Hour
+
+	_, _, _, _, err := service.Baseline(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Baseline error=%v", err)
+	}
+	if len(snapshots.saved) != 0 {
+		t.Fatalf("expired caller deadline persisted: %+v", snapshots.saved)
+	}
+}
+
+func TestBaselineDefaultBudgetLeavesFastScanComplete(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "agents", result: model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{{ID: "tool:new", Type: model.AssetTool, Name: "new"}}}},
+	}}
+	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID)
+	if service.Budget != DefaultBudget || DefaultBudget != 10*time.Minute {
+		t.Fatalf("budget=%s default=%s", service.Budget, DefaultBudget)
+	}
+
+	result, _, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != model.ScanComplete || len(snapshots.saved) != 1 {
+		t.Fatalf("scan=%+v saved=%+v", result, snapshots.saved)
+	}
 }
 
 type recordingRootFileSystem struct {
