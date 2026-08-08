@@ -214,6 +214,102 @@ func TestStatusConstructsStoreWithoutProjectCollectors(t *testing.T) {
 	}
 }
 
+func TestHookRunsBaselineScanAndPersistsSnapshot(t *testing.T) {
+	oldHost, oldOpen := hostPathsForRun, openStoreForRun
+	t.Cleanup(func() {
+		hostPathsForRun = oldHost
+		openStoreForRun = oldOpen
+	})
+	home := t.TempDir()
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		return home, platform.PathsForHome(home), true
+	}
+	fakeStore := &mainSnapshotStore{}
+	openStoreForRun = func(path string) (applicationStore, error) {
+		if path != filepath.Join(home, "Library", "Application Support", "SSC Init", "state.db") {
+			t.Fatalf("store path=%q", path)
+		}
+		return fakeStore, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if fakeStore.saveCalls != 1 {
+		t.Fatalf("baseline scanner was not reached: save calls=%d", fakeStore.saveCalls)
+	}
+	if fakeStore.closeCalls != 1 {
+		t.Fatalf("close calls=%d", fakeStore.closeCalls)
+	}
+}
+
+func TestHookOnUnsupportedOperatingSystemIsAUsageError(t *testing.T) {
+	oldGOOS, oldHost, oldOpen := runtimeGOOS, hostPathsForRun, openStoreForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		hostPathsForRun = oldHost
+		openStoreForRun = oldOpen
+	})
+	runtimeGOOS = "linux"
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		t.Fatal("hook resolved host paths on an unsupported operating system")
+		return "", platform.Paths{}, false
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		t.Fatal("hook opened the store on an unsupported operating system")
+		return nil, errors.New("store must not be opened")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr)
+	if code != 2 || stdout.String() != "" || stderr.String() != "unsupported operating system\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
+	oldHost, oldOpen := hostPathsForRun, openStoreForRun
+	t.Cleanup(func() {
+		hostPathsForRun = oldHost
+		openStoreForRun = oldOpen
+	})
+	home := t.TempDir()
+
+	for _, testCase := range []struct {
+		name  string
+		hosts func() (string, platform.Paths, bool)
+		open  func(string) (applicationStore, error)
+	}{
+		{
+			name:  "host paths unavailable",
+			hosts: func() (string, platform.Paths, bool) { return "", platform.Paths{}, false },
+			open: func(string) (applicationStore, error) {
+				t.Fatal("hook opened the store without host paths")
+				return nil, errors.New("store must not be opened")
+			},
+		},
+		{
+			name:  "store unavailable",
+			hosts: func() (string, platform.Paths, bool) { return home, platform.PathsForHome(home), true },
+			open:  func(string) (applicationStore, error) { return nil, errors.New("store unavailable") },
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			hostPathsForRun = testCase.hosts
+			openStoreForRun = testCase.open
+			var stdout, stderr bytes.Buffer
+			code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr)
+			if code != 0 || stdout.String() != "" || stderr.String() != "ssc-init hook: baseline scan failed\n" {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) {
 	home := t.TempDir()
 	external := filepath.Join(filepath.Dir(home), "external-projects")
@@ -282,9 +378,11 @@ func TestDefaultStoreSupportsAutomaticEvidenceCacheWiring(t *testing.T) {
 
 type mainSnapshotStore struct {
 	closeCalls int
+	saveCalls  int
 }
 
-func (*mainSnapshotStore) SaveScan(context.Context, model.ScanResult, model.Inventory) error {
+func (store *mainSnapshotStore) SaveScan(context.Context, model.ScanResult, model.Inventory) error {
+	store.saveCalls++
 	return nil
 }
 

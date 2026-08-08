@@ -115,6 +115,31 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
 		return app.RunOptions(ctx, options, stdout, stderr)
+	case "hook":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		environment, configuredCollectors, err := scanConfiguration(home, options)
+		if err != nil {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			return 0
+		}
+		defer snapshots.Close()
+
+		orchestrator := collector.Orchestrator{
+			Timeout:       30 * time.Second,
+			MaxConcurrent: 4,
+			Collectors:    configuredCollectors,
+		}
+		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		return app.RunOptions(ctx, options, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
@@ -123,7 +148,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "doctor", "scan", "status":
+	case "doctor", "hook", "scan", "status":
 		return true
 	default:
 		return false
