@@ -35,14 +35,7 @@ func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.D
 		shown = shown[:maxHookDetailRows]
 	}
 	for _, row := range shown {
-		line := fmt.Sprintf("  %-10s %-13s %s", rungLabels[row.Rung], row.Type, row.Name)
-		if row.Host != "" {
-			line += fmt.Sprintf(" (%s)", row.Host)
-		}
-		if row.Rung == rungUpgraded {
-			line += fmt.Sprintf("  %s → %s", row.From, row.To)
-		}
-		printer.line(line)
+		printer.line("  " + row.render())
 	}
 	if overflow := len(rows) - len(shown); overflow > 0 {
 		printer.line(fmt.Sprintf("  …and %d more changes", overflow))

@@ -248,13 +248,6 @@ func (p *prettyPrinter) deltaSummary(inventory model.Inventory, delta model.Delt
 		return
 	}
 	for _, row := range rows {
-		line := fmt.Sprintf("  %-10s %-13s %s", rungLabels[row.Rung], row.Type, row.Name)
-		if row.Host != "" {
-			line += fmt.Sprintf(" (%s)", row.Host)
-		}
-		if row.Rung == rungUpgraded {
-			line += fmt.Sprintf("  %s → %s", row.From, row.To)
-		}
-		p.line(line)
+		p.line("  " + row.render())
 	}
 }

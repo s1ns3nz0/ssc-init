@@ -1,8 +1,10 @@
 package report
 
 import (
+	"bytes"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -140,6 +142,84 @@ func TestParseAssetIDKeepsLeadingAtNames(t *testing.T) {
 	_, _, name, version := parseAssetID("ide-extension:vscode:@internal")
 	if name != "@internal" || version != "" {
 		t.Fatalf("got name=%q version=%q", name, version)
+	}
+}
+
+// ladderRows keeps the indented rung lines of a rendered report and drops
+// everything around them (headers, counts, tables, the hook overflow line).
+func ladderRows(output string) []string {
+	labels := make(map[string]struct{}, len(rungLabels))
+	for _, label := range rungLabels {
+		labels[label] = struct{}{}
+	}
+	var rows []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if !strings.HasPrefix(line, "  ") || len(fields) == 0 {
+			continue
+		}
+		if _, isRow := labels[fields[0]]; isRow {
+			rows = append(rows, line)
+		}
+	}
+	return rows
+}
+
+// TestRungRowRenderingIsIdenticalInHookAndPretty characterises the one format
+// both surfaces share. The hook caps and the pretty ladder does not, so this
+// fixture stays under the cap: below it the two must agree byte for byte.
+func TestRungRowRenderingIsIdenticalInHookAndPretty(t *testing.T) {
+	inventory := model.Inventory{
+		Assets: []model.Asset{
+			{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"},
+			{ID: "ide-extension:vscode:big@1.0.0", Type: model.AssetIDEExtension, Name: "big", Version: "1.0.0", Source: "vscode"},
+		},
+		Observations: []model.Observation{
+			{ID: "observation:sha256:1111", AssetID: "agent-skill:claude:docx"},
+			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:big@1.0.0"},
+		},
+		Evidence: []model.ContentEvidence{
+			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete},
+			{ID: "evidence:sha256:bbbb", ObservationID: "observation:sha256:2222", Status: model.EvidenceOversize},
+		},
+	}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:claude-code:github"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "pkg:pypi/moto@5.1.22"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.2.0"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.1.1"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:cursor:stale"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:docx"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:bbbb"},
+	}}
+
+	var hook, pretty bytes.Buffer
+	if err := WriteHookSummary(&hook, inventory, delta); err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	if err := WritePretty(&pretty, model.ScanResult{}, inventory, delta); err != nil {
+		t.Fatalf("pretty: %v", err)
+	}
+
+	hookRows, prettyRows := ladderRows(hook.String()), ladderRows(pretty.String())
+	want := []string{
+		"  NEW        mcp-server    github (claude-code)",
+		"  NEW        pkg           pypi/moto",
+		"  CHANGED    agent-skill   docx (claude)",
+		"  UNVERIFIED ide-extension big (vscode)",
+		"  UPGRADED   agent-plugin  superpowers (claude)  6.1.1 → 6.2.0",
+		"  REMOVED    mcp-server    stale (cursor)",
+	}
+	if !reflect.DeepEqual(hookRows, want) {
+		t.Fatalf("hook rows drifted:\ngot=%q\nwant=%q", hookRows, want)
+	}
+	if !reflect.DeepEqual(prettyRows, hookRows) {
+		t.Fatalf("surfaces disagree:\nhook=%q\npretty=%q", hookRows, prettyRows)
+	}
+	for _, row := range hookRows {
+		if strings.Contains(row, "()") {
+			t.Fatalf("hostless asset rendered empty parens: %q", row)
+		}
 	}
 }
 

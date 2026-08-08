@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,6 +36,20 @@ type rungRow struct {
 	Name     string
 	Host     string
 	From, To string
+}
+
+// render returns the display line for one row, without the leading indent. It
+// is the single format both the hook and the pretty ladder print; only the
+// hook caps how many rows reach it.
+func (row rungRow) render() string {
+	line := fmt.Sprintf("%-10s %-13s %s", rungLabels[row.Rung], row.Type, row.Name)
+	if row.Host != "" {
+		line += fmt.Sprintf(" (%s)", row.Host)
+	}
+	if row.Rung == rungUpgraded {
+		line += fmt.Sprintf("  %s → %s", row.From, row.To)
+	}
+	return line
 }
 
 // versionedAssetTypes is the closed set of asset-ID prefixes that append
