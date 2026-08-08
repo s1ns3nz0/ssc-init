@@ -101,6 +101,64 @@ func TestHookReportsTheFirstAssetInstalledAfterAnEmptyBaseline(t *testing.T) {
 	}
 }
 
+// TestRealisticScanProducesNoUnattributableRecord backs the one claim the
+// severity ladder makes about what it silently drops. The renderer omits any
+// evidence or observation change it cannot attribute to a named asset, because
+// printing "1 evidence records" would launder an attribution bug into output.
+// That omission is only honest while such records do not actually arise, so a
+// realistic scan asserts it here rather than leaving the hook's tolerance as
+// the only statement on the subject. Both probe modes run: the digest-anchored
+// asset types (project, project-config, tool-executable) are exactly the ones
+// whose orphan would print as a digest, and tool-executable exists only under
+// external probes.
+func TestRealisticScanProducesNoUnattributableRecord(t *testing.T) {
+	for _, probes := range []bool{false, true} {
+		name := "probes off"
+		options := baselineOptions{home: copyOfficialFixtureHome(t)}
+		if probes {
+			name = "probes on"
+			options.externalProbes = true
+			options.runner, options.inspector = pipProbeFixture(t, options.home)
+		}
+		t.Run(name, func(t *testing.T) {
+			result := runIsolatedBaseline(t, options)
+			assertEveryRecordResolvesToAnAsset(t, result.Inventory)
+		})
+	}
+}
+
+// assertEveryRecordResolvesToAnAsset fails if any observation or evidence
+// record names an asset the inventory does not carry, resolving evidence the
+// same way the renderer does: its own asset ID, else its observation's.
+func assertEveryRecordResolvesToAnAsset(t *testing.T, inventory model.Inventory) {
+	t.Helper()
+	if len(inventory.Assets) == 0 || len(inventory.Observations) == 0 || len(inventory.Evidence) == 0 {
+		t.Fatalf("fixture no longer exercises the pipeline: assets=%d observations=%d evidence=%d",
+			len(inventory.Assets), len(inventory.Observations), len(inventory.Evidence))
+	}
+	assets := make(map[string]struct{}, len(inventory.Assets))
+	for _, asset := range inventory.Assets {
+		assets[asset.ID] = struct{}{}
+	}
+	observationAsset := make(map[string]string, len(inventory.Observations))
+	for _, observation := range inventory.Observations {
+		observationAsset[observation.ID] = observation.AssetID
+		if _, known := assets[observation.AssetID]; !known {
+			t.Errorf("observation %q names unknown asset %q", observation.ID, observation.AssetID)
+		}
+	}
+	for _, evidence := range inventory.Evidence {
+		assetID := evidence.AssetID
+		if assetID == "" {
+			assetID = observationAsset[evidence.ObservationID]
+		}
+		if _, known := assets[assetID]; !known {
+			t.Errorf("evidence %q resolves to unknown asset %q (observation %q)",
+				evidence.ID, assetID, evidence.ObservationID)
+		}
+	}
+}
+
 // newHookRunner wires `ssc-init hook` over the real collector pipeline, a real
 // SQLite store, and one isolated home, and returns a function running it once.
 func newHookRunner(t *testing.T, home string) func(label string) string {

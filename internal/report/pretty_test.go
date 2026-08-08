@@ -120,6 +120,44 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 	}
 }
 
+// The ISSUES table names an asset by its inventory record and falls back to the
+// asset ID when no record resolves. For the digest-anchored types (project,
+// project-config, tool-executable) that ID is "<type>:sha256:<64 hex>", and no
+// human surface may ever print a digest. Graph normalization and store
+// validation both reject the orphan records that reach this fallback, so this
+// is defence in depth rather than a live path — but "no digest in human output"
+// is a release-blocking invariant and gets a guard, not an argument.
+func TestWriteStatusPrettyNeverPrintsADigestAnchoredAssetIDInIssues(t *testing.T) {
+	digest := strings.Repeat("f", 64)
+	inventory := model.Inventory{
+		Evidence: []model.ContentEvidence{{
+			ID:            "evidence:sha256:eeee",
+			AssetID:       "project:sha256:" + digest,
+			ObservationID: "observation:sha256:9999",
+			Kind:          model.EvidenceFileSHA256,
+			Subject:       model.EvidenceSubjectManifest,
+			Status:        model.EvidenceUnavailable,
+			Errors:        []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}},
+		}},
+	}
+	var buffer bytes.Buffer
+	if err := report.WriteStatusPretty(&buffer, report.StatusData{
+		Initialized:            true,
+		InventorySchemaVersion: "ssc-init.scan.v3",
+		EvidenceCoverage:       &model.EvidenceCoverage{Status: model.CoveragePartial},
+		Inventory:              &inventory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+	if regexp.MustCompile(`[0-9a-f]{64}`).MatchString(output) {
+		t.Fatalf("status pretty printed a digest:\n%s", output)
+	}
+	if !regexp.MustCompile(`(?m)\(unnamed\)\s+manifest\s+unavailable\s+path_invalid`).MatchString(output) {
+		t.Fatalf("unnameable issue row must read (unnamed), as removed ladder rows do:\n%s", output)
+	}
+}
+
 func TestWritePrettyHandlesEmptyScanWithoutPlaceholderRows(t *testing.T) {
 	scan := model.ScanResult{
 		SchemaVersion:    "ssc-init.scan.v3",

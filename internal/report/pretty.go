@@ -212,7 +212,16 @@ func (p *prettyPrinter) evidenceSections(coverage *model.EvidenceCoverage, inven
 		}
 		name := assetName[observationAsset[evidence.ObservationID]]
 		if name == "" {
+			// No inventory record resolved, so the ID is the only name left.
+			// For a digest-anchored type that ID carries a digest and no
+			// readable name, and a digest is never printed: fall back to the
+			// same placeholder the removed rows of the ladder use. Graph
+			// normalization and store validation both reject the orphan
+			// records that reach here, so this is a guard, not a live path.
 			name = evidence.AssetID
+			if _, _, idName, _ := parseAssetID(name); digestSegment.MatchString(idName) {
+				name = unnamedAsset
+			}
 		}
 		errorCode := "-"
 		if len(evidence.Errors) > 0 {

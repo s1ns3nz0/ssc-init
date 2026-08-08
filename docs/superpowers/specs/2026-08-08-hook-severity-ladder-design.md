@@ -90,6 +90,31 @@ ssc-init: 3 changes since last snapshot
 - Host in parentheses disambiguates the same name under several hosts
   (`superpowers` exists five times on the reference machine).
 - Versions appear only on `UPGRADED`, where they carry the meaning.
+- The NAME column reads `(unnamed)` when the row's asset ID is digest-anchored
+  and the asset is gone. Three types have such IDs — `project` and
+  `project-config` (`<type>:sha256:<digest of the location ref>`) and
+  `tool-executable` (`tool-executable:sha256:<executable digest>`) — and their
+  names live only in the inventory record, which a removed asset no longer has.
+  A digest is never printed to a human surface, so the row prints a placeholder
+  instead of the only text the ID offers:
+
+  ```
+  REMOVED    project       (unnamed)
+  ```
+
+  Deleting one project directory emits several of these at once and they are
+  not distinguishable from each other: the directory is one `project` asset,
+  each recognised MCP project configuration under it (`.mcp.json`,
+  `.cursor/mcp.json`, `.vscode/mcp.json`, `.codex/config.toml`) is a further
+  `project-config` asset, and both prefixes map to `project` in the TYPE
+  column. A project holding `.mcp.json` and `.cursor/mcp.json` therefore prints
+  three identical `REMOVED project (unnamed)` lines, and a deleted root holding
+  several projects multiplies that. Row order stays total (the ID breaks the
+  tie), so the output is still byte-identical run to run — the cost is
+  readability, not determinism. This is a **known limit** of not plumbing the
+  previous inventory into the renderer, for the same reason the section below
+  declines that plumbing; if it ever lands, these rows recover their names and
+  the placeholder goes away.
 - Evidence counts are dropped. Subject-level detail lives in `status --pretty`
   and in JSON.
 - Cap stays at 20 detail rows plus `…and N more changes`. Because rows sort by
@@ -231,7 +256,12 @@ current one (each gets its own line).
   propagate: an interactive scan states "no changes" explicitly.
 - **`status --pretty`** — unchanged. It reads one snapshot and computes no
   delta, so four of the five rungs are uncomputable there; its `ISSUES` table
-  is a standing-coverage report, a different job.
+  is a standing-coverage report, a different job. Its ASSET column shares only
+  the `(unnamed)` placeholder: it falls back to the evidence record's asset ID
+  when no inventory record resolves, and a digest-anchored ID prints
+  `(unnamed)` there too rather than a digest. That fallback is unreachable
+  today — the two layers named under "What falls through" reject the orphan
+  records that would reach it — and is a guard, not a live path.
 - **JSON** — untouched. It is the machine contract and stays lossless.
 
 ## What falls through
@@ -240,9 +270,19 @@ Observation-only changes map to `CHANGED` (the tool's recorded description of
 an existing asset moved). Evidence or observation changes that cannot be
 attributed to any named asset are omitted: an unattributable record yields no
 actionable line, and printing `1 evidence records` would launder an
-attribution bug into output. A test asserts such orphans do not arise in a
-realistic scan; if one ever does, it fails a test rather than decorating the
-hook.
+attribution bug into output.
+
+That omission is only honest while such records do not actually arise, so it is
+asserted rather than assumed:
+`internal/acceptance` `TestRealisticScanProducesNoUnattributableRecord` runs the
+official fixture home through the real pipeline with probes off and on, and
+fails if any observation, or any evidence resolved the way the renderer resolves
+it, names an asset the inventory does not carry. If an attribution bug ever
+lands, it fails that test rather than decorating the hook. Two upstream layers
+already reject the same shape — `internal/inventory` drops an orphan
+observation during graph normalization, and `internal/store` validation rejects
+an orphan ID on persist — so the renderer's tolerance is a third, defensive
+layer, not the primary control.
 
 The hook is explicitly a triage view, not a lossless one. JSON remains
 lossless.
