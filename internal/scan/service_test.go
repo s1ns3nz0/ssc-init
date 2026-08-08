@@ -333,6 +333,30 @@ func TestBaselineFollowsProjectLocalTargetsAndReplacesInitialMCPResult(t *testin
 	}
 }
 
+// reproClearer records whether the engine-independent clearing path ran for
+// runtime evidence state attached to a dropped collector result.
+type reproClearer struct{ cleared *bool }
+
+func (r reproClearer) ClearRuntimeEvidence() { *r.cleared = true }
+
+func TestBaselineClearsRuntimeStateOfReplacedInitialMCPResult(t *testing.T) {
+	issuerCleared, provenanceCleared := false, false
+	mcpish := collectorFunc{name: "mcp", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{Status: model.CoverageComplete}
+		result.LocalEvidenceIssuer = reproClearer{cleared: &issuerCleared}
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{{TargetID: "mcp.fake", Provenance: reproClearer{cleared: &provenanceCleared}}}
+		return result, nil
+	}}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{mcpish}}, &memorySnapshots{}, fixedTime, fixedUUID, testEnvironment(t))
+
+	if _, _, _, err := service.Baseline(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !issuerCleared || !provenanceCleared {
+		t.Fatalf("dropped initial mcp runtime state not cleared: issuer=%v provenance=%v", issuerCleared, provenanceCleared)
+	}
+}
+
 func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
 	home := t.TempDir()
 	userConfig := filepath.Join(home, ".cursor", "mcp.json")
