@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/store"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,20 +23,36 @@ type Path struct {
 	Path string `json:"path"`
 }
 
+// StoreUsage is the local store's share of the design's 500 MB storage budget:
+// sizes and counts only, never locations.
+type StoreUsage struct {
+	// SizeBytes covers the database and its write-ahead log and shared-memory
+	// files, which the database size alone understates.
+	SizeBytes int64 `json:"sizeBytes"`
+	// ReclaimableBytes is space that pruning released but that a gated rewrite
+	// has not yet handed back. A large figure that never drops means the gate
+	// is not opening and the store is creeping upward.
+	ReclaimableBytes             int64 `json:"reclaimableBytes"`
+	SnapshotCount                int   `json:"snapshotCount"`
+	SnapshotRetentionSeconds     int64 `json:"snapshotRetentionSeconds"`
+	AssetHistoryRetentionSeconds int64 `json:"assetHistoryRetentionSeconds"`
+}
+
 // Result is the stable doctor JSON contract. Fatal is an internal signal and is
 // never serialized.
 type Result struct {
-	SchemaVersion             string   `json:"schemaVersion"`
-	Product                   string   `json:"product"`
-	Version                   string   `json:"version"`
-	Status                    string   `json:"status"`
-	GOOS                      string   `json:"goos"`
-	GOARCH                    string   `json:"goarch"`
-	DatabaseDirectoryWritable bool     `json:"databaseDirectoryWritable"`
-	CorePaths                 []Path   `json:"corePaths"`
-	Ecosystems                []string `json:"ecosystems"`
-	MissingOptionalCommands   []string `json:"missingOptionalCommands"`
-	Fatal                     bool     `json:"-"`
+	SchemaVersion             string     `json:"schemaVersion"`
+	Product                   string     `json:"product"`
+	Version                   string     `json:"version"`
+	Status                    string     `json:"status"`
+	GOOS                      string     `json:"goos"`
+	GOARCH                    string     `json:"goarch"`
+	DatabaseDirectoryWritable bool       `json:"databaseDirectoryWritable"`
+	Store                     StoreUsage `json:"store"`
+	CorePaths                 []Path     `json:"corePaths"`
+	Ecosystems                []string   `json:"ecosystems"`
+	MissingOptionalCommands   []string   `json:"missingOptionalCommands"`
+	Fatal                     bool       `json:"-"`
 }
 
 // Config supplies paths and read-only operating-system probes.
@@ -97,6 +115,11 @@ func (c *Checker) Check(ctx context.Context) Result {
 	if !result.DatabaseDirectoryWritable {
 		result.Status = "degraded"
 	}
+	usage, usageErr := storeUsage(ctx, c.config.DatabasePath)
+	result.Store = usage
+	if usageErr != nil {
+		result.Status = "degraded"
+	}
 	for _, command := range uniqueSorted(c.config.OptionalCommands) {
 		if err := ctx.Err(); err != nil {
 			result.Status = "degraded"
@@ -108,6 +131,22 @@ func (c *Checker) Check(ctx context.Context) Result {
 		}
 	}
 	return result
+}
+
+// storeUsage measures the store without creating or migrating one. The windows
+// come back populated even when measurement fails, because they are
+// construction-time settings rather than something read off disk. Options are
+// the documented defaults: the binary opens the store with store.Open, and
+// policy-configurable retention does not exist yet.
+func storeUsage(ctx context.Context, databasePath string) (StoreUsage, error) {
+	usage, err := store.UsageAt(ctx, databasePath, store.Options{})
+	return StoreUsage{
+		SizeBytes:                    usage.SizeBytes,
+		ReclaimableBytes:             usage.ReclaimableBytes,
+		SnapshotCount:                usage.SnapshotCount,
+		SnapshotRetentionSeconds:     int64(usage.SnapshotRetention / time.Second),
+		AssetHistoryRetentionSeconds: int64(usage.AssetHistoryRetention / time.Second),
+	}, err
 }
 
 func uniqueSorted(values []string) []string {
