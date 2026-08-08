@@ -25,10 +25,10 @@ func ApplyTargetContract(collectorName string, specs []model.TargetSpec, result 
 	knownTargets := make(map[string]struct{}, len(sortedSpecs))
 	for _, spec := range sortedSpecs {
 		if !validTargetSpec(collectorName, spec) {
-			return targetContractViolation(collectorName)
+			return targetContractViolation(collectorName, result)
 		}
 		if _, duplicate := knownTargets[spec.ID]; duplicate {
-			return targetContractViolation(collectorName)
+			return targetContractViolation(collectorName, result)
 		}
 		knownTargets[spec.ID] = struct{}{}
 	}
@@ -38,11 +38,11 @@ func ApplyTargetContract(collectorName string, specs []model.TargetSpec, result 
 	instances := make(map[targetInstance]struct{}, len(targets))
 	for _, target := range targets {
 		if _, known := knownTargets[target.TargetID]; !known || !validTargetCoverage(target) {
-			return targetContractViolation(collectorName)
+			return targetContractViolation(collectorName, result)
 		}
 		key := targetInstance{targetID: target.TargetID, instanceRef: target.InstanceRef}
 		if _, duplicate := instances[key]; duplicate {
-			return targetContractViolation(collectorName)
+			return targetContractViolation(collectorName, result)
 		}
 		instances[key] = struct{}{}
 		reportedTargets[target.TargetID] = struct{}{}
@@ -142,6 +142,9 @@ func validTargetCoverage(target model.TargetCoverage) bool {
 	}
 }
 
-func targetContractViolation(collectorName string) model.CollectorResult {
+// targetContractViolation discards the offending result, so its sealed runtime
+// evidence state is cleared before the failure replaces it.
+func targetContractViolation(collectorName string, rejected model.CollectorResult) model.CollectorResult {
+	ClearLocalEvidenceTargets([]model.CollectorResult{rejected})
 	return failedResult(collectorName, "coverage_contract_violation", "collector violated target coverage contract")
 }

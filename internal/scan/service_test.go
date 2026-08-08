@@ -1136,6 +1136,26 @@ func TestBaselineCancellationReturnsErrorAndClearsRuntimeState(t *testing.T) {
 	}
 }
 
+func TestBudgetOverrunClearsSealedStateOfTimedOutCollector(t *testing.T) {
+	issuerCleared, provenanceCleared := false, false
+	sealing := collectorFunc{name: "mcp", fn: func(ctx context.Context, _ collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{Status: model.CoverageComplete}
+		result.LocalEvidenceIssuer = reproClearer{cleared: &issuerCleared}
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{{TargetID: "mcp.fake", Provenance: reproClearer{cleared: &provenanceCleared}}}
+		<-ctx.Done()
+		return result, nil
+	}}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{sealing}}, &memorySnapshots{}, fixedTime, fixedUUID)
+	service.Budget = time.Millisecond
+
+	if _, _, _, _, err := service.Baseline(context.Background()); err != nil {
+		t.Fatalf("budget overrun must not be an error: %v", err)
+	}
+	if !issuerCleared || !provenanceCleared {
+		t.Fatalf("timed-out collector kept sealed state: issuer=%v provenance=%v", issuerCleared, provenanceCleared)
+	}
+}
+
 func TestBaselineCallerDeadlineIsCancellationNotBudgetOverrun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()

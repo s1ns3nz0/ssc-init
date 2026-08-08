@@ -221,6 +221,81 @@ func TestOrchestratorAppliesTargetContractToContainedFailures(t *testing.T) {
 	}
 }
 
+func TestOrchestratorClearsRuntimeEvidenceOfDiscardedResults(t *testing.T) {
+	sealed := func(issuer, provenance *trackingRuntimeClearer) model.CollectorResult {
+		return model.CollectorResult{
+			Status:               model.CoverageComplete,
+			LocalEvidenceIssuer:  issuer,
+			LocalEvidenceTargets: []model.LocalEvidenceTarget{{TargetID: "discarded.user", Provenance: provenance}},
+		}
+	}
+	tests := []struct {
+		name     string
+		timeout  time.Duration
+		build    func(issuer, provenance *trackingRuntimeClearer) Collector
+		wantCode string
+		wantMsg  string
+	}{
+		{
+			name:    "timeout",
+			timeout: time.Millisecond,
+			build: func(issuer, provenance *trackingRuntimeClearer) Collector {
+				return collectorFunc{name: "discarded", fn: func(ctx context.Context, _ Environment) (model.CollectorResult, error) {
+					<-ctx.Done()
+					return sealed(issuer, provenance), ctx.Err()
+				}}
+			},
+			wantCode: "collector_timeout",
+			wantMsg:  "collector deadline exceeded",
+		},
+		{
+			name:    "error",
+			timeout: time.Hour,
+			build: func(issuer, provenance *trackingRuntimeClearer) Collector {
+				return collectorFunc{name: "discarded", fn: func(context.Context, Environment) (model.CollectorResult, error) {
+					return sealed(issuer, provenance), errors.New("denied")
+				}}
+			},
+			wantCode: "collector_error",
+			wantMsg:  "collector failed",
+		},
+		{
+			name:    "contract violation",
+			timeout: time.Hour,
+			build: func(issuer, provenance *trackingRuntimeClearer) Collector {
+				result := sealed(issuer, provenance)
+				result.Targets = []model.TargetCoverage{{TargetID: "unknown.user", Status: model.TargetComplete}}
+				return targetedCollectorFunc{
+					collectorFunc: collectorFunc{name: "discarded", fn: func(context.Context, Environment) (model.CollectorResult, error) {
+						return result, nil
+					}},
+					specs: oneTargetSpec("discarded"),
+				}
+			},
+			wantCode: "coverage_contract_violation",
+			wantMsg:  "collector violated target coverage contract",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			issuer, provenance := &trackingRuntimeClearer{}, &trackingRuntimeClearer{}
+			got := (Orchestrator{Timeout: testCase.timeout, Collectors: []Collector{testCase.build(issuer, provenance)}}).Collect(context.Background(), Environment{})
+			if len(got) != 1 || got[0].Collector != "discarded" || got[0].Status != model.CoverageFailed {
+				t.Fatalf("got=%+v", got)
+			}
+			if len(got[0].Errors) != 1 || got[0].Errors[0].Code != testCase.wantCode || got[0].Errors[0].Message != testCase.wantMsg {
+				t.Fatalf("errors=%+v", got[0].Errors)
+			}
+			if got[0].LocalEvidenceIssuer != nil || got[0].LocalEvidenceTargets != nil {
+				t.Fatalf("runtime fields survived: %+v", got[0])
+			}
+			if issuer.calls.Load() != 1 || provenance.calls.Load() != 1 {
+				t.Fatalf("discarded state not cleared once: issuer=%d provenance=%d", issuer.calls.Load(), provenance.calls.Load())
+			}
+		})
+	}
+}
+
 type targetedCollectorWithResult struct {
 	fakeCollector
 	specs []model.TargetSpec

@@ -81,9 +81,16 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 		}
 		return ApplyTargetContract(name, specs, result)
 	}
+	// discard replaces a result the orchestrator refuses to return. The
+	// abandoned result never reaches the evidence engine, so its sealed runtime
+	// state must be cleared here or it stays live for the rest of the scan.
+	discard := func(abandoned model.CollectorResult, code, message string) model.CollectorResult {
+		ClearLocalEvidenceTargets([]model.CollectorResult{abandoned})
+		return applyContract(failedResult(name, code, message))
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			result = applyContract(failedResult(name, "collector_panic", "collector panicked"))
+			result = discard(result, "collector_panic", "collector panicked")
 		}
 	}()
 
@@ -103,10 +110,10 @@ func (o Orchestrator) collectOne(parent context.Context, env Environment, c Coll
 	result, err := c.Collect(ctx, env)
 	result.Collector = name
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
-		return applyContract(failedResult(name, "collector_timeout", "collector deadline exceeded"))
+		return discard(result, "collector_timeout", "collector deadline exceeded")
 	}
 	if err != nil {
-		return applyContract(failedResult(name, "collector_error", "collector failed"))
+		return discard(result, "collector_error", "collector failed")
 	}
 	return applyContract(result)
 }
