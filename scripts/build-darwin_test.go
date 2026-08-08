@@ -32,6 +32,7 @@ func TestBuildScriptDeclaresStaticTargets(t *testing.T) {
 		"git -C \"$REPOSITORY_ROOT\" rev-parse",
 		"-X main.version=",
 		"SOURCE_DATE_EPOCH",
+		"lipo -create",
 		"shasum -a 256",
 	} {
 		if !bytes.Contains(raw, []byte(want)) {
@@ -55,8 +56,8 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("build failed: %v\n%s", err, output)
 		}
-		digests := make(map[string][32]byte, 3)
-		for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "checksums.txt"} {
+		digests := make(map[string][32]byte, 4)
+		for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "ssc-init-darwin-universal", "checksums.txt"} {
 			path := filepath.Join(repositoryRoot, "dist", name)
 			content, err := os.ReadFile(path)
 			if err != nil {
@@ -91,8 +92,40 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(checksums)), "\n")
-	if len(lines) != 2 || !strings.HasSuffix(lines[0], "  dist/ssc-init-darwin-amd64") || !strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-arm64") {
+	if len(lines) != 3 ||
+		!strings.HasSuffix(lines[0], "  dist/ssc-init-darwin-amd64") ||
+		!strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-arm64") ||
+		!strings.HasSuffix(lines[2], "  dist/ssc-init-darwin-universal") {
 		t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+	}
+}
+
+func TestBuildScriptProducesUniversalBinary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cross-build smoke test")
+	}
+	repositoryRoot := repositoryRoot(t)
+	command := exec.Command("sh", filepath.Join(repositoryRoot, "scripts", "build-darwin.sh"))
+	command.Dir = t.TempDir()
+	command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, output)
+	}
+	universal := filepath.Join(repositoryRoot, "dist", "ssc-init-darwin-universal")
+	info, err := exec.Command("lipo", "-info", universal).CombinedOutput()
+	if err != nil {
+		t.Fatalf("lipo -info failed: %v\n%s", err, info)
+	}
+	for _, architecture := range []string{"x86_64", "arm64"} {
+		if !bytes.Contains(info, []byte(architecture)) {
+			t.Fatalf("universal binary is missing %s: %s", architecture, info)
+		}
+	}
+	assertNoAutomaticVCSSettings(t, universal)
+	if content, err := os.ReadFile(universal); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Contains(content, []byte(expectedReleaseVersion(t, repositoryRoot))) {
+		t.Fatal("universal binary does not carry the release version")
 	}
 }
 
@@ -173,7 +206,7 @@ func TestBuildScriptAllowsIgnoredEntries(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("ignored entries blocked build: %v\n%s", err, output)
 	}
-	for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "checksums.txt"} {
+	for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "ssc-init-darwin-universal", "checksums.txt"} {
 		if _, err := os.Stat(filepath.Join(root, "dist", name)); err != nil {
 			t.Fatalf("missing %s after ignored-entry build: %v", name, err)
 		}
@@ -258,7 +291,19 @@ func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []strin
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeFakeLipo(t, binDirectory)
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
+}
+
+// writeFakeLipo shadows /usr/bin/lipo for the isolated fixtures, whose fake go
+// writes text rather than Mach-O objects that the real lipo would accept.
+func writeFakeLipo(t *testing.T, binDirectory string) {
+	t.Helper()
+	fakeLipo := filepath.Join(binDirectory, "lipo")
+	fakeLipoSource := "#!/bin/sh\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -output ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-universal\\n' > \"$output\"\n"
+	if err := os.WriteFile(fakeLipo, []byte(fakeLipoSource), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
@@ -293,6 +338,7 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeFakeLipo(t, binDirectory)
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
 }
 
