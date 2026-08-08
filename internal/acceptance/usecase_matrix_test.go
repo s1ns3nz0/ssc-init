@@ -757,7 +757,7 @@ func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV3AsLegacyInventory(t 
 	}
 }
 
-func TestV3BaselineReopenStatusCacheWarmRescanAndObservedLocationDelta(t *testing.T) {
+func TestV3BaselineReopenStatusQuiescentRescanAndObservedLocationDelta(t *testing.T) {
 	home := copyOfficialFixtureHome(t)
 	databasePath := filepath.Join(privateMatrixTempDir(t), "state.db")
 	const extensionAssetID = "ide-extension:vscode:acme.safe@1.2.3"
@@ -796,28 +796,27 @@ func TestV3BaselineReopenStatusCacheWarmRescanAndObservedLocationDelta(t *testin
 	}
 
 	// A cache-warm rescan of an unchanged home reuses complete leaf digests.
-	// Evidence diffing excludes only observation timestamps, so the recorded
-	// tree cache provenance flipping miss->hit is a deterministic "changed"
-	// entry for exactly the payload-tree records; every digest stays
-	// identical.
+	// Evidence diffing excludes observation timestamps and cache provenance, so
+	// an unchanged home is completely quiescent: the recorded tree cache
+	// provenance flipping miss->hit is not a change signal, and every digest
+	// stays identical.
 	second := runIsolatedBaseline(t, baselineOptions{
 		home: home, databasePath: databasePath,
 		scanID: "00000000-0000-4000-8000-000000000014",
 	})
-	wantWarmChanges := make([]model.Change, 0, 4)
+	if len(second.Delta.Changes) != 0 {
+		t.Fatalf("quiescent rescan delta=\n%+v\nwant no changes", second.Delta.Changes)
+	}
+	storeCachedTrees := 0
 	firstEvidenceByID := map[string]model.ContentEvidence{}
 	for _, record := range first.Inventory.Evidence {
 		firstEvidenceByID[record.ID] = record
-		if record.Kind == model.EvidenceTreeSHA256 && record.Metadata["cache"] == "miss" {
-			wantWarmChanges = append(wantWarmChanges, model.Change{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: record.ID})
+		if record.Kind == model.EvidenceTreeSHA256 && record.Metadata[model.MetadataCache] == "miss" {
+			storeCachedTrees++
 		}
 	}
-	if len(wantWarmChanges) == 0 {
+	if storeCachedTrees == 0 {
 		t.Fatal("fixture home produced no store-cached payload trees")
-	}
-	sort.Slice(wantWarmChanges, func(i, j int) bool { return wantWarmChanges[i].EntityID < wantWarmChanges[j].EntityID })
-	if !reflect.DeepEqual(second.Delta.Changes, wantWarmChanges) {
-		t.Fatalf("cache-warm rescan delta=\n%+v\nwant exactly=\n%+v", second.Delta.Changes, wantWarmChanges)
 	}
 	for _, record := range second.Inventory.Evidence {
 		previous, exists := firstEvidenceByID[record.ID]
@@ -827,7 +826,7 @@ func TestV3BaselineReopenStatusCacheWarmRescanAndObservedLocationDelta(t *testin
 		if record.Digest != previous.Digest || record.Status != previous.Status {
 			t.Fatalf("cache-warm rescan altered content evidence:\n%+v\nwas\n%+v", record, previous)
 		}
-		if previous.Metadata["cache"] == "miss" && record.Metadata["cache"] != "hit" {
+		if previous.Metadata[model.MetadataCache] == "miss" && record.Metadata[model.MetadataCache] != "hit" {
 			t.Fatalf("cache-warm rescan did not hit the content cache: %+v", record)
 		}
 	}

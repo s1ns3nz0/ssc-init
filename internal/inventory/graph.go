@@ -242,7 +242,23 @@ func canonicalEvidenceByID(evidence []model.ContentEvidence) map[string][]byte {
 	return canonicalValuesByID(evidence, func(value model.ContentEvidence) string { return value.ID }, canonicalEvidence)
 }
 
+// canonicalEvidence excludes cache provenance the same way canonicalAssetForDiff
+// excludes observation timestamps: the cache outcome describes how this run
+// obtained the digest, not what the content is. Including it made every content
+// change echo on the following run, when the newly-written cache entry hits.
 func canonicalEvidence(evidence model.ContentEvidence) []byte {
+	if len(evidence.Metadata) > 0 {
+		metadata := make(map[string]string, len(evidence.Metadata))
+		for key, value := range evidence.Metadata {
+			if key != model.MetadataCache {
+				metadata[key] = value
+			}
+		}
+		evidence.Metadata = metadata
+		if len(metadata) == 0 {
+			evidence.Metadata = nil
+		}
+	}
 	canonical, _ := json.Marshal(evidence)
 	return canonical
 }

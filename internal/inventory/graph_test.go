@@ -330,3 +330,36 @@ func wantObservationConflictFingerprint(observationID string) string {
 	digest := sha256.Sum256([]byte(observationID))
 	return fmt.Sprintf("observation-id-sha256:%x", digest)
 }
+
+func TestDiffIgnoresEvidenceCacheProvenance(t *testing.T) {
+	base := model.ContentEvidence{
+		ID: "evidence:sha256:aaaa", AssetID: "agent-plugin:claude:alpha@1.0.0",
+		ObservationID: "observation:sha256:1111", Kind: model.EvidenceTreeSHA256,
+		Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidenceComplete,
+		Algorithm: "sha256", Digest: "abc", Size: 10,
+		Metadata: map[string]string{"cache": "miss", "completeness": "complete"},
+	}
+	warmed := base
+	warmed.Metadata = map[string]string{"cache": "hit", "completeness": "complete"}
+
+	previous := model.Inventory{Evidence: []model.ContentEvidence{base}}
+	current := model.Inventory{Evidence: []model.ContentEvidence{warmed}}
+	if delta := Diff(previous, current); len(delta.Changes) != 0 {
+		t.Fatalf("cache provenance produced drift: %+v", delta.Changes)
+	}
+
+	// A real content change must still be reported, even while cache flips.
+	mutated := warmed
+	mutated.Digest = "def"
+	if delta := Diff(previous, model.Inventory{Evidence: []model.ContentEvidence{mutated}}); len(delta.Changes) != 1 ||
+		delta.Changes[0].Kind != model.ChangeChanged || delta.Changes[0].Entity != model.ChangeEntityEvidence {
+		t.Fatalf("digest change not reported: %+v", delta.Changes)
+	}
+
+	// Every other metadata key must remain a change signal.
+	relabelled := warmed
+	relabelled.Metadata = map[string]string{"cache": "hit", "completeness": "observed-subset"}
+	if delta := Diff(previous, model.Inventory{Evidence: []model.ContentEvidence{relabelled}}); len(delta.Changes) != 1 {
+		t.Fatalf("completeness change not reported: %+v", delta.Changes)
+	}
+}

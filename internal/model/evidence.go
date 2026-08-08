@@ -60,6 +60,11 @@ func ProjectEvidenceSubject(subject string) bool {
 	}
 }
 
+// MetadataCache is the evidence metadata key carrying how this run obtained the
+// digest (hit|miss|rejected|disabled). It describes provenance, not content, and
+// is excluded from inventory change detection.
+const MetadataCache = "cache"
+
 type ContentEvidence struct {
 	ID            string            `json:"id"`
 	AssetID       string            `json:"assetId"`

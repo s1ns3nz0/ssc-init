@@ -12,7 +12,7 @@ import (
 
 const (
 	metadataCompleteness = "completeness"
-	metadataCache        = "cache"
+	metadataCache        = model.MetadataCache
 	maxRecordErrors      = 64
 )
 
