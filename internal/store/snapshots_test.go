@@ -1178,6 +1178,28 @@ func TestSaveRejectsInvalidShapeWithoutRows(t *testing.T) {
 	assertNoSnapshotRows(t, s)
 }
 
+func TestSaveScanRejectsUndocumentedStatus(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		s := openTestStore(t)
+		scan, inventory := validV3Snapshot(t, "undocumented-status")
+		scan.Status = "ok"
+		if err := s.SaveScan(context.Background(), scan, inventory); err == nil {
+			t.Fatal("SaveScan accepted an undocumented status")
+		}
+		assertNoSnapshotRows(t, s)
+	})
+	t.Run("load", func(t *testing.T) {
+		s := openTestStore(t)
+		saveValidV3Snapshot(t, s, "undocumented-status")
+		if _, err := s.db.Exec(`UPDATE scans SET status = 'ok'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LatestSnapshot(context.Background()); err == nil || ok {
+			t.Fatalf("LatestSnapshot accepted an undocumented status: ok=%v error=%v", ok, err)
+		}
+	})
+}
+
 func TestValidateSnapshotRejectsRawAbsolutePersistedPathFields(t *testing.T) {
 	for _, testCase := range persistedRawPathCases() {
 		t.Run(testCase.name, func(t *testing.T) {

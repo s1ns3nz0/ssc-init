@@ -39,6 +39,9 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 			return err
 		}
 	}
+	if !scan.Status.Valid() {
+		return errors.New("scan status is not a documented value")
+	}
 	if scan.StartedAt.IsZero() || scan.FinishedAt.IsZero() || scan.FinishedAt.Before(scan.StartedAt) {
 		return errors.New("invalid scan timestamps")
 	}
