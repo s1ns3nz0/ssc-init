@@ -12,8 +12,15 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
-// SaveScan atomically persists a scan and immutable inventory snapshot.
-func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory model.Inventory) (err error) {
+// SaveScan atomically persists a scan and immutable inventory snapshot, and
+// prunes snapshots beyond the retention window in the same transaction.
+func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory model.Inventory) error {
+	return s.saveScanAt(ctx, scan, inventory, time.Now().UTC())
+}
+
+// saveScanAt is SaveScan with an explicit retention clock so tests do not
+// depend on wall time.
+func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory model.Inventory, now time.Time) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -109,10 +116,61 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 		boolInt(inventory.Evidence == nil), len(inventory.Evidence)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
+	if err = pruneSnapshots(ctx, tx, now); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
 	return secureSQLiteFiles(s.path, guard)
+}
+
+// snapshotRetention is the documented full-snapshot window. The most recent
+// snapshot is always kept regardless of age: without it there is no baseline
+// to diff against, and a machine idle longer than the window would report
+// every asset as new on its next scan.
+const snapshotRetention = 30 * 24 * time.Hour
+
+// snapshotChildTables lists every table keyed by scan_id, ordered so each
+// table is deleted before the tables it references. Every foreign key is
+// declared ON DELETE NO ACTION and the connection enables PRAGMA foreign_keys,
+// so child rows are removed explicitly and never by cascade.
+var snapshotChildTables = []string{
+	"evidence_state",
+	"evidence",
+	"evidence_coverage",
+	"observation_state",
+	"observations",
+	"asset_state",
+	"assets",
+	"relationship_state",
+	"relationships",
+	"coverage",
+	"inventory_errors",
+	"inventory_state",
+}
+
+// pruneSnapshots deletes snapshots finished before the retention cutoff inside
+// the caller's transaction, so a crash cannot leave the store half-pruned.
+func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	var newest string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&newest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("select newest snapshot: %w", err)
+	}
+	cutoff := formatTime(now.Add(-snapshotRetention))
+	for _, table := range snapshotChildTables {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM "`+table+`" WHERE scan_id IN (SELECT id FROM scans WHERE finished_at < ? AND id <> ?)`, cutoff, newest); err != nil {
+			return fmt.Errorf("prune expired %s rows: %w", table, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scans WHERE finished_at < ? AND id <> ?`, cutoff, newest); err != nil {
+		return fmt.Errorf("prune expired snapshots: %w", err)
+	}
+	return nil
 }
 
 // LatestInventory loads the inventory from the newest complete snapshot.

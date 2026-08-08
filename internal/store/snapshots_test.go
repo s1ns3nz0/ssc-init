@@ -2026,3 +2026,107 @@ func assertSQLiteFilesExclude(t *testing.T, databasePath, forbidden string) {
 		}
 	}
 }
+
+func saveSnapshotAt(t *testing.T, s *Store, scanID string, finishedAt, now time.Time) {
+	t.Helper()
+	scan, inventory := validV3Snapshot(t, scanID)
+	scan.StartedAt, scan.FinishedAt = finishedAt.Add(-time.Second), finishedAt
+	if err := s.saveScanAt(context.Background(), scan, inventory, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM scans`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// scanChildTables reads every table carrying a scan_id column straight from
+// the live schema, so a table added later cannot silently escape the orphan
+// assertion below.
+func scanChildTables(t *testing.T, s *Store) []string {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c
+WHERE m.type = 'table' AND c.name = 'scan_id' ORDER BY m.name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) < 12 {
+		t.Fatalf("schema exposed %d scan_id tables, want at least 12: %v", len(tables), tables)
+	}
+	return tables
+}
+
+func TestSaveScanPrunesSnapshotsBeyondRetention(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index, age := range []time.Duration{90 * 24 * time.Hour, 60 * 24 * time.Hour, time.Hour} {
+		saveSnapshotAt(t, s, fmt.Sprintf("retention-%d", index), now.Add(-age), now)
+	}
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("retention kept %d snapshots, want 1", remaining)
+	}
+	snapshot, ok, err := s.LatestSnapshot(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("load surviving snapshot: ok=%v err=%v", ok, err)
+	}
+	if snapshot.Scan.ScanID != "retention-2" {
+		t.Fatalf("retention kept scan %q, want %q", snapshot.Scan.ScanID, "retention-2")
+	}
+}
+
+func TestSaveScanKeepsNewestSnapshotBeyondRetention(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "retention-ancient", now.Add(-365*24*time.Hour), now)
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("retention kept %d snapshots, want 1", remaining)
+	}
+	snapshot, ok, err := s.LatestSnapshot(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("retention deleted the only snapshot: ok=%v err=%v", ok, err)
+	}
+	if snapshot.Scan.ScanID != "retention-ancient" {
+		t.Fatalf("retention kept scan %q, want %q", snapshot.Scan.ScanID, "retention-ancient")
+	}
+}
+
+func TestSaveScanRetentionLeavesNoOrphanRows(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index, age := range []time.Duration{200 * 24 * time.Hour, 90 * 24 * time.Hour, 31 * 24 * time.Hour, time.Hour} {
+		saveSnapshotAt(t, s, fmt.Sprintf("orphan-%d", index), now.Add(-age), now)
+	}
+	for _, table := range scanChildTables(t, s) {
+		var orphans int
+		if err := s.db.QueryRow(`SELECT count(*) FROM "` + table + `" WHERE scan_id NOT IN (SELECT id FROM scans)`).Scan(&orphans); err != nil {
+			t.Fatal(err)
+		}
+		if orphans != 0 {
+			t.Fatalf("table %s kept %d orphan rows", table, orphans)
+		}
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM evidence`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 4 {
+		t.Fatalf("evidence table holds %d rows, want 4 (one surviving snapshot)", rows)
+	}
+}
