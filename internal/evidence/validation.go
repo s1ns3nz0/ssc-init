@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ssc-init/ssc-init/internal/identity"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
-	"github.com/ssc-init/ssc-init/internal/privacy"
+	"github.com/s1ns3nz0/ssc-init/internal/identity"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 func graphMaps(inventory model.Inventory) (map[string]model.Asset, map[string]model.Observation) {

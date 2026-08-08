@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/collector/projects"
-	"github.com/ssc-init/ssc-init/internal/evidence"
-	"github.com/ssc-init/ssc-init/internal/inventory"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/testutil"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	"github.com/s1ns3nz0/ssc-init/internal/evidence"
+	"github.com/s1ns3nz0/ssc-init/internal/inventory"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/testutil"
 )
 
 func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T) {

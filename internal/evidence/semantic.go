@@ -10,8 +10,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/privacy"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 const semanticMCPDomain = "ssc-init.semantic-mcp.v1"

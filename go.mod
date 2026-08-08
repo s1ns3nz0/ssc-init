@@ -1,4 +1,4 @@
-module github.com/ssc-init/ssc-init
+module github.com/s1ns3nz0/ssc-init
 
 go 1.26
 

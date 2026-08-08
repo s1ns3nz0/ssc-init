@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/ssc-init/ssc-init/internal/privacy"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 const (

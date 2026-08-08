@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 // Orchestrator runs collectors independently while keeping their failures local.

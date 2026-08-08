@@ -14,12 +14,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/inventory"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
-	"github.com/ssc-init/ssc-init/internal/store"
-	"github.com/ssc-init/ssc-init/internal/testutil"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/inventory"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/store"
+	"github.com/s1ns3nz0/ssc-init/internal/testutil"
 )
 
 func TestAgentCatalogDeclaresFixedAndUnsupportedTargets(t *testing.T) {

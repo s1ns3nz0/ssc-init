@@ -78,7 +78,7 @@ Product commit: `a68f952`
   `LocalEvidenceTargets` (raw temp paths) visibly surviving in
   `scan.Coverage`, `TestBaselineCacheHandoff… saved=1` with no cache calls,
   and `TestBaselineZeroAcceptedTargets…` showing empty coverage status.
-  GREEN after the service change: `ok github.com/ssc-init/ssc-init/internal/scan`.
+  GREEN after the service change: `ok github.com/s1ns3nz0/ssc-init/internal/scan`.
 - Report (Step 4 RED): `TestWriteJSONMatchesV3BaselineGolden` failed —
   output lacked `"evidenceCoverage"` and `"observations"`; the shape test
   also failed on coverage/evidenceCoverage ordering. GREEN after

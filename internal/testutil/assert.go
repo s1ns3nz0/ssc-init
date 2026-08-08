@@ -3,7 +3,7 @@ package testutil
 import (
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 // AssertAsset returns the asset with id or fails the test when none exists.

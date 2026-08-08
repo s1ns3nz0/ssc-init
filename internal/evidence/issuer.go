@@ -7,8 +7,8 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
 // Anchor is the non-content identity captured while an issuer has verified a

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"golang.org/x/sys/unix"
 )
 

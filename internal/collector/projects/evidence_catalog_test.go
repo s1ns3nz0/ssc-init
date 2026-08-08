@@ -3,7 +3,7 @@ package projects
 import (
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 func TestProjectEvidenceCatalogIsExactAndBounded(t *testing.T) {

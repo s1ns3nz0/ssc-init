@@ -1,8 +1,8 @@
 package mcp
 
 import (
-	"github.com/ssc-init/ssc-init/internal/evidence"
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/evidence"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 // issueMCPSemanticEvidence seals one path-free semantic target for a finalized

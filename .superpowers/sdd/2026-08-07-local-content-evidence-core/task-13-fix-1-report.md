@@ -37,7 +37,7 @@ $ go test ./internal/scan -run TestBaselineClearsRuntimeStateOfReplacedInitialMC
 --- FAIL: TestBaselineClearsRuntimeStateOfReplacedInitialMCPResult (0.00s)
     service_test.go:356: dropped initial mcp runtime state not cleared: issuer=false provenance=false
 FAIL
-FAIL	github.com/ssc-init/ssc-init/internal/scan	0.454s
+FAIL	github.com/s1ns3nz0/ssc-init/internal/scan	0.454s
 FAIL
 ```
 
@@ -47,7 +47,7 @@ Call restored (service.go byte-identical to HEAD):
 
 ```
 $ go test ./internal/scan -run TestBaselineClearsRuntimeStateOfReplacedInitialMCPResult -count=1
-ok  	github.com/ssc-init/ssc-init/internal/scan	0.370s
+ok  	github.com/s1ns3nz0/ssc-init/internal/scan	0.370s
 ```
 
 ## Regression results

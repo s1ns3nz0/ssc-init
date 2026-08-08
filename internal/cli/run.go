@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/ssc-init/ssc-init/internal/doctor"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/report"
+	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/report"
 )
 
 // BaselineScanner performs and persists one baseline scan.

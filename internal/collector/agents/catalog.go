@@ -1,6 +1,6 @@
 package agents
 
-import "github.com/ssc-init/ssc-init/internal/model"
+import "github.com/s1ns3nz0/ssc-init/internal/model"
 
 type markerKind string
 

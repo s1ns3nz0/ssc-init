@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/identity"
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/identity"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 func finalizeTestObservation(t *testing.T, value model.Observation) model.Observation {

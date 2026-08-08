@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
 const contentCacheFormat = "ssc-init.content-cache.v1"

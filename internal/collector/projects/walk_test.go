@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
-	"github.com/ssc-init/ssc-init/internal/testutil"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/testutil"
 )
 
 func TestResolveRootsUsesSafeStableReferences(t *testing.T) {

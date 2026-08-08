@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 type memorySnapshots struct {

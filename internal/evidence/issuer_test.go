@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/identity"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/identity"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
 func TestBindCollectorResultIssuesSiblingTargetsUntilRuntimeClear(t *testing.T) {

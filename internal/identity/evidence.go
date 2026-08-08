@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/privacy"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 // ErrRejectedEvidenceIdentity is returned when the stable evidence identity

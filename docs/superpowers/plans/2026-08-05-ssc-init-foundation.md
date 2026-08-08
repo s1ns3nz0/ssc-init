@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Product and CLI name: `SSC Init` and `ssc-init`.
-- Module path: `github.com/ssc-init/ssc-init`.
+- Module path: `github.com/s1ns3nz0/ssc-init`.
 - macOS is the only supported runtime in this plan; both `darwin/arm64` and `darwin/amd64` must compile.
 - Build with `CGO_ENABLED=0`; no user-installed Python, Node.js, Homebrew, Docker, YARA, database, or compiler is required at runtime.
 - Run under the current user's permissions; never request `sudo` or scan arbitrary personal files.
@@ -100,7 +100,7 @@ Expected: FAIL because `Run` is undefined.
 - [ ] **Step 3: Add the module, model types, and minimal command implementation**
 
 ```go
-module github.com/ssc-init/ssc-init
+module github.com/s1ns3nz0/ssc-init
 
 go 1.26
 ```

@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/doctor"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/scan"
 )
 
 type failingWriter struct {

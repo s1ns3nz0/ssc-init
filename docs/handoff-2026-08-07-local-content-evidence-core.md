@@ -8,7 +8,7 @@ Continue in the existing isolated worktree. Do not start from `master` and do
 not use the older `foundation` worktree.
 
 ```sh
-cd /Users/s1ns3nz0/ssc-init/.worktrees/local-content-evidence-core
+cd <repository-root>/.worktrees/local-content-evidence-core
 git status --short
 git rev-parse --abbrev-ref HEAD
 git rev-parse HEAD
@@ -16,8 +16,8 @@ git rev-parse HEAD
 
 Expected state at handoff:
 
-- repository: `/Users/s1ns3nz0/ssc-init`
-- worktree: `/Users/s1ns3nz0/ssc-init/.worktrees/local-content-evidence-core`
+- repository: `<repository-root>`
+- worktree: `<repository-root>/.worktrees/local-content-evidence-core`
 - branch: `feature/local-content-evidence-core`
 - HEAD before this handoff document commit: `ab504ae3859124227ba9ec394d7ca9974c866d12`
 - branch base: `5cc6dca629a40133b22f7b29d3f77846e3e9c1de`
@@ -209,7 +209,7 @@ Continue the existing subagent-driven-development workflow:
 ## Copy/paste continuation prompt for Claude
 
 > Continue the local content evidence core plan from the existing worktree
-> `/Users/s1ns3nz0/ssc-init/.worktrees/local-content-evidence-core`, branch
+> `<repository-root>/.worktrees/local-content-evidence-core`, branch
 > `feature/local-content-evidence-core`. Read
 > `docs/handoff-2026-08-07-local-content-evidence-core.md`, the design, the full
 > implementation plan, the SDD ledger, and the Task 10 report before acting.

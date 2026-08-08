@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
-	"github.com/ssc-init/ssc-init/internal/privacy"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 // ErrRejectedIdentity is returned when an observation identity field is empty

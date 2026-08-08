@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 // Build merges collector output without mutating the supplied results.

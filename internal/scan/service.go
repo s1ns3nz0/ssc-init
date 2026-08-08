@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/collector/mcp"
-	"github.com/ssc-init/ssc-init/internal/collector/projects"
-	"github.com/ssc-init/ssc-init/internal/evidence"
-	"github.com/ssc-init/ssc-init/internal/inventory"
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/mcp"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	"github.com/s1ns3nz0/ssc-init/internal/evidence"
+	"github.com/s1ns3nz0/ssc-init/internal/inventory"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 const schemaVersion = "ssc-init.scan.v3"

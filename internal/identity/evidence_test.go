@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 func TestFinalizeEvidenceIDIsStableAcrossContentChanges(t *testing.T) {

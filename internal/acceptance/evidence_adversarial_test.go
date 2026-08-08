@@ -16,16 +16,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ssc-init/ssc-init/internal/collector"
-	"github.com/ssc-init/ssc-init/internal/collector/agents"
-	"github.com/ssc-init/ssc-init/internal/collector/ide"
-	"github.com/ssc-init/ssc-init/internal/collector/packages"
-	"github.com/ssc-init/ssc-init/internal/collector/projects"
-	"github.com/ssc-init/ssc-init/internal/model"
-	"github.com/ssc-init/ssc-init/internal/platform"
-	"github.com/ssc-init/ssc-init/internal/report"
-	"github.com/ssc-init/ssc-init/internal/scan"
-	"github.com/ssc-init/ssc-init/internal/store"
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/agents"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/report"
+	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/store"
 )
 
 // adversarialOptions configures a bespoke baseline run that, unlike
