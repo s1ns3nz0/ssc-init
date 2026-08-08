@@ -1,150 +1,198 @@
 # Policy layer design
 
 Date: 2026-08-08
-Status: approved
+Status: approved (supersedes the first draft of this file, which designed a
+local-only policy layer and contradicted §8/§9 of the foundation design)
 
-## Problem
+**Authority:** `docs/superpowers/specs/2026-08-05-ssc-init-design.md` §8
+(Organization policy) and §9 (Enforcement, feedback, and remediation) define
+this feature. This document is the implementation design for that target, not a
+new proposal. Where the two disagree, the foundation design wins.
 
-SSC Init reports what appeared and what changed. It cannot say whether any of
-it is acceptable, and by design it never will — a planted plugin that reads
-`~/.ssh/id_rsa` renders as `NEW agent-plugin helpful-utils (claude)`, byte for
-byte identical to a benign skill, and its evidence is `complete` because
-`complete` means *fully hashed*, not *safe*.
+## Readiness legend
 
-The gap is not detection. It is that the user has expectations the tool cannot
-know: *no MCP server should run a shell*, *these plugins must hash to what I
-approved*, *nothing new should appear in my agent catalog without me*. A policy
-layer lets those expectations be stated, and reports when the machine departs
-from them.
+Every element below is marked with what it depends on. The full architecture is
+designed now so that the current build is an honest *subset* of it rather than
+a contradiction to be retrofitted later.
 
-## The invariant this must not break
+| Mark | Meaning |
+|---|---|
+| **[NOW]** | Buildable against facts the current build already establishes (identity, version, hash, MCP command/args/env-key names, entry points, evidence status, ladder rungs) |
+| **[BUNDLE]** | Needs the Git→CI→signed-bundle pipeline; no new detection capability required |
+| **[TI]** | Needs the threat-intelligence manager and/or analyzers that do not exist yet |
+| **[HOST]** | Needs host adapters capable of pre-execution enforcement |
 
-A policy violation expresses **the rule author's judgment, never the tool's**.
-SSC Init performs no content analysis, so it has no basis for a risk claim, and
-`README.md` promises exactly that. The output therefore says *"this violates a
-rule you wrote"* — it names the rule, so any judgment traces back to a human who
-made it — and never *"this is dangerous"*.
+The correction that produced this document: *"no verdicts, never blocks"* is a
+description of what the **current build** can support, not a product principle.
+The foundation design has verdicts (§7.3), automatic blocking (§9.1), and
+reversible quarantine (§9.4). Designing those away would foreclose the product.
 
-This has a consequence worth stating plainly in the README so nobody is
-misled: **SSC Init ships no out-of-box threat detection, and adding the policy
-layer does not change that.** A fresh install reports no violations until rules
-are adopted.
+## 1. Precedence
 
-## Decisions (settled with the user)
+Foundation §8. Evaluated in this order; the first level that decides, decides.
 
-1. **User-declared rules, with shipped templates.** The engine evaluates rules
-   the user has declared. We ship templates as packaging, not as opinion.
-2. **Templates are inert until adopted.** A rule that fired on a fresh install
-   would be *us* asserting risk about content we never analysed. Default-on
-   rules would also be tuned against machines we have never seen, misfire, and
-   teach the reader to ignore the section — the alert fatigue the severity
-   ladder exists to avoid.
-3. **Three rule families, content inspection permanently excluded.**
-4. **Advisory in the hook, gating in `policy check`.**
-5. **`POLICY` is its own section, not a rung.**
-6. **Standing violations break the silence rule.**
-7. **JSON rule files** with explicit `enabled` flags.
-8. **Trust-on-first-use pins with explicit re-approval.**
-9. **`pin-mismatch` and `unpinned` are separate, independently enabled rules.**
-10. **Evaluation-time only** — nothing about policy enters the snapshot or the
-    scan JSON contract.
+| # | Level | Override | Mark |
+|---|---|---|---|
+| 1 | Known malicious evidence | **cannot be overridden by anyone** | **[TI]** |
+| 2 | Organization deny | **users cannot override locally** | **[BUNDLE]** — matching is [NOW] |
+| 3 | Organization allow | invalidated by artifact hash change | **[BUNDLE]** — invalidation is [NOW] |
+| 4 | Time- and scope-bound user exceptions, where organization policy permits | expire | **[NOW]** |
+| 5 | Default product policy | user-configurable | **[NOW]** |
 
-## Rule families
+Level 1 exists in the engine from day one and evaluates to *"no evidence
+available"* until the TI manager ships. It is not designed out and added back;
+it is present and inert, so nothing above it can be silently reordered later.
 
-A rule may only test facts the tool established. Three families qualify.
+Level 3's invalidation rule is important and buildable today: an organization
+*allow* is bound to an artifact hash, so the moment the bytes change the allow
+stops applying. That is precisely the `pin-mismatch` mechanic below, reused.
 
-| Family | Matches on | Example |
+## 2. Policy source of truth
+
+Foundation §8. **[BUNDLE]**
+
+- Git-managed YAML is the source of truth. Pull requests provide review and
+  audit history.
+- CI validates JSON Schema, duplicate keys, conflicts, exception expiry, and
+  policy test cases; then compiles deterministic JSON and signs a versioned
+  release bundle.
+- **Local SQLite is only a verified-policy index and audit cache, never the
+  source of truth.** A tampered local database is rebuildable from the signed
+  bundle — so local modification is a recoverable event, not a policy change.
+- Bundle activation follows the same stage → verify → health check → atomic
+  switch → rollback discipline as core and TI updates (foundation §11); the
+  last known-good bundle stays active on any checksum, signature, schema, or
+  migration failure.
+
+### Local-only mode **[NOW]**
+
+Without a bundle, only levels 4 and 5 exist: user exceptions and default
+product policy, from
+`$HOME/Library/Application Support/SSC Init/policy.json`, with `--policy <path>`
+so an individual or team can version-control it. This is the mode the current
+build can ship.
+
+A local file **cannot** express levels 2 or 3. Organization deny is
+unoverridable precisely because it does not come from a file the user can edit;
+letting a local file claim that authority would make the precedence a lie.
+`policy check` states which levels are active, so an unsigned local-only setup
+never appears to be enforcing organization policy.
+
+## 3. Rules
+
+A rule may only test facts the tool established. Content inspection is excluded
+until analyzers exist **[TI]**; nothing in the current model knows what code
+*does*, so *"this plugin reads `~/.ssh`"* is not expressible, while *"this MCP
+server's command is a shell"* is.
+
+| Family | Matches on | Mark |
 |---|---|---|
-| **Shape** | recorded asset/observation facts | an `mcp-server` whose `command` is a shell; an MCP declaring an env key matching `*_TOKEN`; an IDE extension whose entry point is `unavailable` |
-| **Change** | the severity ladder | any `NEW mcp-server`; any `CHANGED` (same version, different bytes) |
-| **Pin** | expected digests | this asset ID must hash to this digest |
+| **Shape** | recorded asset/observation facts — asset type, host, name, version, MCP `command`/`args`/`env_keys`/transport, IDE entry points, evidence status | **[NOW]** |
+| **Change** | severity-ladder rungs — `NEW`, `CHANGED`, `UPGRADED`, `REMOVED`, `UNVERIFIED` | **[NOW]** |
+| **Pin** | expected digests per asset ID | **[NOW]** |
+| **Behavioral** | analyzer output — obfuscation, dynamic execution, credential-access flows, dangerous APIs | **[TI]** |
 
-**Content inspection is excluded permanently.** No grepping payloads for
-`curl`, no scanning for suspicious strings. That requires reading and reasoning
-about content the tool deliberately never interprets, would need raw content in
-memory and probably persisted, and is a different product — a scanner, not an
-inventory.
+Two shape rules the foundation design names explicitly as blocked by default
+under organization policy (§6.3): `latest`/unspecified versions and mutable Git
+branches; and direct remote-script execution (`curl … | sh`). Both are
+expressible **[NOW]** from recorded command and version facts.
 
-The limitation this leaves, which the docs must state: shape rules see only
-what collectors already record. `sh -c` is catchable because MCP observations
-carry `command`/`args`. *"This plugin reads `~/.ssh`"* is **not** catchable,
-because nothing in the model knows what the code does. The policy layer narrows
-the blind spot; it does not close it.
+### Pins **[NOW]**
 
-### Pins
+`pin-mismatch` — a pinned asset ID hashes differently than approved. Because the
+ID embeds the version, this means *same asset, same version, different bytes*:
+the tamper shape. It is also the mechanism behind precedence level 3.
 
-Pins are the strongest family because a mismatch is a hard fact with no
-interpretation. They are seeded by trust-on-first-use:
+`unpinned` — an asset has no pin. A legitimate upgrade mints a new ID with no
+pin, so this fires on every install and upgrade until re-approved.
 
-```sh
-ssc-init policy pin                     # approve the current state
-ssc-init policy pin --update <assetID>  # re-approve after reviewing a change
-```
+They are separate, independently enabled rules. Merged, the noisy one buries
+the sharp one — a dozen `unpinned` lines after a routine update batch, with the
+single `pin-mismatch` that matters somewhere inside.
 
-**The TOFU caveat is permanent and must be echoed by the command itself, not
-only documented: pinning records whatever is on the machine right now. Pinning
-a compromised machine approves the compromise.** A pin protects against future
-change, not against what is already there.
+Pins are seeded trust-on-first-use (`ssc-init policy pin`) and re-approved
+explicitly (`policy pin --update <assetID>`). **The command itself must state
+the caveat, not only the docs: pinning records whatever is on the machine right
+now, so pinning a compromised machine approves the compromise.** A pin protects
+against future change, not against what is already there. Under an organization
+bundle, pins are authored in the bundle and TOFU is unavailable — level 3 is not
+something a local machine may self-grant.
 
-`unpinned` and `pin-mismatch` are different signals and separate rules:
+### Default product policy **[NOW]**
 
-- **`pin-mismatch`** — a pinned asset ID hashes differently than approved. The
-  asset ID embeds the version, so this means *same plugin, same version,
-  different bytes*: the tamper shape. Rare, and almost always worth
-  interrupting for. Mechanically restricted to the `CHANGED` shape, so enabling
-  it gives a hard version of a signal the ladder already reports softly —
-  `CHANGED` says bytes moved, `pin-mismatch` says bytes moved away from what
-  you approved.
-- **`unpinned`** — an asset has no pin. A legitimate upgrade mints a *new*
-  asset ID that simply has no pin yet, so this fires on every install and every
-  upgrade until re-pinned. Useful for a locked toolchain, noisy otherwise.
+Shipped rules are **inert until adopted**: present in the file with
+`enabled: false` and a human-readable `description`. A rule firing on a fresh
+install would be *us* asserting risk about content we never analysed, and would
+be tuned against machines we have never seen — misfiring and teaching the reader
+to ignore the section.
 
-Merged into one rule the noisy case buries the sharp one: a dozen `unpinned`
-lines after a routine update batch, with the single `pin-mismatch` that matters
-somewhere inside.
-
-## Rule file
-
-Default `$HOME/Library/Application Support/SSC Init/policy.json`, beside the
-state database; `--policy <path>` overrides it so a team can commit rules and
-run `ssc-init policy check --policy .ssc-policy.json` in CI.
+This applies to level 5 only. Organization deny (level 2) is **not** opt-in;
+that is the point of it.
 
 JSON, because the stdlib parses it and the project is already all-JSON. Go's
-stdlib has no TOML, and the hand-rolled reader the MCP collector uses for
-Codex's `config.toml` was built for a much narrower shape than this schema —
-pushing it further would risk a release-blocking invariant ("no new runtime
-dependency") or a bespoke grammar to specify and adversarially test.
+stdlib has no YAML or TOML, and the narrow reader the MCP collector uses for
+Codex's `config.toml` was built for a far simpler shape — extending it would
+risk the release-blocking "no new runtime dependency" invariant. The bundle
+pipeline authors YAML **[BUNDLE]** and compiles to this JSON, so YAML never
+needs parsing on the client.
 
-JSON has no comments, so a template carries its intent in data instead:
-`enabled: false` plus a human-readable `description`. Adopting a rule is
-flipping a bool, and the description survives parsing rather than being
-discarded.
+## 4. Exceptions
 
-```json
-{
-  "schemaVersion": "ssc-init.policy.v1",
-  "rules": [
-    { "id": "no-shell-mcp", "enabled": false,
-      "description": "An MCP server whose command is a shell runs arbitrary code at session start.",
-      "match": { "assetType": "mcp-server", "command": ["sh", "bash", "zsh"] } },
-    { "id": "pin-mismatch", "enabled": false,
-      "description": "A pinned asset must hash to its approved digest." },
-    { "id": "unpinned", "enabled": false,
-      "description": "Every agent plugin must be explicitly approved." }
-  ],
-  "pins": { "agent-plugin:claude:superpowers@6.2.0": "sha256:…" }
-}
-```
+Foundation §9.3. **[NOW]** for the model and enforcement of limits; **[BUNDLE]**
+for organization-approved scopes.
 
-`ssc-init policy init` writes this annotated starter with every rule disabled.
+Scope is limited to a run, an exact asset/version/hash, a project, or an
+organization-approved scope.
 
-## Surfaces
+- Project exceptions expire within **30 days** by default.
+- Organization exceptions require **approver, reason, ticket, and expiry**, with
+  **90 days** as the default maximum.
 
-### `ssc-init hook` — advisory, always exit 0
+**Prohibited, and the engine must refuse to load a policy containing them:**
 
-The advisory contract is unchanged: blocking session start because a plugin
-auto-updated would be hostile. Violations render in their own section below the
-ladder:
+- publisher-wide permanent trust;
+- all-version trust;
+- disabling a high-risk rule globally;
+- any exception for a known-malicious hash.
+
+These are structural refusals, not warnings. An exception file expressing one is
+a policy error, reported precisely by `policy check` and rejected at load — the
+same way CI rejects it before a bundle is ever signed.
+
+Expiry is evaluated at decision time, so an expired exception simply stops
+applying; it is never silently renewed.
+
+## 5. Enforcement
+
+Foundation §9.1. Host capability is declared, never assumed:
+**pre-execution**, **scheduled detection**, **on-demand**, **advisory**, or
+**enforced**.
+
+| Behaviour | Requires |
+|---|---|
+| Known-malicious and organization-denied assets are automatically blocked | **[TI]** + **[HOST]** for pre-execution; **[BUNDLE]** + **[HOST]** for deny |
+| High-confidence but uncertain findings pause execution and request informed approval | **[HOST]** |
+| External changes that could not be intercepted are detected on the next scan and produce remediation guidance | **[NOW]** |
+| Reversible quarantine — removes execute permission, preserves path/hash/permissions, current-user-only, never auto-deletes | **[TI]** to justify, mechanism is **[NOW]** |
+
+**The current build's honest capability is `advisory` plus `on-demand`.** It has
+no execution interception and no host adapters, so it cannot block anything. It
+must therefore *report* `advisory` — foundation §5.1 requires that an adapter
+"never claims enforcement when only advisory scanning is possible", and the same
+obligation applies to the core.
+
+`ssc-init policy check` exiting nonzero **[NOW]** is a gate for CI, pre-commit,
+and deliberate manual use. That is genuine enforcement *of a pipeline*, and it
+is the only enforcement available today. It is not pre-execution blocking and
+must not be described as such.
+
+## 6. Surfaces
+
+### `ssc-init hook` — advisory, always exit 0 **[NOW]**
+
+Blocking session start because a plugin auto-updated would be hostile, and the
+advisory contract is locked and tested. Violations render in their own section
+below the severity ladder:
 
 ```
 ssc-init: 3 changes since last snapshot
@@ -157,84 +205,88 @@ POLICY (2 violations)
   unpinned            agent-plugin  helpful-utils (claude)
 ```
 
-A section rather than a rung, for three reasons:
+A section, not a rung, because: a rung would collapse an asset's multiple
+violations into one line and lose the rule names, which are the actionable
+content; the ladder answers *what moved* while policy answers *what violates my
+expectations*, and a violation needs no change at all (a plugin quietly
+violating a rule for six months has no rung and would be invisible); and the
+split keeps facts the tool established visually separate from claims the policy
+author made.
 
-1. **A rung would destroy information.** "Highest rung wins" means one line per
-   asset; an asset violating three rules would show one, losing the other rule
-   names — and the rule name is the actionable content.
-2. **They answer different questions.** The ladder answers "what moved since
-   last snapshot". Policy answers "what currently violates my expectations",
-   and a violation needs no change at all — a plugin quietly violating
-   `no-shell-mcp` for six months has no rung and would be invisible as one.
-3. **It keeps the honesty split legible.** Everything above the section is a
-   fact the tool established; everything inside it is a claim the user made.
+Once enforcement exists **[HOST]**, a blocked asset is reported here too, with
+its decision level named — the hook reports the block; it does not perform it.
 
-### Silence
+### Silence **[NOW]**
 
-Standing violations **do** break the silence rule — the one place policy
-departs from `UNVERIFIED`. On an otherwise-quiet machine the hook prints
-exactly one line:
+Standing violations **do** break the silence rule — the one place policy departs
+from `UNVERIFIED`. A quiet machine prints exactly one line:
 
 ```
 ssc-init: 2 policy violations standing (run: ssc-init policy check)
 ```
 
-Newly-violating assets get detail lines; standing ones collapse to that count.
-The principle: a coverage gap is the tool admitting what it *cannot* do, and
-nagging about a 240 MB extension teaches the reader to ignore the hook. A
-violation is the tool reporting what the user said *should not be* — a to-do,
-not a boundary. Suppressing it would make silence a lie: "nothing changed"
-would read as "nothing to do" while a rule is being violated.
+New violations get detail lines; standing ones collapse to that count. A
+coverage gap is the tool admitting what it *cannot* do, and nagging teaches the
+reader to ignore the hook. A violation is the tool reporting what the user or
+their organization said *should not be* — a to-do, not a boundary. Suppressing
+it would make silence a lie.
 
-Accepted cost: a machine with a standing violation is never fully silent again
-until the state is fixed or the rule amended. That pressure is deliberate, and
-both escapes are in the user's hands.
+### `ssc-init policy check` — gates, exits nonzero **[NOW]**
 
-### `ssc-init policy check` — gates, exits nonzero
+Same engine, different exit-code policy. Lists every violation, standing and
+new, and states which precedence levels are active and which are inert.
 
-Same engine, different exit-code policy, for CI, pre-commit, or a deliberate
-manual gate — contexts where a nonzero exit is a normal outcome rather than an
-emergency. Lists every violation, standing and new.
-
-**It reads the latest snapshot and does not scan.** No filesystem access, so
+**It reads the latest snapshot and does not scan** — no filesystem access — so
 adopting a rule and seeing what it would flag against yesterday's inventory is
-instant and safe to experiment with, and CI can evaluate a committed snapshot
-without touching a developer machine.
+instant, and CI can evaluate a committed snapshot without touching a developer's
+machine.
 
-### `scan --baseline --json` — unchanged
+### `scan --baseline --json` — unchanged **[NOW]**
 
 Nothing about policy enters the snapshot, the database, or `ssc-init.scan.v3`.
-The snapshot records what is on the machine; rules are a question asked of
-those facts, and they change independently — editing `policy.json` must not
-invalidate a snapshot, and two people with different rules must be able to
-evaluate the same snapshot differently. Baking violations into the persisted
-record would conflate observation with judgment.
+The snapshot records what is on the machine; policy is a question asked of those
+facts, and the two change independently — editing policy must not invalidate a
+snapshot, and two people with different policy must be able to evaluate the same
+snapshot differently.
 
-Machine consumers lose nothing: every fact a rule matches on is already in the
-scan JSON, so a pipeline can run `policy check --json` or evaluate the same
-predicates itself.
+The audit cache (§8: local SQLite as verified-policy index and audit history) is
+a **separate** store from the inventory snapshot, for decisions, exception
+expiry, and audit trail. It is not part of the scan contract.
 
-Documented consequence: the hook renders violations that are not in the JSON.
-JSON is the record of facts; the hook is a triage view over facts **plus** the
-user's rules.
+### Organization reporting **[BUNDLE]**
 
-## Implementation shape
+Foundation §8: signed policy bundles, SARIF 2.1.0, CycloneDX, Finding JSON,
+HTTPS webhooks, and CLI exit codes. Outbound findings carry an opaque device
+identity, asset type and canonical identifier, version/hash, severity, rule
+identifiers, detection time, and action status — and **exclude** source code,
+secret values, raw environment variables, personal paths, project/repository
+names, and raw matched data by default. That exclusion list is the existing
+privacy invariant restated for a new egress path, and it is release-blocking.
 
-- `internal/policy` — new package. Rule schema, parsing with precise error
-  reporting, and evaluation against `(model.Inventory, model.Delta)`. Pure: no
-  I/O beyond reading the rule file, no filesystem access during evaluation.
-- `internal/report` — renders the `POLICY` section and the standing-count line;
-  reuses the existing row formatter.
-- `internal/cli` — `policy init`, `policy pin`, `policy check`; `hook` gains
-  policy evaluation between scan and render.
-- No new runtime dependency. No store or scan changes. No schema change.
+## 7. Implementation shape
 
-## Non-goals
+- `internal/policy` — rule schema, load-time validation (including structural
+  refusal of prohibited exceptions), and evaluation against
+  `(model.Inventory, model.Delta)` plus pins/exceptions. Pure: no filesystem
+  access during evaluation. **[NOW]**
+- `internal/policy/bundle` — signature and schema verification, staging, atomic
+  activation, rollback, freshness. **[BUNDLE]**
+- `internal/report` — `POLICY` section and standing-count line, reusing the
+  existing rung row formatter. **[NOW]**
+- `internal/cli` — `policy init`, `policy pin`, `policy check`; `hook` evaluates
+  policy between scan and render. **[NOW]**
+- Audit store — decisions, exceptions, expiry, history; separate from the
+  inventory snapshot. **[NOW]** for the local subset.
+- No new runtime dependency. No scan schema change.
 
-- No content inspection, ever.
-- No shipped rule that is enabled by default.
-- No severity ranking *between* rules — a violation is a violation; the user
-  decides what matters by choosing what to enable.
-- No auto-remediation. The tool never removes, quarantines, or modifies a
-  discovered asset.
-- No policy state in the snapshot.
+## 8. Non-goals
+
+- No content inspection until analyzers exist; no heuristic that guesses what
+  code does.
+- No shipped rule enabled by default at level 5.
+- No auto-deletion. Quarantine is reversible and preserves the original path,
+  hash, and permissions.
+- No claim of enforcement while the host is advisory-only.
+- No central organization database or commercial control plane (foundation §3);
+  organization integration is signed bundles plus standard report formats.
+- No policy state in the inventory snapshot.
