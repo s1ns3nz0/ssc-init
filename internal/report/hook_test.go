@@ -132,3 +132,22 @@ func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 		t.Fatalf("cap did not prefer high rungs:\n%s", output)
 	}
 }
+
+func TestWriteHookSummaryIsSilentWhenEveryChangeIsUnattributable(t *testing.T) {
+	inventory := model.Inventory{
+		Assets:   []model.Asset{{ID: "agent-skill:claude:docx", Name: "docx"}},
+		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:zzzz", Status: model.EvidenceOversize}},
+	}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:zzzz"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityObservation, EntityID: "observation:sha256:ghost"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:gone"},
+	}}
+	var buffer bytes.Buffer
+	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
+		t.Fatal(err)
+	}
+	if buffer.Len() != 0 {
+		t.Fatalf("expected silence, got:\n%s", buffer.String())
+	}
+}
