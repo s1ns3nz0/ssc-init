@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -364,7 +365,8 @@ func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
 		t.Fatalf("drift: code=%d stderr=%q", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "toolchain drift") || !strings.Contains(out.String(), "agent-plugin alpha@1.0.0 (claude)") {
+	if !strings.Contains(out.String(), "ssc-init: 1 changes since last snapshot") ||
+		!regexp.MustCompile(`(?m)^  NEW\s+agent-plugin\s+alpha \(claude\)$`).MatchString(out.String()) {
 		t.Fatalf("drift output wrong:\n%s", out.String())
 	}
 

@@ -38,6 +38,13 @@ extensions, and their content evidence.
 
 ## Output format
 
+> **Superseded.** The shipped format is the severity ladder specified by the
+> Output section of `2026-08-08-hook-severity-ladder-design.md`: one row per
+> asset tagged `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED`, no per-entity
+> grouping, and a one-line initial-baseline form on the first run. The format
+> below is the superseded v1 and is retained for history. The privacy, cap,
+> determinism, and silent-when-clean rules carry over unchanged.
+
 ```
 ssc-init: toolchain drift since last snapshot
   added    agent-plugin ponytail (claude)
@@ -56,8 +63,8 @@ Rules:
   (`<type>:<host>:<name>@<version>`), so removed assets render without
   needing the previous inventory. Observation and evidence IDs are opaque
   hashes; added/changed ones resolve their asset name through the current
-  inventory and are **grouped per asset with a count** (collapsing the
-  one-time cache-warm flood); removed ones that cannot be resolved are
+  inventory and are **grouped per asset with a count**; removed ones that
+  cannot be resolved are
   summarized as one `removed  N observation/evidence records` line per
   entity type.
 - Deterministic ordering: kind (added, changed, removed), then rendered
@@ -94,9 +101,11 @@ Strict TDD, in this order:
    (no digest/path strings from fixture leak into output).
 3. CLI: drift → summary + exit 0; clean → empty stdout + exit 0; scanner error
    → stderr line + exit 0; nil scanner → same.
-4. Acceptance-style isolated-home run through the real pipeline: first run
-   prints drift (initial baseline = all added), second run prints the grouped
-   cache-warm summary, third run is silent.
+4. Acceptance-style isolated-home run through the real pipeline. Superseded by
+   `2026-08-08-hook-severity-ladder-design.md`: cache provenance is no longer a
+   change signal, so there is no cache-warm run. The shipped lifecycle is first
+   run reports an initial baseline without rungs, second run is silent, a
+   mutated payload prints one `CHANGED` row, and the run after that is silent.
 
 ## Non-goals (v1)
 

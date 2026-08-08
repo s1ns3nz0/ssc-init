@@ -23,16 +23,17 @@ import (
 // never print.
 var hookDigestPattern = regexp.MustCompile(`[0-9a-f]{64}`)
 
-// hookCacheWarmLine matches the grouped evidence rows the second run may print
-// when the store-backed evidence cache flips its miss/hit metadata.
-var hookCacheWarmLine = regexp.MustCompile(`^  changed\s+\d+ evidence records( \(.+\))?$`)
+// hookChangedPluginRow matches the severity-ladder row a mutated plugin payload
+// must produce.
+var hookChangedPluginRow = regexp.MustCompile(`(?m)^  CHANGED\s+agent-plugin`)
 
-// TestHookLifecycleFirstDriftThenCacheWarmThenSilent drives `ssc-init hook`
-// three times through the real collector pipeline and a real SQLite store in
-// an isolated home: the initial baseline reports drift, the second run may
-// only report the grouped cache-warm evidence rows, and the third run is
-// silent because nothing changed.
-func TestHookLifecycleFirstDriftThenCacheWarmThenSilent(t *testing.T) {
+// TestHookLifecycleInitialBaselineThenSilent drives `ssc-init hook` four times
+// through the real collector pipeline and a real SQLite store in an isolated
+// home: the first run records an initial baseline without rungs, the second run
+// is silent, mutating a payload file promotes the plugin to CHANGED, and the
+// run after that is silent again — proving a content change echoes exactly
+// once, not on every following run.
+func TestHookLifecycleInitialBaselineThenSilent(t *testing.T) {
 	home := t.TempDir()
 	writeMatrixFile(t, filepath.Join(home, ".claude", "plugins", "demo", ".claude-plugin", "plugin.json"), `{"name":"demo","version":"1.0.0"}`)
 	writeMatrixFile(t, filepath.Join(home, ".claude", "plugins", "demo", "payload.js"), "payload v1\n")
@@ -79,25 +80,40 @@ func TestHookLifecycleFirstDriftThenCacheWarmThenSilent(t *testing.T) {
 	}
 
 	first := run("first run")
-	if !strings.Contains(first, "toolchain drift") || !strings.Contains(first, "added") {
-		t.Fatalf("initial baseline must report drift:\n%s", first)
+	if !strings.Contains(first, "initial baseline recorded") {
+		t.Fatalf("first run must record an initial baseline:\n%s", first)
 	}
-
-	second := run("second run")
-	for _, line := range strings.Split(strings.TrimSuffix(second, "\n"), "\n") {
-		if line == "" || line == "ssc-init: toolchain drift since last snapshot" || hookCacheWarmLine.MatchString(line) {
-			continue
+	for label := range rungLabelsUnderTest {
+		if strings.Contains(first, label) {
+			t.Fatalf("initial baseline must not print rung %q:\n%s", label, first)
 		}
-		t.Fatalf("second run printed unexpected line %q in:\n%s", line, second)
-	}
-	if digest := hookDigestPattern.FindString(second); digest != "" {
-		t.Fatalf("second run leaked digest %q in:\n%s", digest, second)
-	}
-	if strings.Contains(second, home) {
-		t.Fatalf("second run leaked the home path in:\n%s", second)
 	}
 
-	if third := run("third run"); third != "" {
-		t.Fatalf("third run must be silent, got:\n%s", third)
+	if second := run("second run"); second != "" {
+		t.Fatalf("second run must be silent, got:\n%s", second)
 	}
+
+	writeMatrixFile(t, filepath.Join(home, ".claude", "plugins", "demo", "payload.js"), "payload v2\n")
+
+	third := run("third run")
+	if !hookChangedPluginRow.MatchString(third) {
+		t.Fatalf("mutated payload must print a CHANGED agent-plugin row:\n%s", third)
+	}
+	if digest := hookDigestPattern.FindString(third); digest != "" {
+		t.Fatalf("third run leaked digest %q in:\n%s", digest, third)
+	}
+	if strings.Contains(third, home) {
+		t.Fatalf("third run leaked the home path in:\n%s", third)
+	}
+
+	if fourth := run("fourth run"); fourth != "" {
+		t.Fatalf("fourth run must be silent — the content change must not echo, got:\n%s", fourth)
+	}
+}
+
+// rungLabelsUnderTest is the closed set of rung labels the first run must not
+// print. It intentionally duplicates internal/report rather than exporting it:
+// acceptance asserts the public output contract, not the renderer's internals.
+var rungLabelsUnderTest = map[string]struct{}{
+	"NEW": {}, "CHANGED": {}, "UNVERIFIED": {}, "UPGRADED": {}, "REMOVED": {},
 }

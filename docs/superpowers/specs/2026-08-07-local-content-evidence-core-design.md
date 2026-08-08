@@ -228,8 +228,11 @@ path retained by this sub-project.
 ### 6.1 Inventory and delta
 
 `Inventory` adds a non-nil, deterministically ordered `Evidence` slice.
-`ChangeEntity` adds `evidence`. Diffing canonical evidence excludes only
-explicit observation timestamps; evidence has no wall-clock field.
+`ChangeEntity` adds `evidence`. Diffing canonical evidence excludes explicit
+observation timestamps (evidence has no wall-clock field) and the `cache`
+metadata key: cache provenance describes how a run obtained a digest, not what
+the content is, so including it made every content change echo on the following
+run. See `2026-08-08-hook-severity-ladder-design.md`, "Required upstream fix".
 
 Evidence ordering is by `ID`. Error ordering is by code. Metadata is encoded by
 Go's deterministic JSON map-key ordering, but validation rejects unknown keys so
