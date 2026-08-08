@@ -141,6 +141,21 @@ CREATE TABLE content_cache (
 );
 ALTER TABLE inventory_state ADD COLUMN evidence_nil INTEGER NOT NULL DEFAULT 1 CHECK (evidence_nil IN (0, 1));
 ALTER TABLE inventory_state ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (evidence_count >= 0);`,
+	// Asset change history (design §10) outlives the snapshots that produced
+	// it, so it deliberately carries no scan_id and no foreign key: pruning a
+	// snapshot must not take the record of when its assets first appeared.
+	// The backfill preserves the history the already-stored snapshots hold,
+	// which the 30-day snapshot window would otherwise discard unrecorded.
+	`CREATE TABLE asset_history (
+    asset_id TEXT PRIMARY KEY,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    content_changed_at TEXT NOT NULL
+);
+INSERT INTO asset_history(asset_id, first_seen_at, last_seen_at, content_digest, content_changed_at)
+SELECT a.asset_id, min(s.finished_at), max(s.finished_at), '', min(s.finished_at)
+FROM assets a JOIN scans s ON s.id = a.scan_id GROUP BY a.asset_id;`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -215,6 +230,7 @@ var requiredColumns = map[string][]columnSpec{
 	"evidence_state":     {{"scan_id", "TEXT", "", 1, 1, false}, {"evidence_id", "TEXT", "", 1, 2, false}, {"evidence_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}},
 	"evidence_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"result_json", "BLOB", "", 1, 0, false}},
 	"content_cache":      {{"cache_key", "BLOB", "", 0, 1, false}, {"algorithm", "TEXT", "", 1, 0, false}, {"format", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"size", "INTEGER", "", 1, 0, false}, {"last_used_at", "TEXT", "", 1, 0, false}},
+	"asset_history":      {{"asset_id", "TEXT", "", 0, 1, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}, {"content_digest", "TEXT", "", 1, 0, false}, {"content_changed_at", "TEXT", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -386,6 +402,7 @@ var requiredIndexFingerprints = map[string][]string{
 	"evidence_state":     {"pk:1:scan_id,evidence_id", "u:1:scan_id,evidence_index"},
 	"evidence_coverage":  {"pk:1:scan_id"},
 	"content_cache":      {"pk:1:cache_key"},
+	"asset_history":      {"pk:1:asset_id"},
 }
 
 func verifyIndices(db *sql.DB) error {

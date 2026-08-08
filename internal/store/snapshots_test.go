@@ -121,8 +121,8 @@ func TestMigration5AddsEvidenceAndContentCacheSchema(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 5 {
-		t.Fatalf("applied migration=%d want=5", applied)
+	if applied != len(migrations) {
+		t.Fatalf("applied migration=%d want=%d", applied, len(migrations))
 	}
 	for _, table := range []string{"evidence", "evidence_state", "evidence_coverage", "content_cache"} {
 		assertTableExists(t, s.db, table)
@@ -1593,7 +1593,7 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 
 func assertNoSnapshotRows(t *testing.T, s *Store) {
 	t.Helper()
-	for _, table := range []string{"scans", "assets", "observations", "observation_state", "evidence", "evidence_state", "evidence_coverage", "relationships", "coverage", "inventory_errors", "inventory_state"} {
+	for _, table := range []string{"scans", "assets", "observations", "observation_state", "evidence", "evidence_state", "evidence_coverage", "relationships", "coverage", "inventory_errors", "inventory_state", "asset_history"} {
 		var count int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -2131,6 +2131,76 @@ func TestSaveScanRetentionLeavesNoOrphanRows(t *testing.T) {
 	}
 }
 
+// TestSaveScanKeepsSnapshotsInsideRetentionWindow pins the window itself. The
+// tests above only exercise snapshots that survive by being newest, so without
+// this one a zero-length retention window would still pass the suite.
+func TestSaveScanKeepsSnapshotsInsideRetentionWindow(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index, age := range []time.Duration{29 * 24 * time.Hour, 15 * 24 * time.Hour, 24 * time.Hour, 0} {
+		saveSnapshotAt(t, s, fmt.Sprintf("window-%d", index), now.Add(-age), now)
+	}
+	if remaining := snapshotCount(t, s); remaining != 4 {
+		t.Fatalf("retention kept %d snapshots inside the 30-day window, want 4", remaining)
+	}
+}
+
+func TestSaveScanKeepsSnapshotExactlyAtRetentionEdge(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "edge-old", now.Add(-snapshotRetention), now)
+	saveSnapshotAt(t, s, "edge-new", now, now)
+	if remaining := snapshotCount(t, s); remaining != 2 {
+		t.Fatalf("retention kept %d snapshots, want 2 (edge snapshot must be retained)", remaining)
+	}
+}
+
+// TestSaveScanPruneRollsBackWithTheInsert catches a prune hoisted ahead of the
+// insert: the pruning clock would then not see the new baseline.
+func TestSaveScanPruneRollsBackWithTheInsert(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "atomic-old", now.Add(-90*24*time.Hour), now.Add(-90*24*time.Hour))
+	saveSnapshotAt(t, s, "atomic-mid", now.Add(-60*24*time.Hour), now.Add(-60*24*time.Hour))
+	before := snapshotCount(t, s)
+	scan, inventory := validV3Snapshot(t, "atomic-mid") // duplicate id: save must fail
+	scan.StartedAt, scan.FinishedAt = now.Add(-time.Second), now
+	if err := s.saveScanAt(context.Background(), scan, inventory, now); err == nil {
+		t.Fatal("expected duplicate scan id to fail")
+	}
+	if after := snapshotCount(t, s); after != before {
+		t.Fatalf("failed save pruned snapshots anyway: %d -> %d", before, after)
+	}
+}
+
+// TestSaveScanFailedPruneRollsBackTheInsert catches the opposite hoist: a prune
+// moved after the commit would leave a store pruned but without the baseline it
+// was pruned for. A trigger fails the prune's final DELETE, so the save must
+// report failure and leave the previous snapshot as the newest one.
+func TestSaveScanFailedPruneRollsBackTheInsert(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "blocked-old", now.Add(-90*24*time.Hour), now.Add(-90*24*time.Hour))
+	if _, err := s.db.Exec(`CREATE TRIGGER block_prune BEFORE DELETE ON scans BEGIN SELECT raise(ABORT, 'prune blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	scan, inventory := validV3Snapshot(t, "blocked-new")
+	scan.StartedAt, scan.FinishedAt = now.Add(-time.Second), now
+	if err := s.saveScanAt(context.Background(), scan, inventory, now); err == nil {
+		t.Fatal("expected a blocked prune to fail the save")
+	}
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("failed prune left %d snapshots, want 1 (the insert must roll back with it)", remaining)
+	}
+	var surviving string
+	if err := s.db.QueryRow(`SELECT id FROM scans`).Scan(&surviving); err != nil {
+		t.Fatal(err)
+	}
+	if surviving != "blocked-old" {
+		t.Fatalf("failed save persisted scan %q", surviving)
+	}
+}
+
 // bulkySnapshot pads a valid v3 snapshot with filler assets so each saved
 // snapshot occupies enough database pages for a file-size change to be
 // observable at page granularity.
@@ -2191,5 +2261,277 @@ func TestSaveScanRetentionReclaimsFileSpace(t *testing.T) {
 	}
 	if size := storeDiskBytes(t, s); size >= peak {
 		t.Fatalf("store occupies %d bytes after pruning 20 snapshots, want less than the %d byte peak", size, peak)
+	}
+}
+
+// assetHistoryRow reads one history row. Absence is reported rather than
+// fatal so pruning assertions can distinguish "deleted" from "never written".
+func assetHistoryRow(t *testing.T, s *Store, assetID string) (firstSeen, lastSeen, digest, changedAt string, ok bool) {
+	t.Helper()
+	err := s.db.QueryRow(`SELECT first_seen_at, last_seen_at, content_digest, content_changed_at FROM asset_history WHERE asset_id = ?`, assetID).
+		Scan(&firstSeen, &lastSeen, &digest, &changedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return firstSeen, lastSeen, digest, changedAt, true
+}
+
+// saveHistorySnapshot saves a valid v3 snapshot carrying one extra evidence-free
+// asset, so a later snapshot can drop that asset and leave only its history.
+func saveHistorySnapshot(t *testing.T, s *Store, scanID, extraAssetID, digest string, finishedAt, now time.Time) {
+	t.Helper()
+	scan, inventory := validV3Snapshot(t, scanID)
+	scan.StartedAt, scan.FinishedAt = finishedAt.Add(-time.Second), finishedAt
+	if digest != "" {
+		for index, evidence := range inventory.Evidence {
+			if evidence.Status == model.EvidenceComplete {
+				inventory.Evidence[index].Digest = digest
+			}
+		}
+	}
+	if extraAssetID != "" {
+		inventory.Assets = append(inventory.Assets, model.Asset{ID: extraAssetID, Type: model.AssetPackage, Name: "extra"})
+	}
+	if err := s.saveScanAt(context.Background(), scan, inventory, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSaveScanRecordsAssetHistoryAcrossDigestTransitions(t *testing.T) {
+	s := openTestStore(t)
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "history-1", "", strings.Repeat("a", 64), first, first)
+	firstSeen, lastSeen, digest, changedAt, ok := assetHistoryRow(t, s, "asset-one")
+	if !ok {
+		t.Fatal("first scan recorded no asset history")
+	}
+	if firstSeen != formatTime(first) || lastSeen != formatTime(first) || changedAt != formatTime(first) {
+		t.Fatalf("first=%q last=%q changed=%q, want all %q", firstSeen, lastSeen, changedAt, formatTime(first))
+	}
+	if digest == "" {
+		t.Fatal("asset with complete evidence recorded no content digest")
+	}
+
+	unchanged := first.Add(24 * time.Hour)
+	saveHistorySnapshot(t, s, "history-2", "", strings.Repeat("a", 64), unchanged, unchanged)
+	gotFirst, gotLast, gotDigest, gotChanged, _ := assetHistoryRow(t, s, "asset-one")
+	if gotFirst != formatTime(first) {
+		t.Fatalf("first seen moved to %q, want %q", gotFirst, formatTime(first))
+	}
+	if gotLast != formatTime(unchanged) {
+		t.Fatalf("last seen = %q, want %q", gotLast, formatTime(unchanged))
+	}
+	if gotDigest != digest || gotChanged != formatTime(first) {
+		t.Fatalf("unchanged content reported a transition: digest=%q changed=%q", gotDigest, gotChanged)
+	}
+
+	changed := first.Add(48 * time.Hour)
+	saveHistorySnapshot(t, s, "history-3", "", strings.Repeat("c", 64), changed, changed)
+	gotFirst, gotLast, gotDigest, gotChanged, _ = assetHistoryRow(t, s, "asset-one")
+	if gotFirst != formatTime(first) {
+		t.Fatalf("first seen moved to %q, want %q", gotFirst, formatTime(first))
+	}
+	if gotLast != formatTime(changed) || gotChanged != formatTime(changed) {
+		t.Fatalf("last=%q changed=%q, want %q", gotLast, gotChanged, formatTime(changed))
+	}
+	if gotDigest == digest {
+		t.Fatal("content digest did not follow the evidence digest")
+	}
+}
+
+func TestAssetHistorySurvivesSnapshotPruning(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	aged := now.Add(-31 * 24 * time.Hour)
+	saveHistorySnapshot(t, s, "history-aged", "removed-asset", "", aged, aged)
+	saveHistorySnapshot(t, s, "history-fresh", "", "", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("retention kept %d snapshots, want 1", remaining)
+	}
+	var assetRows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM assets WHERE asset_id = ?`, "removed-asset").Scan(&assetRows); err != nil {
+		t.Fatal(err)
+	}
+	if assetRows != 0 {
+		t.Fatalf("pruned snapshot left %d asset rows", assetRows)
+	}
+	firstSeen, lastSeen, _, _, ok := assetHistoryRow(t, s, "removed-asset")
+	if !ok {
+		t.Fatal("history did not survive the pruning of the snapshot that produced it")
+	}
+	if firstSeen != formatTime(aged) || lastSeen != formatTime(aged) {
+		t.Fatalf("first=%q last=%q, want %q", firstSeen, lastSeen, formatTime(aged))
+	}
+}
+
+func TestSaveScanPrunesAssetHistoryBeyondNinetyDays(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	ancient := now.Add(-100 * 24 * time.Hour)
+	recent := now.Add(-80 * 24 * time.Hour)
+	saveHistorySnapshot(t, s, "history-ancient", "ancient-asset", "", ancient, ancient)
+	saveHistorySnapshot(t, s, "history-recent", "recent-asset", "", recent, recent)
+	saveHistorySnapshot(t, s, "history-now", "", "", now, now)
+
+	if _, _, _, _, ok := assetHistoryRow(t, s, "ancient-asset"); ok {
+		t.Fatal("history last seen 100 days ago survived the 90 day window")
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "recent-asset"); !ok {
+		t.Fatal("history last seen 80 days ago was pruned inside the 90 day window")
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "asset-one"); !ok {
+		t.Fatal("history for a currently present asset was pruned")
+	}
+}
+
+// TestSaveScanKeepsAssetHistoryForRetainedSnapshots covers the interaction
+// between the two windows: the newest snapshot is retained regardless of age,
+// so the assets it still names must keep their history too.
+func TestSaveScanKeepsAssetHistoryForRetainedSnapshots(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	ancient := now.Add(-365 * 24 * time.Hour)
+	saveHistorySnapshot(t, s, "history-only", "", "", ancient, now)
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("retention kept %d snapshots, want 1", remaining)
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "asset-one"); !ok {
+		t.Fatal("retained snapshot lost the history of an asset it still names")
+	}
+}
+
+func TestSaveRejectsSensitiveAssetHistoryWithoutRows(t *testing.T) {
+	s := openTestStore(t)
+	inventory := model.Inventory{Assets: []model.Asset{{ID: "ghp_123456789012345678901234567890123456", Name: "asset"}}}
+	if err := s.SaveScan(context.Background(), testScan("sensitive-history", time.Unix(2, 0).UTC()), inventory); !errors.Is(err, ErrSensitiveSnapshot) {
+		t.Fatalf("error = %v", err)
+	}
+	assertNoSnapshotRows(t, s)
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM asset_history`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("asset_history contains %d rows", rows)
+	}
+}
+
+func TestMigration6AddsAssetHistoryAndPreservesExistingSnapshots(t *testing.T) {
+	path := createDatabaseAtMigration(t, 5)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier, later := time.Unix(100, 0).UTC(), time.Unix(200, 0).UTC()
+	for _, existing := range []struct {
+		scanID     string
+		finishedAt time.Time
+		assetIDs   []string
+	}{
+		{"legacy-old", earlier, []string{"legacy-asset", "legacy-gone"}},
+		{"legacy-new", later, []string{"legacy-asset"}},
+	} {
+		if _, err := db.Exec(`INSERT INTO scans(id, schema_version, status, started_at, finished_at, scope_json) VALUES (?, 'ssc-init.scan.v3', 'complete', ?, ?, '{}')`,
+			existing.scanID, formatTime(existing.finishedAt.Add(-time.Second)), formatTime(existing.finishedAt)); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		for index, assetID := range existing.assetIDs {
+			if _, err := db.Exec(`INSERT INTO assets(scan_id, asset_id, asset_json) VALUES (?, ?, ?)`, existing.scanID, assetID, `{"id":"`+assetID+`"}`); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO asset_state(scan_id, asset_id, asset_index, metadata_nil) VALUES (?, ?, ?, 1)`, existing.scanID, assetID, index); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	var applied int
+	if err := s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != len(migrations) {
+		t.Fatalf("applied migration=%d want=%d", applied, len(migrations))
+	}
+	assertTableExists(t, s.db, "asset_history")
+	var snapshots, assets int
+	if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM scans), (SELECT count(*) FROM assets)`).Scan(&snapshots, &assets); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 2 || assets != 3 {
+		t.Fatalf("migration lost data: scans=%d assets=%d, want 2 and 3", snapshots, assets)
+	}
+	firstSeen, lastSeen, digest, changedAt, ok := assetHistoryRow(t, s, "legacy-asset")
+	if !ok {
+		t.Fatal("migration did not backfill history from existing snapshots")
+	}
+	if firstSeen != formatTime(earlier) || lastSeen != formatTime(later) || changedAt != formatTime(earlier) || digest != "" {
+		t.Fatalf("backfilled first=%q last=%q changed=%q digest=%q", firstSeen, lastSeen, changedAt, digest)
+	}
+	if firstSeen, lastSeen, _, _, ok = assetHistoryRow(t, s, "legacy-gone"); !ok || firstSeen != formatTime(earlier) || lastSeen != formatTime(earlier) {
+		t.Fatalf("backfilled removed asset ok=%v first=%q last=%q", ok, firstSeen, lastSeen)
+	}
+}
+
+func TestMigration6RollsBackAsOneTransaction(t *testing.T) {
+	path := createDatabaseAtMigration(t, 5)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE asset_history (conflict TEXT)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path); err == nil {
+		reopened.Close()
+		t.Fatal("conflicting migration unexpectedly opened")
+	}
+
+	db, err = sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var applied int
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 5 {
+		t.Fatalf("applied migration=%d want=5", applied)
+	}
+}
+
+func TestAssetHistorySchemaRejectsIncompatibleShapes(t *testing.T) {
+	for _, tt := range []struct {
+		name, table, old, replacement string
+	}{
+		{name: "wrong key column", table: "asset_history",
+			old: "asset_id TEXT PRIMARY KEY", replacement: "asset_id TEXT NOT NULL PRIMARY KEY"},
+		{name: "nullable first seen", table: "asset_history",
+			old: "first_seen_at TEXT NOT NULL", replacement: "first_seen_at TEXT"},
+		{name: "scan scoped history", table: "asset_history",
+			old: "content_changed_at TEXT NOT NULL", replacement: "content_changed_at TEXT NOT NULL, scan_id TEXT REFERENCES scans(id)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRewrittenSchemaRejected(t, tt.table, tt.old, tt.replacement)
+		})
 	}
 }

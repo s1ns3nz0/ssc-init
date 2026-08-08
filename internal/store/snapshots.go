@@ -3,10 +3,14 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -116,7 +120,13 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 		boolInt(inventory.Evidence == nil), len(inventory.Evidence)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
+	if err = recordAssetHistory(ctx, tx, scan, inventory); err != nil {
+		return err
+	}
 	if err = pruneSnapshots(ctx, tx, now); err != nil {
+		return err
+	}
+	if err = pruneAssetHistory(ctx, tx, now); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -130,6 +140,10 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 // snapshot is always kept regardless of age: without it there is no baseline
 // to diff against, and a machine idle longer than the window would report
 // every asset as new on its next scan.
+//
+// The window is inclusive of its own edge: a snapshot finished exactly at
+// now-snapshotRetention is kept, only strictly older ones are pruned. A machine
+// scanning once a day therefore plateaus at 31 stored snapshots, not 30.
 const snapshotRetention = 30 * 24 * time.Hour
 
 // snapshotChildTables lists every table keyed by scan_id, ordered so each
@@ -170,6 +184,76 @@ func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM scans WHERE finished_at < ? AND id <> ?`, cutoff, newest); err != nil {
 		return fmt.Errorf("prune expired snapshots: %w", err)
+	}
+	return nil
+}
+
+// assetHistoryRetention is the documented asset change history window. It is
+// longer than the snapshot window because history is one small row per distinct
+// asset rather than a full snapshot, and it answers the one question a pruned
+// snapshot can no longer answer: when this asset first appeared.
+const assetHistoryRetention = 90 * 24 * time.Hour
+
+// recordAssetHistory folds this snapshot into the per-asset history. Every
+// value written is a validated asset ID or a digest of validated digests, so
+// history is covered by the same validateSnapshot gate as the snapshot itself
+// and needs no second privacy path.
+//
+// Sighting times come from the scan's finished time rather than the retention
+// clock, so re-saving identical input yields identical rows.
+func recordAssetHistory(ctx context.Context, tx *sql.Tx, scan model.ScanResult, inventory model.Inventory) error {
+	digests := assetContentDigests(inventory.Evidence)
+	seenAt := formatTime(scan.FinishedAt)
+	for _, asset := range inventory.Assets {
+		// An empty digest means this scan produced no trusted content digest
+		// for the asset, which is not the same as its content having changed:
+		// the last known digest and its transition time are kept so a target
+		// that is temporarily unreadable does not forge a change record.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO asset_history(asset_id, first_seen_at, last_seen_at, content_digest, content_changed_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(asset_id) DO UPDATE SET
+    first_seen_at = min(asset_history.first_seen_at, excluded.first_seen_at),
+    last_seen_at = max(asset_history.last_seen_at, excluded.last_seen_at),
+    content_changed_at = CASE WHEN excluded.content_digest <> '' AND excluded.content_digest <> asset_history.content_digest
+        THEN excluded.content_changed_at ELSE asset_history.content_changed_at END,
+    content_digest = CASE WHEN excluded.content_digest <> '' THEN excluded.content_digest ELSE asset_history.content_digest END`,
+			asset.ID, seenAt, seenAt, digests[asset.ID], seenAt); err != nil {
+			return fmt.Errorf("record asset history %q: %w", asset.ID, err)
+		}
+	}
+	return nil
+}
+
+// assetContentDigests reduces each asset's trusted evidence digests to a single
+// digest, so history can report that an asset's content changed without
+// retaining the evidence rows themselves. Only complete evidence carries a
+// trusted digest, so nothing else contributes.
+func assetContentDigests(evidence []model.ContentEvidence) map[string]string {
+	pairs := make(map[string][]string, len(evidence))
+	for _, value := range evidence {
+		if value.Status != model.EvidenceComplete || value.Digest == "" {
+			continue
+		}
+		pairs[value.AssetID] = append(pairs[value.AssetID], value.ID+"\x00"+value.Digest)
+	}
+	digests := make(map[string]string, len(pairs))
+	for assetID, values := range pairs {
+		sort.Strings(values)
+		sum := sha256.Sum256([]byte(strings.Join(values, "\n")))
+		digests[assetID] = hex.EncodeToString(sum[:])
+	}
+	return digests
+}
+
+// pruneAssetHistory deletes history for assets last seen before the history
+// cutoff, in the caller's transaction. Assets still named by a retained
+// snapshot are kept regardless of age: the newest snapshot survives the
+// snapshot window unconditionally, and a snapshot whose assets have no history
+// is a store that contradicts itself.
+func pruneAssetHistory(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	cutoff := formatTime(now.Add(-assetHistoryRetention))
+	if _, err := tx.ExecContext(ctx, `DELETE FROM asset_history WHERE last_seen_at < ? AND asset_id NOT IN (SELECT asset_id FROM assets)`, cutoff); err != nil {
+		return fmt.Errorf("prune expired asset history: %w", err)
 	}
 	return nil
 }
