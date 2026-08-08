@@ -34,8 +34,23 @@ func hookFixture() (model.Inventory, model.Delta) {
 	return inventory, delta
 }
 
-func TestWriteHookSummaryRendersCappedGroupedDrift(t *testing.T) {
-	inventory, delta := hookFixture()
+func TestWriteHookSummaryRendersLadder(t *testing.T) {
+	inventory := model.Inventory{
+		Assets:       []model.Asset{{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"}},
+		Observations: []model.Observation{{ID: "observation:sha256:1111", AssetID: "agent-skill:claude:docx"}},
+		Evidence: []model.ContentEvidence{
+			{ID: "evidence:sha256:aaaa", ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete, Digest: strings.Repeat("a", 64)},
+			{ID: "evidence:sha256:cccc", ObservationID: "observation:sha256:1111", Status: model.EvidenceOversize},
+			{ID: "evidence:sha256:dddd", ObservationID: "observation:sha256:1111", Status: model.EvidenceUnsupported},
+		},
+	}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp-server:claude-code:github"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.2.0"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:superpowers@6.1.1"},
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
+	}}
+
 	var first, second bytes.Buffer
 	if err := report.WriteHookSummary(&first, inventory, delta); err != nil {
 		t.Fatal(err)
@@ -44,23 +59,44 @@ func TestWriteHookSummaryRendersCappedGroupedDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.String() != second.String() {
-		t.Fatalf("hook summary not deterministic:\n%q\n%q", first.String(), second.String())
+		t.Fatalf("not deterministic:\n%q\n%q", first.String(), second.String())
 	}
 	output := first.String()
 	for _, pattern := range []string{
-		`^ssc-init: toolchain drift since last snapshot\n`,
-		`(?m)^  added\s+ide-extension bravo@2\.0\.0 \(vscode\)$`,
-		`(?m)^  removed\s+mcp github \(claude-code\)$`,
-		`(?m)^  changed\s+2 evidence records \(alpha\)$`,
-		`(?m)^  removed\s+1 evidence records$`,
-		`(?m)^  issues: 1 non-complete evidence records \(partial 1\)$`,
+		`^ssc-init: 3 changes since last snapshot\n`,
+		`(?m)^  NEW\s+mcp-server\s+github \(claude-code\)$`,
+		`(?m)^  CHANGED\s+agent-skill\s+docx \(claude\)$`,
+		`(?m)^  UPGRADED\s+agent-plugin\s+superpowers \(claude\)\s+6\.1\.1 → 6\.2\.0$`,
+		`(?m)^  1 targets unverified \(standing — run: ssc-init status --pretty\)$`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(output) {
-			t.Fatalf("missing pattern %q in:\n%s", pattern, output)
+			t.Fatalf("missing %q in:\n%s", pattern, output)
 		}
 	}
-	if strings.Contains(output, strings.Repeat("a", 64)) || strings.Contains(output, "unsupported") {
-		t.Fatalf("summary leaks digests or counts unsupported:\n%s", output)
+	if strings.Contains(output, strings.Repeat("a", 64)) || strings.Contains(output, "evidence records") {
+		t.Fatalf("leaked digest or legacy grouping:\n%s", output)
+	}
+}
+
+func TestWriteHookSummaryReportsInitialBaselineWithoutRungs(t *testing.T) {
+	inventory := model.Inventory{
+		Assets:   []model.Asset{{ID: "agent-skill:claude:docx", Type: model.AssetSkill, Name: "docx", Source: "claude"}},
+		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", Status: model.EvidenceComplete}},
+	}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:docx"},
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"},
+	}}
+	var buffer bytes.Buffer
+	if err := report.WriteHookSummary(&buffer, inventory, delta); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+	if !strings.Contains(output, "initial baseline recorded — 1 assets, 1 evidence records, 0 unverified") {
+		t.Fatalf("initial baseline line missing:\n%s", output)
+	}
+	if strings.Contains(output, "NEW") {
+		t.Fatalf("initial baseline must not print rungs:\n%s", output)
 	}
 }
 
@@ -78,20 +114,21 @@ func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
 func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 	var delta model.Delta
 	for index := 0; index < 25; index++ {
-		delta.Changes = append(delta.Changes, model.Change{
-			Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset,
-			EntityID: "agent-skill:claude:" + string(rune('a'+index)),
-		})
+		delta.Changes = append(delta.Changes,
+			model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset,
+				EntityID: "agent-skill:claude:" + string(rune('a'+index))},
+			model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset,
+				EntityID: "mcp-server:cursor:" + string(rune('a'+index))})
 	}
 	var buffer bytes.Buffer
-	if err := report.WriteHookSummary(&buffer, model.Inventory{}, delta); err != nil {
+	if err := report.WriteHookSummary(&buffer, model.Inventory{Assets: []model.Asset{{ID: "x"}}}, delta); err != nil {
 		t.Fatal(err)
 	}
 	output := buffer.String()
-	if got := strings.Count(output, "\n  added"); got != 20 {
-		t.Fatalf("detail rows=%d want 20:\n%s", got, output)
+	if got := strings.Count(output, "\n  NEW"); got != 20 {
+		t.Fatalf("NEW rows=%d want 20 (cap must favour the highest rung):\n%s", got, output)
 	}
-	if !strings.Contains(output, "…and 5 more changes") {
-		t.Fatalf("missing overflow line:\n%s", output)
+	if strings.Contains(output, "REMOVED") || !strings.Contains(output, "…and 30 more changes") {
+		t.Fatalf("cap did not prefer high rungs:\n%s", output)
 	}
 }
