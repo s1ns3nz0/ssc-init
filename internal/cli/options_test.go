@@ -40,6 +40,7 @@ func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 		{args: []string{"scan", "--project-root=$HOME", "--baseline", "--json"}, want: Options{Command: "scan", JSON: true, Baseline: true, ProjectRoots: []string{"$HOME"}}},
 		{args: []string{"scan", "--baseline", "--pretty"}, want: Options{Command: "scan", Pretty: true, Baseline: true}},
 		{args: []string{"status", "--pretty"}, want: Options{Command: "status", Pretty: true}},
+		{args: []string{"hook"}, want: Options{Command: "hook"}},
 	}
 	for _, testCase := range tests {
 		got, err := ParseOptions(testCase.args)
@@ -80,6 +81,9 @@ func TestParseOptionsRejectsAmbiguousForms(t *testing.T) {
 		{"status", "--pretty", "--pretty"},
 		{"version", "--pretty"},
 		{"doctor", "--pretty"},
+		{"hook", "--json"},
+		{"hook", "--pretty"},
+		{"hook", "extra"},
 	}
 	for _, args := range tests {
 		if _, err := ParseOptions(args); err == nil {

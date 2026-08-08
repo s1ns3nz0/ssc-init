@@ -48,6 +48,10 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, ErrInvalidOptions
 		}
 		options.JSON = true
+	case "hook":
+		if len(args) != 1 {
+			return Options{}, ErrInvalidOptions
+		}
 	default:
 		return Options{}, ErrInvalidOptions
 	}
