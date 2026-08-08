@@ -111,6 +111,62 @@ func TestVSCodeEntrypointMutationChangesOnlyMainAndTreeEvidence(t *testing.T) {
 	}
 }
 
+func TestIDERealWorldEntrypointFormsResolveToCompleteEvidence(t *testing.T) {
+	// Marketplace extensions overwhelmingly declare "./dist/extension.js" or
+	// extension-less "./out/extension" (Node require semantics). Both must
+	// resolve to the same complete file evidence as the explicit form.
+	control := func(t *testing.T, declared, file string) string {
+		t.Helper()
+		home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":`+jsonQuote(declared)+`}`)
+		writeIDEFile(t, filepath.Join(home, ".vscode", "extensions", "fixture", filepath.FromSlash(file)), "entry-bytes")
+		result, err := New().Collect(context.Background(), testutil.Environment(t, home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		collection := collectIDEEvidence(t, home, result)
+		assertIDERecordSet(t, result, collection, map[string]model.EvidenceStatus{
+			model.EvidenceSubjectEntrypointMain: model.EvidenceComplete,
+			model.EvidenceSubjectManifest:       model.EvidenceComplete,
+			model.EvidenceSubjectPayloadTree:    model.EvidenceComplete,
+		})
+		return ideDigest(t, collection, model.EvidenceSubjectEntrypointMain)
+	}
+
+	explicit := control(t, "dist/extension.js", "dist/extension.js")
+	for _, test := range []struct {
+		name, declared, file string
+	}{
+		{name: "dot-slash prefix", declared: "./dist/extension.js", file: "dist/extension.js"},
+		{name: "extension-less", declared: "dist/extension", file: "dist/extension.js"},
+		{name: "dot-slash extension-less", declared: "./dist/extension", file: "dist/extension.js"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if digest := control(t, test.declared, test.file); digest != explicit {
+				t.Fatalf("digest=%q want explicit-form digest %q", digest, explicit)
+			}
+		})
+	}
+}
+
+func TestIDEDotSegmentEntrypointsBeyondSingleLeadingPrefixStayInvalid(t *testing.T) {
+	for _, entry := range []string{"././dist/x.js", ".././x.js", "dist/./x.js", "./", "./.."} {
+		t.Run(entry, func(t *testing.T) {
+			home := fixtureVSCodeExtension(t, `{"name":"fixture","publisher":"acme","version":"1.0.0","main":`+jsonQuote(entry)+`}`)
+			result, err := New().Collect(context.Background(), testutil.Environment(t, home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			collection := collectIDEEvidence(t, home, result)
+			assertIDERecordSet(t, result, collection, map[string]model.EvidenceStatus{
+				model.EvidenceSubjectEntrypointMain: model.EvidenceUnavailable,
+				model.EvidenceSubjectManifest:       model.EvidenceComplete,
+				model.EvidenceSubjectPayloadTree:    model.EvidenceComplete,
+			})
+			assertIDEOnlyError(t, collection, model.EvidenceSubjectEntrypointMain, "path_invalid")
+		})
+	}
+}
+
 func TestIDESecondaryBrowserInvalidPathsAreTerminalWithoutOutsideOpen(t *testing.T) {
 	for _, entry := range []string{"../outside.js", "/private/outside.js", "dist/../../outside.js", "dist/\x00bad.js"} {
 		t.Run(entry, func(t *testing.T) {

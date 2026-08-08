@@ -98,7 +98,14 @@ func canonicalIDEEntrypointPath(assetRelative, value string) (string, bool) {
 	if value == "" || strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') || filepath.IsAbs(value) {
 		return rawIDEEntrypointRelative(assetRelative, value), false
 	}
-	local := filepath.FromSlash(value)
+	// Manifests overwhelmingly use Node-style specifiers: exactly one leading
+	// "./" is stripped, and an extension-less final component resolves to its
+	// ".js" file. Everything else (further dot segments, "..") stays invalid.
+	normalized := strings.TrimPrefix(value, "./")
+	if normalized == "" {
+		return rawIDEEntrypointRelative(assetRelative, value), false
+	}
+	local := filepath.FromSlash(normalized)
 	clean := filepath.Clean(local)
 	if clean != local || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
 		return rawIDEEntrypointRelative(assetRelative, value), false
@@ -107,6 +114,9 @@ func canonicalIDEEntrypointPath(assetRelative, value string) (string, bool) {
 		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
 			return rawIDEEntrypointRelative(assetRelative, value), false
 		}
+	}
+	if filepath.Ext(clean) == "" {
+		clean += ".js"
 	}
 	return filepath.Join(filepath.FromSlash(assetRelative), clean), true
 }
