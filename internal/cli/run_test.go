@@ -396,4 +396,12 @@ func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	if out.Len() != 0 || errOut.String() != "ssc-init hook: baseline scan failed\n" {
 		t.Fatalf("nil scanner output wrong: stdout=%q stderr=%q", out.String(), errOut.String())
 	}
+
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"hook"}, failingWriter{err: errors.New("broken pipe")}, &errOut); code != 0 {
+		t.Fatalf("write failure must stay advisory: code=%d", code)
+	}
+	if errOut.String() != "ssc-init hook: baseline scan failed\n" {
+		t.Fatalf("write failure output wrong: stderr=%q", errOut.String())
+	}
 }
