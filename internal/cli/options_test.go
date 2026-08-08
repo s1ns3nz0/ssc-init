@@ -3,6 +3,7 @@ package cli
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,80 @@ func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, testCase.want) {
 			t.Fatalf("args=%q got=%+v want=%+v", testCase.args, got, testCase.want)
+		}
+	}
+}
+
+func TestParseOptionsAcceptsInstallAndRollback(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	got, err := ParseOptions([]string{
+		"install", "--from", "/tmp/ssc-init", "--version", "v0.2.0",
+		"--sha256", digest, "--json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Options{
+		Command:        "install",
+		JSON:           true,
+		InstallSource:  "/tmp/ssc-init",
+		InstallVersion: "v0.2.0",
+		InstallDigest:  digest,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v want=%+v", got, want)
+	}
+	// Flag order is not part of the contract; the value set is.
+	reordered, err := ParseOptions([]string{
+		"install", "--json", "--sha256", digest, "--version", "v0.2.0", "--from", "/tmp/ssc-init",
+	})
+	if err != nil || !reflect.DeepEqual(reordered, want) {
+		t.Fatalf("reordered=%+v err=%v", reordered, err)
+	}
+	rollback, err := ParseOptions([]string{"rollback", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rollback, Options{Command: "rollback", JSON: true}) {
+		t.Fatalf("rollback=%+v", rollback)
+	}
+}
+
+func TestParseOptionsRejectsUndocumentedInstallForms(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, invalid := range [][]string{
+		{"install"},
+		{"install", "--json"},
+		{"install", "--from", "relative/path", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "latest", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", "short", "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", strings.ToUpper(digest), "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", strings.Repeat("a", 63) + "g", "--json"},
+		{"install", "--from", "/tmp/x", "--from", "/tmp/y", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--version", "v0.3.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--json", "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--pretty"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest},
+		{"install", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--json"},
+		{"install", "--from=/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--json", "leftover"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256", digest, "--json", "--external-probes"},
+		{"install", "--from", "/tmp/x/", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/../etc/x", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x\x00", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "--version", "v0.2.0", "--sha256", digest, "--json"},
+		{"install", "--from", "/tmp/x", "--version", "v0.2.0", "--sha256"},
+		{"rollback"},
+		{"rollback", "--json", "--pretty"},
+		{"rollback", "--pretty"},
+		{"rollback", "--json", "--json"},
+		{"rollback", "--json", "extra"},
+	} {
+		if _, err := ParseOptions(invalid); err == nil {
+			t.Fatalf("accepted %q", invalid)
 		}
 	}
 }

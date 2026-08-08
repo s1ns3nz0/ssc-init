@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
@@ -17,6 +21,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/install"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
@@ -115,6 +120,16 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
 		return app.RunOptions(ctx, options, stdout, stderr)
+	case "install", "rollback":
+		home, _, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		manager := install.New(home)
+		manager.Health = coreHealthCheck
+		app.Installer = coreInstaller{manager: manager}
+		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
 		home, paths, ok := hostPathsForRun()
 		if !ok {
@@ -146,9 +161,138 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 }
 
+const (
+	// coreHealthCheckTimeout bounds the one process this product ever starts, so
+	// a wedged staged core cannot hang an install.
+	coreHealthCheckTimeout = 30 * time.Second
+	// maxHealthReportBytes bounds what that process may return before anything
+	// parses it. A doctor report is a few kilobytes.
+	maxHealthReportBytes = 64 << 10
+)
+
+// coreInstaller composes the design §11 update — stage and verify, health
+// check, atomic switch — behind the cli.Installer seam. Staging and activation
+// are one command on purpose: staging a second version before the first is
+// switched to would leave the un-activated one for the next prune, and joining
+// them makes that unreachable.
+type coreInstaller struct {
+	manager install.Manager
+}
+
+func (i coreInstaller) Install(ctx context.Context, sourcePath, version, digest string) (cli.InstallOutcome, error) {
+	if err := i.manager.Stage(ctx, sourcePath, version, digest); err != nil {
+		return cli.InstallOutcome{}, classifyInstallError(err)
+	}
+	if err := i.manager.Activate(ctx, version); err != nil {
+		return cli.InstallOutcome{}, classifyInstallError(err)
+	}
+	return i.outcome()
+}
+
+func (i coreInstaller) Rollback(ctx context.Context) (cli.InstallOutcome, error) {
+	if err := i.manager.Rollback(ctx); err != nil {
+		return cli.InstallOutcome{}, classifyInstallError(err)
+	}
+	return i.outcome()
+}
+
+// outcome reads the pointers back rather than reporting what was requested, so
+// the payload describes the installation as it now is.
+func (i coreInstaller) outcome() (cli.InstallOutcome, error) {
+	current, installed, err := i.manager.Current()
+	if err != nil {
+		return cli.InstallOutcome{}, classifyInstallError(err)
+	}
+	if !installed {
+		return cli.InstallOutcome{}, errors.New("no core version is active")
+	}
+	previous, rollbackAvailable, err := i.manager.Previous()
+	if err != nil {
+		// The switch already happened. An unreadable rollback target only means
+		// rollback is unavailable, which is exactly what the payload reports.
+		previous, rollbackAvailable = "", false
+	}
+	return cli.InstallOutcome{
+		Version:           current,
+		PreviousVersion:   previous,
+		RollbackAvailable: rollbackAvailable,
+	}, nil
+}
+
+// classifyInstallError maps the install manager's value-free sentinels onto the
+// three conditions the command surface reports with their own exit codes.
+// Those sentinels are deliberately unexported, so their exact messages are the
+// only stable handle; each match below is pinned by a test that provokes the
+// real condition rather than the literal. An unrecognised error stays a generic
+// failure instead of being reported as a verification result it may not be.
+func classifyInstallError(err error) error {
+	switch err.Error() {
+	case "another installation is already in progress":
+		return cli.ErrInstallBusy
+	case "staged core failed its health check":
+		return cli.ErrInstallHealth
+	case "core binary digest does not match the expected digest",
+		"core binary is not a macos universal executable",
+		"core binary does not provide both required architectures",
+		"core binary source cannot be read",
+		"core binary source is not a regular file",
+		"core binary source exceeds the install size limit",
+		"expected core digest is not a sha-256 digest",
+		"unsupported core version",
+		"requested core version is not installed",
+		"installed core has no usable install manifest":
+		return cli.ErrInstallVerification
+	}
+	return err
+}
+
+// coreHealthCheck runs the freshly staged core's own `doctor --json` and
+// requires a ready installation before that version may become active
+// (design §11).
+//
+// Executing here does not weaken the "default scans execute no process"
+// invariant, and that is not left to be re-derived. The executable is not a
+// discovered asset: it is the file this tool copied itself and verified against
+// the caller-supplied SHA-256 moments earlier. It runs only on an explicit
+// `install` or `rollback`, and no scan, hook, status, or doctor path reaches
+// this function. The exec is bounded accordingly — argv only so no shell parses
+// the path, its own 30s deadline, no stdin, a bounded read of stdout, and an
+// environment reduced to HOME and a fixed PATH so the core under test cannot be
+// steered by whatever the calling adapter's environment happens to carry.
+func coreHealthCheck(ctx context.Context, executablePath string) error {
+	ctx, cancel := context.WithTimeout(ctx, coreHealthCheckTimeout)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, executablePath, "doctor", "--json")
+	command.Stdin = nil
+	command.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=/usr/bin:/bin"}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return errors.New("staged core cannot be run")
+	}
+	if err := command.Start(); err != nil {
+		return errors.New("staged core cannot be run")
+	}
+	report, readErr := io.ReadAll(io.LimitReader(stdout, maxHealthReportBytes))
+	if waitErr := command.Wait(); waitErr != nil || readErr != nil {
+		return errors.New("staged core failed to report its health")
+	}
+	var result struct {
+		SchemaVersion string `json:"schemaVersion"`
+		Status        string `json:"status"`
+	}
+	if err := json.Unmarshal(report, &result); err != nil {
+		return errors.New("staged core produced an unreadable health report")
+	}
+	if !strings.HasPrefix(result.SchemaVersion, "ssc-init.doctor.") || result.Status != "ready" {
+		return errors.New("staged core reported a degraded installation")
+	}
+	return nil
+}
+
 func operationalCommand(command string) bool {
 	switch command {
-	case "doctor", "hook", "scan", "status":
+	case "doctor", "hook", "install", "rollback", "scan", "status":
 		return true
 	default:
 		return false

@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +13,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
@@ -49,6 +54,8 @@ func TestNonDarwinOperationalCommandsCreateNoState(t *testing.T) {
 		{"doctor", "--json"},
 		{"scan", "--baseline", "--json"},
 		{"status", "--json"},
+		{"install", "--from", "/tmp/ssc-init", "--version", "v0.1.0", "--sha256", strings.Repeat("a", 64), "--json"},
+		{"rollback", "--json"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := runWithIO(context.Background(), args, &stdout, &stderr)
@@ -390,6 +397,135 @@ func TestDefaultStoreSupportsAutomaticEvidenceCacheWiring(t *testing.T) {
 	}
 	if _, ok := opened.(evidence.CacheWriter); !ok {
 		t.Fatalf("store %T does not provide the evidence cache writer", opened)
+	}
+}
+
+// installHome is a resolved temporary home; macOS temp directories live under
+// the /var -> /private/var symlink.
+func installHome(t *testing.T) string {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	return home
+}
+
+// universalCore builds a minimal fat Mach-O carrying one arm64 and one x86_64
+// slice. It is a valid shape rather than runnable code, which is exactly what a
+// health-check failure needs: staging accepts it and exec refuses it.
+func universalCore() []byte {
+	const sliceSize = 4096
+	cpuTypes := []uint32{0x0100000c, 0x01000007}
+	image := make([]byte, sliceSize*(len(cpuTypes)+1))
+	binary.BigEndian.PutUint32(image[0:], 0xcafebabe)
+	binary.BigEndian.PutUint32(image[4:], uint32(len(cpuTypes)))
+	for index, cpuType := range cpuTypes {
+		entry := image[8+20*index:]
+		offset := sliceSize * (index + 1)
+		binary.BigEndian.PutUint32(entry[0:], cpuType)
+		binary.BigEndian.PutUint32(entry[8:], uint32(offset))
+		binary.BigEndian.PutUint32(entry[12:], sliceSize)
+		binary.BigEndian.PutUint32(entry[16:], 12)
+		binary.LittleEndian.PutUint32(image[offset:], 0xfeedfacf)
+		image[offset+sliceSize-1] = byte(index + 1)
+	}
+	return image
+}
+
+func writeCoreSource(t *testing.T, content []byte) (string, string) {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "ssc-init-darwin-universal")
+	if err := os.WriteFile(source, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	return source, hex.EncodeToString(sum[:])
+}
+
+func TestInstallRejectsADigestMismatchWithoutStagingAnything(t *testing.T) {
+	home := installHome(t)
+	source, _ := writeCoreSource(t, universalCore())
+
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{
+		"install", "--from", source, "--version", "v0.1.0",
+		"--sha256", strings.Repeat("a", 64), "--json",
+	}, &stdout, &stderr)
+	if code != 3 || stdout.String() != "" || stderr.String() != "core verification failed\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	layout := platform.PathsForHome(home).Install()
+	for _, absent := range []string{
+		filepath.Join(layout.VersionsDir, "v0.1.0"),
+		layout.CurrentFile,
+		layout.StateDatabase,
+	} {
+		if _, err := os.Lstat(absent); !os.IsNotExist(err) {
+			t.Fatalf("failed install left %s behind: %v", filepath.Base(absent), err)
+		}
+	}
+}
+
+// The staged core is a valid universal shape that cannot execute, so the real
+// health check — which runs the freshly hashed binary's own doctor — fails. The
+// version stays installed for a retry and no version becomes active.
+func TestInstallKeepsNoVersionActiveWhenTheStagedCoreFailsItsHealthCheck(t *testing.T) {
+	home := installHome(t)
+	source, digest := writeCoreSource(t, universalCore())
+
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{
+		"install", "--from", source, "--version", "v0.1.0", "--sha256", digest, "--json",
+	}, &stdout, &stderr)
+	if code != 4 || stdout.String() != "" || stderr.String() != "staged core failed its health check\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	layout := platform.PathsForHome(home).Install()
+	if _, err := os.Stat(filepath.Join(layout.VersionsDir, "v0.1.0", platform.CoreExecutableName)); err != nil {
+		t.Fatalf("a health-check failure discarded the staged version: %v", err)
+	}
+	if _, err := os.Lstat(layout.CurrentFile); !os.IsNotExist(err) {
+		t.Fatalf("a core that failed its health check became active: %v", err)
+	}
+}
+
+// The install lock is advisory and cross-process, so contention is a distinct,
+// retryable outcome rather than a generic failure.
+func TestInstallCommandsReportABusyInstallRootWithTheirOwnExitCode(t *testing.T) {
+	home := installHome(t)
+	layout := platform.PathsForHome(home).Install()
+	if err := os.MkdirAll(layout.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := os.OpenFile(filepath.Join(layout.Root, ".lock"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"rollback", "--json"}, &stdout, &stderr)
+	if code != 5 || stdout.String() != "" || stderr.String() != "another installation is already in progress\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRollbackWithoutAnInstallFailsWithoutCreatingState(t *testing.T) {
+	home := installHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"rollback", "--json"}, &stdout, &stderr)
+	if code != 1 || stdout.String() != "" || stderr.String() != "rollback failed\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(platform.PathsForHome(home).Install().StateDatabase); !os.IsNotExist(err) {
+		t.Fatalf("rollback created shared state: %v", err)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
 // ErrInvalidOptions is intentionally value-free so callers never echo a
@@ -18,6 +20,12 @@ type Options struct {
 	Baseline       bool
 	ExternalProbes bool
 	ProjectRoots   []string
+
+	// Install inputs. The source is an absolute host path an adapter already
+	// obtained; it is handed to the installer and never reported back.
+	InstallSource  string
+	InstallVersion string
+	InstallDigest  string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -44,6 +52,15 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, ErrInvalidOptions
 		}
 	case "doctor", "version":
+		if len(args) != 2 || args[1] != "--json" {
+			return Options{}, ErrInvalidOptions
+		}
+		options.JSON = true
+	case "install":
+		if err := parseInstallOptions(args[1:], &options); err != nil {
+			return Options{}, err
+		}
+	case "rollback":
 		if len(args) != 2 || args[1] != "--json" {
 			return Options{}, ErrInvalidOptions
 		}
@@ -100,6 +117,77 @@ func parseScanOptions(args []string, options *Options) error {
 		return ErrInvalidOptions
 	}
 	return nil
+}
+
+// parseInstallOptions accepts exactly
+// `install --from <absolute path> --version <version> --sha256 <digest> --json`,
+// in any flag order. Every flag is required, may appear once, and carries a
+// separate value: there is no `--flag=value` form and no default for any of
+// them, so an adapter cannot install something it did not name and pin. Each
+// value is validated here rather than at the installer, so an unusable version
+// or digest never becomes a path or a comparison.
+func parseInstallOptions(args []string, options *Options) error {
+	for index := 0; index < len(args); index++ {
+		flag := args[index]
+		if flag == "--json" {
+			if options.JSON {
+				return ErrInvalidOptions
+			}
+			options.JSON = true
+			continue
+		}
+		index++
+		if index == len(args) {
+			return ErrInvalidOptions
+		}
+		value := args[index]
+		switch flag {
+		case "--from":
+			if options.InstallSource != "" || !validInstallSource(value) {
+				return ErrInvalidOptions
+			}
+			options.InstallSource = value
+		case "--version":
+			if options.InstallVersion != "" || !platform.ValidInstallVersion(value) {
+				return ErrInvalidOptions
+			}
+			options.InstallVersion = value
+		case "--sha256":
+			if options.InstallDigest != "" || !validInstallDigest(value) {
+				return ErrInvalidOptions
+			}
+			options.InstallDigest = value
+		default:
+			return ErrInvalidOptions
+		}
+	}
+	if !options.JSON || options.InstallSource == "" || options.InstallVersion == "" || options.InstallDigest == "" {
+		return ErrInvalidOptions
+	}
+	return nil
+}
+
+// validInstallSource accepts an absolute, already-clean path with no embedded
+// NUL. Requiring the cleaned form keeps `.`, `..`, and trailing separators out
+// of what is handed to the installer.
+func validInstallSource(value string) bool {
+	return value != "" && filepath.IsAbs(value) &&
+		!strings.ContainsRune(value, '\x00') && value == filepath.Clean(value)
+}
+
+// validInstallDigest accepts only the exact shape a SHA-256 sum is published
+// in, so a truncated or upper-case digest is refused here rather than becoming
+// a silently weaker comparison downstream.
+func validInstallDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func addProjectRoot(options *Options, seen map[string]struct{}, value string) error {

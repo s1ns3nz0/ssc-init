@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -27,12 +28,57 @@ type Doctor interface {
 	Check(context.Context) doctor.Result
 }
 
+// InstallOutcome is the state of the shared installation after one install or
+// rollback: version strings and booleans only, never a path.
+type InstallOutcome struct {
+	Version           string
+	PreviousVersion   string
+	RollbackAvailable bool
+}
+
+// Installer stages, verifies, health-checks, and activates core versions
+// (design §5.3, §11). Install composes staging and activation in one call
+// deliberately: staging a second version before the first is switched to would
+// leave the un-activated one to be pruned, and one command makes that
+// unreachable.
+type Installer interface {
+	Install(ctx context.Context, sourcePath, version, digest string) (InstallOutcome, error)
+	Rollback(ctx context.Context) (InstallOutcome, error)
+}
+
+// Install and rollback failure sentinels. They are the classification an
+// adapter acts on; the messages below are the only thing ever printed, so no
+// supplied path, version, or digest can be echoed back.
+var (
+	// ErrInstallVerification reports a core refused by digest, universal-binary,
+	// or manifest verification. Nothing was activated.
+	ErrInstallVerification = errors.New("core verification failed")
+	// ErrInstallHealth reports a staged core that failed its health check. The
+	// version that was already active stays active.
+	ErrInstallHealth = errors.New("staged core failed its health check")
+	// ErrInstallBusy reports another process holding the install lock. The
+	// command did nothing and is safe to retry.
+	ErrInstallBusy = errors.New("another installation is already in progress")
+)
+
+// Install and rollback exit codes, which are part of the command contract: an
+// adapter tells "these bytes are bad" (3) from "the new core is bad" (4) from
+// "someone else is installing right now" (5) without parsing any message. 0 is
+// success, 1 is any other failure, and 2 stays the usage error every command
+// shares.
+const (
+	exitInstallVerification = 3
+	exitInstallHealth       = 4
+	exitInstallBusy         = 5
+)
+
 // App holds CLI configuration.
 type App struct {
 	Version         string
 	BaselineScanner BaselineScanner
 	StatusReader    StatusReader
 	Doctor          Doctor
+	Installer       Installer
 }
 
 // Run executes the CLI with the development version.
@@ -148,6 +194,44 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		return 0
+	case "install", "rollback":
+		if a.Installer == nil {
+			fmt.Fprintln(stderr, options.Command+" is unavailable")
+			return 1
+		}
+		var outcome InstallOutcome
+		var err error
+		if options.Command == "install" {
+			outcome, err = a.Installer.Install(ctx, options.InstallSource, options.InstallVersion, options.InstallDigest)
+		} else {
+			outcome, err = a.Installer.Rollback(ctx)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInstallBusy):
+				fmt.Fprintln(stderr, ErrInstallBusy.Error())
+				return exitInstallBusy
+			case errors.Is(err, ErrInstallHealth):
+				fmt.Fprintln(stderr, ErrInstallHealth.Error())
+				return exitInstallHealth
+			case errors.Is(err, ErrInstallVerification):
+				fmt.Fprintln(stderr, ErrInstallVerification.Error())
+				return exitInstallVerification
+			}
+			fmt.Fprintln(stderr, options.Command+" failed")
+			return 1
+		}
+		if err := writeJSON(stdout, installPayload{
+			SchemaVersion:     "ssc-init.install.v1",
+			Command:           options.Command,
+			Version:           outcome.Version,
+			PreviousVersion:   outcome.PreviousVersion,
+			RollbackAvailable: outcome.RollbackAvailable,
+		}); err != nil {
+			fmt.Fprintln(stderr, "failed to write "+options.Command+" output")
+			return 1
+		}
+		return 0
 	case "hook":
 		if a.BaselineScanner == nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
@@ -167,6 +251,17 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+// installPayload is the ssc-init.install.v1 contract. Its shape is fixed —
+// every field is always present — and it carries no path: an absent rollback
+// target is an empty version string with rollbackAvailable false.
+type installPayload struct {
+	SchemaVersion     string `json:"schemaVersion"`
+	Command           string `json:"command"`
+	Version           string `json:"version"`
+	PreviousVersion   string `json:"previousVersion"`
+	RollbackAvailable bool   `json:"rollbackAvailable"`
 }
 
 type statusPayload struct {

@@ -344,8 +344,175 @@ func TestDoctorJSONUsesInjectedReadOnlyChecker(t *testing.T) {
 	}
 }
 
+// The values an install carries are the ones an error must never echo.
+const (
+	secretSource  = "/Volumes/private-drop/ssc-init-darwin-universal"
+	secretVersion = "v9.9.9"
+)
+
+var secretDigest = strings.Repeat("b", 64)
+
+type stubInstaller struct {
+	installArgs   [][3]string
+	rollbackCalls int
+	outcome       InstallOutcome
+	err           error
+}
+
+func (s *stubInstaller) Install(_ context.Context, sourcePath, version, digest string) (InstallOutcome, error) {
+	s.installArgs = append(s.installArgs, [3]string{sourcePath, version, digest})
+	return s.outcome, s.err
+}
+
+func (s *stubInstaller) Rollback(context.Context) (InstallOutcome, error) {
+	s.rollbackCalls++
+	return s.outcome, s.err
+}
+
+func TestInstallAndRollbackEmitTheInstallContract(t *testing.T) {
+	installer := &stubInstaller{outcome: InstallOutcome{
+		Version: "v0.2.0", PreviousVersion: "v0.1.0", RollbackAvailable: true,
+	}}
+	app := App{Installer: installer}
+
+	var out, errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{
+		"install", "--from", secretSource, "--version", "v0.2.0", "--sha256", secretDigest, "--json",
+	}, &out, &errOut)
+	if code != 0 || errOut.String() != "" {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	want := `{"schemaVersion":"ssc-init.install.v1","command":"install","version":"v0.2.0","previousVersion":"v0.1.0","rollbackAvailable":true}` + "\n"
+	if out.String() != want {
+		t.Fatalf("stdout=%q want=%q", out.String(), want)
+	}
+	if len(installer.installArgs) != 1 || installer.installArgs[0] != [3]string{secretSource, "v0.2.0", secretDigest} {
+		t.Fatalf("installer received %+v", installer.installArgs)
+	}
+
+	out.Reset()
+	installer.outcome = InstallOutcome{Version: "v0.1.0", PreviousVersion: "v0.2.0", RollbackAvailable: true}
+	if code := app.Run(context.Background(), []string{"rollback", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	want = `{"schemaVersion":"ssc-init.install.v1","command":"rollback","version":"v0.1.0","previousVersion":"v0.2.0","rollbackAvailable":true}` + "\n"
+	if out.String() != want {
+		t.Fatalf("stdout=%q want=%q", out.String(), want)
+	}
+	if installer.rollbackCalls != 1 {
+		t.Fatalf("rollback calls=%d", installer.rollbackCalls)
+	}
+}
+
+// A first install has no rollback target: the shape stays fixed and the absent
+// target is reported as an empty version and rollbackAvailable false.
+func TestInstallReportsAFirstInstallWithoutARollbackTarget(t *testing.T) {
+	app := App{Installer: &stubInstaller{outcome: InstallOutcome{Version: "v0.1.0"}}}
+	var out, errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{
+		"install", "--from", secretSource, "--version", "v0.1.0", "--sha256", secretDigest, "--json",
+	}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	want := `{"schemaVersion":"ssc-init.install.v1","command":"install","version":"v0.1.0","previousVersion":"","rollbackAvailable":false}` + "\n"
+	if out.String() != want {
+		t.Fatalf("stdout=%q want=%q", out.String(), want)
+	}
+}
+
+// The payload reports version strings and booleans only: no absolute path, no
+// home directory, and never the supplied source or digest.
+func TestInstallPayloadCarriesNoPathOrSuppliedValue(t *testing.T) {
+	app := App{Installer: &stubInstaller{outcome: InstallOutcome{
+		Version: "v0.2.0", PreviousVersion: "v0.1.0", RollbackAvailable: true,
+	}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{
+		"install", "--from", secretSource, "--version", "v0.2.0", "--sha256", secretDigest, "--json",
+	}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	payload := out.String()
+	for _, forbidden := range []string{"/", secretSource, secretDigest, "$HOME", "Application Support"} {
+		if strings.Contains(payload, forbidden) {
+			t.Fatalf("payload leaks %q: %s", forbidden, payload)
+		}
+	}
+}
+
+// Each install failure mode gets its own exit code so an adapter can tell "these
+// bytes are bad" from "the new core is bad" from "someone else is installing"
+// without parsing a message. The messages themselves stay fixed and value-free.
+func TestInstallFailuresExitDistinctlyWithFixedValueFreeMessages(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		err    error
+		code   int
+		stderr string
+	}{
+		{"verification", ErrInstallVerification, 3, "core verification failed\n"},
+		{"health", ErrInstallHealth, 4, "staged core failed its health check\n"},
+		{"busy", ErrInstallBusy, 5, "another installation is already in progress\n"},
+		{"unclassified", errors.New("mounting /Volumes/private-drop failed"), 1, "install failed\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			app := App{Installer: &stubInstaller{err: testCase.err}}
+			var out, errOut bytes.Buffer
+			code := app.Run(context.Background(), []string{
+				"install", "--from", secretSource, "--version", secretVersion, "--sha256", secretDigest, "--json",
+			}, &out, &errOut)
+			if code != testCase.code {
+				t.Fatalf("code=%d want=%d", code, testCase.code)
+			}
+			if out.String() != "" {
+				t.Fatalf("failed install wrote a payload: %q", out.String())
+			}
+			if errOut.String() != testCase.stderr {
+				t.Fatalf("stderr=%q want=%q", errOut.String(), testCase.stderr)
+			}
+			for _, forbidden := range []string{secretSource, secretVersion, secretDigest, "/Volumes"} {
+				if strings.Contains(errOut.String(), forbidden) {
+					t.Fatalf("stderr leaks %q: %q", forbidden, errOut.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRollbackFailuresExitDistinctly(t *testing.T) {
+	for _, testCase := range []struct {
+		err    error
+		code   int
+		stderr string
+	}{
+		{ErrInstallBusy, 5, "another installation is already in progress\n"},
+		{ErrInstallVerification, 3, "core verification failed\n"},
+		{errors.New("no previous known-good core version is available"), 1, "rollback failed\n"},
+	} {
+		app := App{Installer: &stubInstaller{err: testCase.err}}
+		var out, errOut bytes.Buffer
+		code := app.Run(context.Background(), []string{"rollback", "--json"}, &out, &errOut)
+		if code != testCase.code || out.String() != "" || errOut.String() != testCase.stderr {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestInstallAndRollbackFailWhenOutputCannotBeWritten(t *testing.T) {
+	app := App{Installer: &stubInstaller{outcome: InstallOutcome{Version: "v0.1.0"}}}
+	var errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{
+		"install", "--from", secretSource, "--version", "v0.1.0", "--sha256", secretDigest, "--json",
+	}, failingWriter{err: errors.New("disk full")}, &errOut)
+	if code != 1 || errOut.String() != "failed to write install output\n" {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
 func TestOperationalCommandsFailGenericallyWhenDependencyMissing(t *testing.T) {
-	for _, args := range [][]string{{"scan", "--baseline", "--json"}, {"status", "--json"}, {"doctor", "--json"}} {
+	installArgs := []string{"install", "--from", secretSource, "--version", "v0.1.0", "--sha256", secretDigest, "--json"}
+	for _, args := range [][]string{{"scan", "--baseline", "--json"}, {"status", "--json"}, {"doctor", "--json"}, installArgs, {"rollback", "--json"}} {
 		var out, errOut bytes.Buffer
 		code := (App{}).Run(context.Background(), args, &out, &errOut)
 		if code != 1 || strings.Contains(errOut.String(), "<nil>") {
