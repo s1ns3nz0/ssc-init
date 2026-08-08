@@ -43,22 +43,20 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - Cancellation/deadline errors propagate and clear partial runtime state; hostile targets are isolated from safe siblings.
 - No new runtime dependency without revising the plan first. Deterministic input produces byte-identical report JSON and snapshot state.
 
-## Active work
+## Completed work
 
-Branch `feature/local-content-evidence-core` in `.worktrees/local-content-evidence-core` implements the staged local content evidence plan (Tasks 1–14):
+The local content evidence core (Tasks 1–14) is merged to `master`; the full suite, race detector, vet, static audits, and release build all pass. Public contracts are `ssc-init.scan.v3` / `ssc-init.status.v3`; v1/v2 snapshots load as `legacyInventory: true` with no evidence claims. Reference docs:
 
 - design: `docs/superpowers/specs/2026-08-07-local-content-evidence-core-design.md`
 - plan: `docs/superpowers/plans/2026-08-07-local-content-evidence-core.md`
-- ledger: `.superpowers/sdd/2026-08-07-local-content-evidence-core/progress.md`
-- handoff: `docs/handoff-2026-08-07-local-content-evidence-core.md` — read before continuing Tasks 11–14
+- ledger + per-task reports: `.superpowers/sdd/2026-08-07-local-content-evidence-core/`
+- validation report: `docs/testing/2026-08-06-use-case-validation.md` (dated v3 revalidation appended)
 
-SDD conventions: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; per-task reports live beside the ledger as `task-N-report.md` (+ `task-N-fix-M-report.md`); review fixes need a reproducing failing test first; escalate after five fix rounds. Adversarial/race-prone suites are re-verified with `-count=50`.
+Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Design non-goals still unimplemented: package payload hashing, immutable Docker identity, code signatures, TI, behavior analysis, policy/warnings/blocking, host adapters.
 
-Until Tasks 13–14 land, `internal/acceptance` and `internal/cli` carry known staged failures (pre-v3 scan/status fixture expectations). Do not "fix" them by removing evidence fields or project observations; Task 13 owns public v3 contracts and Task 14 owns final fixtures/goldens.
-
-Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set.
+Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set. For multi-task plans, SDD conventions apply: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; review fixes need a reproducing failing test first; adversarial/race-prone suites re-verified with `-count=50`.
 
 ## Gotchas
 
 - Package assets have `Source` cleared before append (`internal/collector/packages/collector.go` `appendPackageEvidence`); the ecosystem lives in `observation.Source` (= probe target ID, e.g. `packages.npm`). Don't derive anything from `asset.Source` for packages.
-- Keep untracked files out of `.worktrees/local-content-evidence-core` — release gates (Task 14) require a clean worktree; scratch files go outside the repo.
+- Release gates and `go test ./scripts` require a clean tracked worktree — keep scratch files outside the repo.
