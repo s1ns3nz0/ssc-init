@@ -123,10 +123,10 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 	if err = recordAssetHistory(ctx, tx, scan, inventory); err != nil {
 		return err
 	}
-	if err = pruneSnapshots(ctx, tx, now); err != nil {
+	if err = pruneSnapshots(ctx, tx, now, s.options.snapshotWindow()); err != nil {
 		return err
 	}
-	if err = pruneAssetHistory(ctx, tx, now); err != nil {
+	if err = pruneAssetHistory(ctx, tx, now, s.options.assetHistoryWindow()); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -136,15 +136,46 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 	return secureSQLiteFiles(s.path, guard)
 }
 
-// snapshotRetention is the documented full-snapshot window. The most recent
+// Options carry the store's construction-time retention windows. Design §10
+// makes organization retention configurable through signed policy, which does
+// not exist yet, so this is the in-process seam policy will be wired into: no
+// configuration file, environment variable, or flag reads it today.
+// A window left unset selects the documented default, and so does a
+// non-positive one: "retain nothing" is never what a caller meant to ask for,
+// and a zero window silently destroys every snapshot but the newest on the next
+// save. A caller that wants an aggressive window states a positive one.
+type Options struct {
+	// SnapshotRetention is the full-snapshot window. Zero selects 30 days.
+	SnapshotRetention time.Duration
+	// AssetHistoryRetention is the asset change history window. Zero selects
+	// 90 days.
+	AssetHistoryRetention time.Duration
+}
+
+func (o Options) snapshotWindow() time.Duration {
+	return windowOrDefault(o.SnapshotRetention, defaultSnapshotRetention)
+}
+
+func (o Options) assetHistoryWindow() time.Duration {
+	return windowOrDefault(o.AssetHistoryRetention, defaultAssetHistoryRetention)
+}
+
+func windowOrDefault(window, fallback time.Duration) time.Duration {
+	if window <= 0 {
+		return fallback
+	}
+	return window
+}
+
+// defaultSnapshotRetention is the documented full-snapshot window. The most recent
 // snapshot is always kept regardless of age: without it there is no baseline
 // to diff against, and a machine idle longer than the window would report
 // every asset as new on its next scan.
 //
 // The window is inclusive of its own edge: a snapshot finished exactly at
-// now-snapshotRetention is kept, only strictly older ones are pruned. A machine
+// now-defaultSnapshotRetention is kept, only strictly older ones are pruned. A machine
 // scanning once a day therefore plateaus at 31 stored snapshots, not 30.
-const snapshotRetention = 30 * 24 * time.Hour
+const defaultSnapshotRetention = 30 * 24 * time.Hour
 
 // snapshotChildTables lists every table keyed by scan_id, ordered so each
 // table is deleted before the tables it references. Every foreign key is
@@ -167,7 +198,7 @@ var snapshotChildTables = []string{
 
 // pruneSnapshots deletes snapshots finished before the retention cutoff inside
 // the caller's transaction, so a crash cannot leave the store half-pruned.
-func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
+func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time, window time.Duration) error {
 	var newest string
 	err := tx.QueryRowContext(ctx, `SELECT id FROM scans ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&newest)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -176,7 +207,7 @@ func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("select newest snapshot: %w", err)
 	}
-	cutoff := formatTime(now.Add(-snapshotRetention))
+	cutoff := formatTime(now.Add(-window))
 	for _, table := range snapshotChildTables {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM "`+table+`" WHERE scan_id IN (SELECT id FROM scans WHERE finished_at < ? AND id <> ?)`, cutoff, newest); err != nil {
 			return fmt.Errorf("prune expired %s rows: %w", table, err)
@@ -188,11 +219,11 @@ func pruneSnapshots(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	return nil
 }
 
-// assetHistoryRetention is the documented asset change history window. It is
+// defaultAssetHistoryRetention is the documented asset change history window. It is
 // longer than the snapshot window because history is one small row per distinct
 // asset rather than a full snapshot, and it answers the one question a pruned
 // snapshot can no longer answer: when this asset first appeared.
-const assetHistoryRetention = 90 * 24 * time.Hour
+const defaultAssetHistoryRetention = 90 * 24 * time.Hour
 
 // recordAssetHistory folds this snapshot into the per-asset history. Every
 // value written is a validated asset ID or a digest of validated digests, so
@@ -250,8 +281,8 @@ func assetContentDigests(evidence []model.ContentEvidence) map[string]string {
 // snapshot are kept regardless of age: the newest snapshot survives the
 // snapshot window unconditionally, and a snapshot whose assets have no history
 // is a store that contradicts itself.
-func pruneAssetHistory(ctx context.Context, tx *sql.Tx, now time.Time) error {
-	cutoff := formatTime(now.Add(-assetHistoryRetention))
+func pruneAssetHistory(ctx context.Context, tx *sql.Tx, now time.Time, window time.Duration) error {
+	cutoff := formatTime(now.Add(-window))
 	if _, err := tx.ExecContext(ctx, `DELETE FROM asset_history WHERE last_seen_at < ? AND asset_id NOT IN (SELECT asset_id FROM assets)`, cutoff); err != nil {
 		return fmt.Errorf("prune expired asset history: %w", err)
 	}

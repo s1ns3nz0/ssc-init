@@ -2148,7 +2148,7 @@ func TestSaveScanKeepsSnapshotsInsideRetentionWindow(t *testing.T) {
 func TestSaveScanKeepsSnapshotExactlyAtRetentionEdge(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	saveSnapshotAt(t, s, "edge-old", now.Add(-snapshotRetention), now)
+	saveSnapshotAt(t, s, "edge-old", now.Add(-defaultSnapshotRetention), now)
 	saveSnapshotAt(t, s, "edge-new", now, now)
 	if remaining := snapshotCount(t, s); remaining != 2 {
 		t.Fatalf("retention kept %d snapshots, want 2 (edge snapshot must be retained)", remaining)
@@ -2533,5 +2533,114 @@ func TestAssetHistorySchemaRejectsIncompatibleShapes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assertRewrittenSchemaRejected(t, tt.table, tt.old, tt.replacement)
 		})
+	}
+}
+
+func openTestStoreWithOptions(t *testing.T, options Options) *Store {
+	t.Helper()
+	s, err := OpenWithOptions(filepath.Join(privateTempDir(t), "state.db"), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil && err != sql.ErrConnDone {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	return s
+}
+
+// TestOpenZeroOptionsRetainsTheDocumentedDefaults is the trap this seam exists
+// to avoid: an Options value whose windows are left unset must mean the
+// documented 30 and 90 days, never "retain nothing". A zero window would keep
+// only the newest snapshot and delete every asset's history on the next save.
+func TestOpenZeroOptionsRetainsTheDocumentedDefaults(t *testing.T) {
+	s := openTestStoreWithOptions(t, Options{})
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "zero-aged", "aged-asset", "", now.Add(-29*24*time.Hour), now)
+	saveSnapshotAt(t, s, "zero-new", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 2 {
+		t.Fatalf("zero options kept %d snapshots, want 2 (29 days is inside the 30 day default)", remaining)
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "aged-asset"); !ok {
+		t.Fatal("zero options pruned history 29 days old, want the 90 day default")
+	}
+}
+
+func TestOpenShortRetentionPrunesMoreThanTheDefault(t *testing.T) {
+	s := openTestStoreWithOptions(t, Options{SnapshotRetention: 24 * time.Hour, AssetHistoryRetention: 24 * time.Hour})
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "short-aged", "aged-asset", "", now.Add(-48*time.Hour), now)
+	saveSnapshotAt(t, s, "short-new", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("one day retention kept %d snapshots, want 1", remaining)
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "aged-asset"); ok {
+		t.Fatal("one day history retention kept a row last seen two days ago")
+	}
+}
+
+func TestOpenLongRetentionKeepsWhatTheDefaultWouldPrune(t *testing.T) {
+	s := openTestStoreWithOptions(t, Options{SnapshotRetention: 365 * 24 * time.Hour, AssetHistoryRetention: 365 * 24 * time.Hour})
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "long-aged", "aged-asset", "", now.Add(-200*24*time.Hour), now)
+	saveSnapshotAt(t, s, "long-new", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 2 {
+		t.Fatalf("one year retention kept %d snapshots, want 2", remaining)
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "aged-asset"); !ok {
+		t.Fatal("one year history retention pruned a row last seen 200 days ago")
+	}
+}
+
+// TestOpenTinyRetentionKeepsTheNewestSnapshot pins the one rule no window may
+// override: without the newest snapshot there is no baseline to diff against.
+func TestOpenTinyRetentionKeepsTheNewestSnapshot(t *testing.T) {
+	s := openTestStoreWithOptions(t, Options{SnapshotRetention: time.Nanosecond, AssetHistoryRetention: time.Nanosecond})
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "tiny-old", now.Add(-time.Hour), now)
+	saveSnapshotAt(t, s, "tiny-new", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 1 {
+		t.Fatalf("one nanosecond retention kept %d snapshots, want 1", remaining)
+	}
+	snapshot, ok, err := s.LatestSnapshot(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("load surviving snapshot: ok=%v err=%v", ok, err)
+	}
+	if snapshot.Scan.ScanID != "tiny-new" {
+		t.Fatalf("retention kept scan %q, want %q", snapshot.Scan.ScanID, "tiny-new")
+	}
+}
+
+// TestOpenKeepsWorkingWithoutOptions guards the existing constructor: it must
+// stay equivalent to the zero value rather than becoming a second policy.
+func TestOpenKeepsWorkingWithoutOptions(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveSnapshotAt(t, s, "plain-aged", now.Add(-29*24*time.Hour), now)
+	saveSnapshotAt(t, s, "plain-new", now, now)
+	if remaining := snapshotCount(t, s); remaining != 2 {
+		t.Fatalf("Open kept %d snapshots, want 2", remaining)
+	}
+}
+
+// TestOpenNegativeRetentionRetainsTheDocumentedDefaults covers the other way a
+// window can arrive meaning nothing: a negative window would put the cutoff in
+// the future and prune snapshots that have not aged at all.
+func TestOpenNegativeRetentionRetainsTheDocumentedDefaults(t *testing.T) {
+	s := openTestStoreWithOptions(t, Options{SnapshotRetention: -time.Hour, AssetHistoryRetention: -time.Hour})
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	saveHistorySnapshot(t, s, "negative-aged", "aged-asset", "", now.Add(-29*24*time.Hour), now)
+	saveSnapshotAt(t, s, "negative-new", now, now)
+
+	if remaining := snapshotCount(t, s); remaining != 2 {
+		t.Fatalf("negative retention kept %d snapshots, want 2 (the default window)", remaining)
+	}
+	if _, _, _, _, ok := assetHistoryRow(t, s, "aged-asset"); !ok {
+		t.Fatal("negative retention pruned history inside the 90 day default")
 	}
 }

@@ -30,18 +30,25 @@ var ErrStoreClosed = errors.New("snapshot store is closed")
 // first pathname open. Defending against later malicious same-UID replacement or
 // a hostile custom SQLite VFS is outside the foundation store's threat boundary.
 type Store struct {
-	mu    sync.RWMutex
-	db    *sql.DB
-	guard *os.File
-	path  string
+	mu      sync.RWMutex
+	db      *sql.DB
+	guard   *os.File
+	path    string
+	options Options
 
 	// contentCacheRowLimit is an injected test seam for the cache row cap.
 	// Zero selects the fixed production limit; it is not CLI-configurable.
 	contentCacheRowLimit int
 }
 
-// Open opens or creates a snapshot store at path.
-func Open(path string) (_ *Store, err error) {
+// Open opens or creates a snapshot store at path with the documented default
+// retention windows.
+func Open(path string) (*Store, error) {
+	return OpenWithOptions(path, Options{})
+}
+
+// OpenWithOptions opens or creates a snapshot store at path.
+func OpenWithOptions(path string, options Options) (_ *Store, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
@@ -97,7 +104,7 @@ func Open(path string) (_ *Store, err error) {
 	if err = secureSQLiteFiles(abs, guard); err != nil {
 		return nil, err
 	}
-	return &Store{db: db, guard: guard, path: abs}, nil
+	return &Store{db: db, guard: guard, path: abs, options: options}, nil
 }
 
 // Path returns the verified absolute path to the database file.
