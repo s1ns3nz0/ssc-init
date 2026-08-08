@@ -272,17 +272,19 @@ func TestHookOnUnsupportedOperatingSystemIsAUsageError(t *testing.T) {
 }
 
 func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
-	oldHost, oldOpen := hostPathsForRun, openStoreForRun
+	oldHost, oldOpen, oldResolve := hostPathsForRun, openStoreForRun, resolveRootsForRun
 	t.Cleanup(func() {
 		hostPathsForRun = oldHost
 		openStoreForRun = oldOpen
+		resolveRootsForRun = oldResolve
 	})
 	home := t.TempDir()
 
 	for _, testCase := range []struct {
-		name  string
-		hosts func() (string, platform.Paths, bool)
-		open  func(string) (applicationStore, error)
+		name    string
+		hosts   func() (string, platform.Paths, bool)
+		open    func(string) (applicationStore, error)
+		resolve func(string, []string) ([]projects.Root, error)
 	}{
 		{
 			name:  "host paths unavailable",
@@ -290,6 +292,17 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 			open: func(string) (applicationStore, error) {
 				t.Fatal("hook opened the store without host paths")
 				return nil, errors.New("store must not be opened")
+			},
+		},
+		{
+			name:  "scan configuration unavailable",
+			hosts: func() (string, platform.Paths, bool) { return home, platform.PathsForHome(home), true },
+			open: func(string) (applicationStore, error) {
+				t.Fatal("hook opened the store without a scan configuration")
+				return nil, errors.New("store must not be opened")
+			},
+			resolve: func(string, []string) ([]projects.Root, error) {
+				return nil, errors.New("project roots unavailable")
 			},
 		},
 		{
@@ -301,6 +314,10 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			hostPathsForRun = testCase.hosts
 			openStoreForRun = testCase.open
+			resolveRootsForRun = oldResolve
+			if testCase.resolve != nil {
+				resolveRootsForRun = testCase.resolve
+			}
 			var stdout, stderr bytes.Buffer
 			code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr)
 			if code != 0 || stdout.String() != "" || stderr.String() != "ssc-init hook: baseline scan failed\n" {
