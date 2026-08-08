@@ -60,3 +60,4 @@ Development follows strict TDD: observe the named test fail, add the minimum imp
 
 - Package assets have `Source` cleared before append (`internal/collector/packages/collector.go` `appendPackageEvidence`); the ecosystem lives in `observation.Source` (= probe target ID, e.g. `packages.npm`). Don't derive anything from `asset.Source` for packages.
 - Release gates and `go test ./scripts` require a clean tracked worktree — keep scratch files outside the repo.
+- Never run `go test ./...` inside a `git archive` export: `scripts/build-darwin_test.go` checks a newer tree out over the working directory (adding `.git/` and `dist/`, overwriting tracked files), so the export silently stops representing the commit under test. Verify a pinned commit in a real `git clone`, or exclude `./scripts`.

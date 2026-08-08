@@ -359,11 +359,19 @@ outside-path markers.
   `requirements-*.txt` are outside the closed subject vocabulary.
 - Non-`complete` evidence digests are diagnostic only and are never a content
   identity.
-- The first cache-warm rescan reports a deterministic `changed` delta for
+- ~~The first cache-warm rescan reports a deterministic `changed` delta for
   payload-tree evidence whose recorded `cache` provenance moved from `miss`
   to `hit` even though every digest is identical; evidence diffing excludes
   only observation timestamps by contract. Subsequent unchanged rescans are
-  delta-free.
+  delta-free.~~ **Superseded as of `11b821f`.** This entry recorded the
+  behavior at the revision above and is retained as history. The echo was not
+  one-time: because the cache key embeds size/mtime/ctime, *every* content
+  change missed on the run that first observed it and hit on the next, so
+  each change was reported twice, indefinitely. Evidence diffing now excludes
+  the `cache` metadata key as well as observation timestamps, so a change is
+  reported exactly once and an unchanged rescan is delta-free. See
+  `docs/superpowers/specs/2026-08-08-hook-severity-ladder-design.md`,
+  "Required upstream fix".
 - Code signatures, TI, behavior analysis, policy, warnings, blocking, and
   host adapters remain unimplemented; no malware verdict or safety guarantee
   is made or implied.
