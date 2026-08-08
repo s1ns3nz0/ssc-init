@@ -1,6 +1,7 @@
 package report
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -36,9 +37,30 @@ type rungRow struct {
 	From, To string
 }
 
-// parseAssetID splits "<type>:<host>:<name>[@<version>]". Package IDs carry no
-// host ("pkg:pypi/moto@5.1.22"); names may contain "@" (npm scopes), so the
-// version splits on the last "@".
+// versionedAssetTypes is the closed set of asset-ID prefixes that append
+// "@<version>": agents (when a version is known), IDE extensions and packages.
+// The mcp, project and project-config prefixes never do, and their names may
+// contain "@" ("ctx@prod"), so splitting a version out of those IDs would
+// invent a version transition between two unrelated assets.
+var versionedAssetTypes = map[string]struct{}{
+	"agent-plugin":  {},
+	"agent-skill":   {},
+	"ide-extension": {},
+	"pkg":           {},
+}
+
+// digestSegment matches the digest of an anchored ID ("project:sha256:<hex>").
+// Such an ID carries no readable name, and a digest is never printed.
+var digestSegment = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// unnamedAsset stands in for an asset whose name cannot be recovered: a
+// digest-anchored ID that is gone from the current inventory.
+const unnamedAsset = "(unnamed)"
+
+// parseAssetID splits "<type>:<host>:<name>[@<version>]" into the parts that
+// identify an asset across snapshots. Package IDs carry no host
+// ("pkg:pypi/moto@5.1.22"); names may contain "@" (npm scopes), so the version
+// splits on the last "@" — and only for prefixes that carry one at all.
 func parseAssetID(id string) (assetType, host, name, version string) {
 	parts := strings.SplitN(id, ":", 3)
 	switch len(parts) {
@@ -49,13 +71,37 @@ func parseAssetID(id string) (assetType, host, name, version string) {
 	default:
 		name = id
 	}
-	if at := strings.LastIndex(name, "@"); at > 0 {
-		name, version = name[:at], name[at+1:]
+	if _, versioned := versionedAssetTypes[assetType]; versioned {
+		if at := strings.LastIndex(name, "@"); at > 0 {
+			name, version = name[:at], name[at+1:]
+		}
 	}
 	return assetType, host, name, version
 }
 
+// displayFor resolves the columns a row prints. The inventory is the only
+// place a digest-anchored asset has a readable name, so a present asset is
+// described by its record. A removed asset is absent from the current
+// inventory by definition and falls back to its ID, which for a digest-
+// anchored form yields no name rather than a digest.
+func displayFor(assets map[string]model.Asset, id string) (assetType, name, host string) {
+	if asset, present := assets[id]; present {
+		return string(asset.Type), asset.Name, asset.Source
+	}
+	assetType, host, name, _ = parseAssetID(id)
+	if digestSegment.MatchString(name) {
+		return assetType, unnamedAsset, ""
+	}
+	return assetType, name, host
+}
+
+// assetIdentity pairs an added asset with its removed predecessor. It stays
+// derived from the full asset ID: substituting display names would collapse
+// every digest-anchored project into a single identity.
 type assetIdentity struct{ assetType, host, name string }
+
+// assetChange records what an added or removed asset contributes to its row.
+type assetChange struct{ id, version string }
 
 // classify turns a delta into at most one row per asset, highest rung winning.
 // It is a pure function of the current inventory and the delta: no previous
@@ -77,8 +123,13 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 		evidenceStatus[evidence.ID] = evidence.Status
 	}
 
-	added := make(map[assetIdentity]string)
-	removed := make(map[assetIdentity]string)
+	assets := make(map[string]model.Asset, len(inventory.Assets))
+	for _, asset := range inventory.Assets {
+		assets[asset.ID] = asset
+	}
+
+	added := make(map[assetIdentity]assetChange)
+	removed := make(map[assetIdentity]assetChange)
 	best := make(map[assetIdentity]rungRow)
 
 	note := func(identity assetIdentity, row rungRow) {
@@ -94,11 +145,12 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 			identity := assetIdentity{assetType, host, name}
 			switch change.Kind {
 			case model.ChangeAdded:
-				added[identity] = version
+				added[identity] = assetChange{id: change.EntityID, version: version}
 			case model.ChangeRemoved:
-				removed[identity] = version
+				removed[identity] = assetChange{id: change.EntityID, version: version}
 			case model.ChangeChanged:
-				note(identity, rungRow{Rung: rungChanged, Type: assetType, Name: name, Host: host})
+				displayType, displayName, displayHost := displayFor(assets, change.EntityID)
+				note(identity, rungRow{Rung: rungChanged, Type: displayType, Name: displayName, Host: displayHost})
 			}
 		case model.ChangeEntityEvidence, model.ChangeEntityObservation:
 			if change.Kind == model.ChangeRemoved {
@@ -119,20 +171,23 @@ func classify(inventory model.Inventory, delta model.Delta) []rungRow {
 			if status != model.EvidenceComplete {
 				level = rungUnverified
 			}
-			note(identity, rungRow{Rung: level, Type: assetType, Name: name, Host: host})
+			displayType, displayName, displayHost := displayFor(assets, assetID)
+			note(identity, rungRow{Rung: level, Type: displayType, Name: displayName, Host: displayHost})
 		}
 	}
 
-	for identity, toVersion := range added {
-		row := rungRow{Rung: rungNew, Type: identity.assetType, Name: identity.name, Host: identity.host}
-		if fromVersion, paired := removed[identity]; paired {
-			row = rungRow{Rung: rungUpgraded, Type: identity.assetType, Name: identity.name, Host: identity.host, From: fromVersion, To: toVersion}
+	for identity, addition := range added {
+		displayType, displayName, displayHost := displayFor(assets, addition.id)
+		row := rungRow{Rung: rungNew, Type: displayType, Name: displayName, Host: displayHost}
+		if removal, paired := removed[identity]; paired {
+			row.Rung, row.From, row.To = rungUpgraded, removal.version, addition.version
 			delete(removed, identity)
 		}
 		best[identity] = row // an asset-level event outranks any of its records
 	}
-	for identity, fromVersion := range removed {
-		best[identity] = rungRow{Rung: rungRemoved, Type: identity.assetType, Name: identity.name, Host: identity.host, From: fromVersion}
+	for identity, removal := range removed {
+		displayType, displayName, displayHost := displayFor(assets, removal.id)
+		best[identity] = rungRow{Rung: rungRemoved, Type: displayType, Name: displayName, Host: displayHost, From: removal.version}
 	}
 
 	rows := make([]rungRow, 0, len(best))

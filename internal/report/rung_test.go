@@ -2,10 +2,13 @@ package report
 
 import (
 	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
+
+var digestName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func TestClassifyPairsUpgradesAndRanksRungs(t *testing.T) {
 	inventory := model.Inventory{
@@ -70,7 +73,10 @@ func TestParseAssetIDHandlesRealWorldForms(t *testing.T) {
 		{"agent-skill:claude:docx", "agent-skill", "claude", "docx", ""},
 		{"ide-extension:vscode:usernamehw.errorlens@3.16.0", "ide-extension", "vscode", "usernamehw.errorlens", "3.16.0"},
 		{"pkg:pypi/moto@5.1.22", "pkg", "", "pypi/moto", "5.1.22"},
-		{"mcp:claude-code:@scope/server@1.0.0", "mcp", "claude-code", "@scope/server", "1.0.0"},
+		{"pkg:npm/@scope/server@1.0.0", "pkg", "", "npm/@scope/server", "1.0.0"},
+		// mcp IDs never carry a version, so "@" belongs to the server name.
+		{"mcp:claude-code:ctx@prod", "mcp", "claude-code", "ctx@prod", ""},
+		{"project:sha256:77f9e938", "project", "sha256", "77f9e938", ""},
 		{"opaque", "", "", "opaque", ""},
 	} {
 		gotType, gotHost, gotName, gotVersion := parseAssetID(test.id)
@@ -78,6 +84,62 @@ func TestParseAssetIDHandlesRealWorldForms(t *testing.T) {
 			t.Fatalf("id=%q got=(%q,%q,%q,%q) want=(%q,%q,%q,%q)", test.id,
 				gotType, gotHost, gotName, gotVersion, test.wantType, test.wantHost, test.wantName, test.wantVersion)
 		}
+	}
+}
+
+func TestClassifyDoesNotRenderProjectDigestAsName(t *testing.T) {
+	const projectID = "project:sha256:77f9e938ae8565f4b27daf83a6a66bd5424c1665c6c0eee60951dac76e4109c8"
+	inventory := model.Inventory{
+		Assets:       []model.Asset{{ID: projectID, Type: model.AssetProject, Name: "project"}},
+		Observations: []model.Observation{{ID: "observation:sha256:1111", AssetID: projectID}},
+		Evidence: []model.ContentEvidence{{ID: "evidence:sha256:aaaa", AssetID: projectID,
+			ObservationID: "observation:sha256:1111", Status: model.EvidenceComplete}},
+	}
+	delta := model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:aaaa"}}}
+	rows := classify(inventory, delta)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if digestName.MatchString(rows[0].Name) {
+		t.Fatalf("digest rendered as asset name: %+v", rows[0])
+	}
+	if rows[0].Host == "sha256" {
+		t.Fatalf("digest algorithm rendered as host: %+v", rows[0])
+	}
+	if rows[0].Name != "project" || rows[0].Type != string(model.AssetProject) {
+		t.Fatalf("display identity must come from the inventory: %+v", rows[0])
+	}
+}
+
+func TestClassifyDoesNotRenderDigestForRemovedProjectAssets(t *testing.T) {
+	const configID = "project-config:sha256:77f9e938ae8565f4b27daf83a6a66bd5424c1665c6c0eee60951dac76e4109c8"
+	rows := classify(model.Inventory{}, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: configID}}})
+	if len(rows) != 1 || rows[0].Rung != rungRemoved {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if digestName.MatchString(rows[0].Name) || rows[0].Host == "sha256" {
+		t.Fatalf("digest reached the removed-asset row: %+v", rows[0])
+	}
+	if rows[0].Type != "project-config" || rows[0].Name != "(unnamed)" || rows[0].Host != "" {
+		t.Fatalf("removed digest-anchored asset must render as unnamed: %+v", rows[0])
+	}
+}
+
+func TestClassifyDoesNotInventVersionsForVersionlessIDs(t *testing.T) {
+	rows := classify(model.Inventory{}, model.Delta{Changes: []model.Change{
+		{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:ctx@prod"},
+		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityAsset, EntityID: "mcp:claude-code:ctx@dev"}}})
+	if len(rows) != 2 {
+		t.Fatalf("two distinct MCP servers collapsed into %d row(s): %+v", len(rows), rows)
+	}
+}
+
+func TestParseAssetIDKeepsLeadingAtNames(t *testing.T) {
+	_, _, name, version := parseAssetID("ide-extension:vscode:@internal")
+	if name != "@internal" || version != "" {
+		t.Fatalf("got name=%q version=%q", name, version)
 	}
 }
 
