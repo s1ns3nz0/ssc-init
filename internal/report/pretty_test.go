@@ -44,11 +44,13 @@ func prettyFixture() (model.ScanResult, model.Inventory, model.Delta) {
 		Observations: []model.Observation{
 			{ID: "observation:sha256:1111", AssetID: "agent-plugin:claude:alpha@1.0.0", Collector: "agents", Source: "agents.claude.plugins"},
 			{ID: "observation:sha256:2222", AssetID: "ide-extension:vscode:bravo@2.0.0", Collector: "ide", Source: "ide.vscode.extensions"},
+			{ID: "observation:sha256:3333", AssetID: "pkg:pypi/charlie@3.0.0", Collector: "packages", Source: "packages.pip"},
 		},
 		Evidence: []model.ContentEvidence{
 			{ID: "evidence:sha256:aaaa", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest, Status: model.EvidenceComplete, Algorithm: "sha256", Digest: strings.Repeat("a", 64), Size: 497},
 			{ID: "evidence:sha256:bbbb", AssetID: "agent-plugin:claude:alpha@1.0.0", ObservationID: "observation:sha256:1111", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidencePartial, Algorithm: "sha256", Digest: strings.Repeat("b", 64), Errors: []model.EvidenceError{{Code: "symlink_rejected", Message: "symbolic link was not followed"}}},
 			{ID: "evidence:sha256:cccc", AssetID: "ide-extension:vscode:bravo@2.0.0", ObservationID: "observation:sha256:2222", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectEntrypointMain, Status: model.EvidenceUnavailable, Errors: []model.EvidenceError{{Code: "path_invalid", Message: "evidence target path is invalid"}}},
+			{ID: "evidence:sha256:dddd", AssetID: "pkg:pypi/charlie@3.0.0", ObservationID: "observation:sha256:3333", Kind: model.EvidencePackageContent, Subject: model.EvidenceSubjectPackageContent, Status: model.EvidenceUnsupported},
 		},
 	}
 	delta := model.Delta{Changes: []model.Change{
@@ -94,6 +96,7 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 		`(?m)projects\s+complete`,
 		`(?m)agents\.claude\.plugins\s+2\s+1`,
 		`(?m)ide\.vscode\.extensions\s+1\s+0`,
+		`(?m)packages\.pip\s+1\s+0`,
 		`(?m)alpha\s+payload-tree\s+partial\s+symlink_rejected`,
 		`(?m)bravo\s+entrypoint-main\s+unavailable\s+path_invalid`,
 		`(?m)added=1\s+changed=1\s+removed=0`,
@@ -107,6 +110,11 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 	}
 	if strings.Contains(output, strings.Repeat("a", 64)) {
 		t.Fatalf("pretty output dumps full digests:\n%s", output)
+	}
+	// Unsupported evidence is a deliberate non-claim, not an anomaly: it stays
+	// in the coverage counts and source totals but never floods ISSUES.
+	if strings.Contains(output, "charlie") {
+		t.Fatalf("unsupported evidence must not appear in ISSUES:\n%s", output)
 	}
 }
 

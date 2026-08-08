@@ -204,6 +204,12 @@ func (p *prettyPrinter) evidenceSections(coverage *model.EvidenceCoverage, inven
 			count.complete++
 			continue
 		}
+		// Unsupported is a deliberate non-claim (for example package payloads
+		// and Docker identities), not an anomaly: it stays visible in the
+		// coverage counts and source totals without flooding ISSUES.
+		if evidence.Status == model.EvidenceUnsupported {
+			continue
+		}
 		name := assetName[observationAsset[evidence.ObservationID]]
 		if name == "" {
 			name = evidence.AssetID
