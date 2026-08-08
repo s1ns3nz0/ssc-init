@@ -75,6 +75,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 			digests[name] = sha256.Sum256(content)
 		}
 		assertNativeVersion(t, repositoryRoot, wantVersion)
+		assertNativeIsolatedStatusV3(t, repositoryRoot)
 		return digests
 	}
 
@@ -300,6 +301,43 @@ func assertNativeVersion(t *testing.T, repositoryRoot, want string) {
 	}
 	if result.Version != want {
 		t.Fatalf("native version=%q, want %q", result.Version, want)
+	}
+}
+
+// assertNativeIsolatedStatusV3 smokes the release binary's status contract
+// against an isolated HOME: the v3 schema version must be reported, no
+// baseline may be claimed, and state must be created only inside that home.
+func assertNativeIsolatedStatusV3(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" || (runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64") {
+		t.Skip("native Darwin status smoke test")
+	}
+	binary := filepath.Join(repositoryRoot, "dist", "ssc-init-darwin-"+runtime.GOARCH)
+	// The store enforces a no-symlink database parent; macOS temporary
+	// directories live under the /var -> /private/var symlink, so the
+	// isolated home must be the physical path.
+	isolatedHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "status", "--json")
+	command.Env = environmentWith("HOME", isolatedHome)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native isolated status smoke failed: %v\n%s", err, output)
+	}
+	var result struct {
+		SchemaVersion string `json:"schemaVersion"`
+		Initialized   bool   `json:"initialized"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode native status output: %v\n%s", err, output)
+	}
+	if result.SchemaVersion != "ssc-init.status.v3" || result.Initialized {
+		t.Fatalf("native isolated status=%+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(isolatedHome, "Library", "Application Support", "SSC Init", "state.db")); err != nil {
+		t.Fatalf("release binary did not create state inside the isolated home: %v", err)
 	}
 }
 

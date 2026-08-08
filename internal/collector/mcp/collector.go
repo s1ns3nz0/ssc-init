@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
@@ -25,6 +26,8 @@ import (
 const maxMCPConfigBytes = maxJSONConfigBytes
 
 const redactedValue = "[redacted]"
+
+const maxMCPSemanticFieldBytes = 4096
 
 type mcpCollector struct {
 	projectTargets []model.LocalTarget
@@ -196,6 +199,10 @@ func collectReadEvidence(result *model.CollectorResult, home, locationRef string
 		result.Observations = append(result.Observations, observation)
 		target.Assets++
 		target.Observations++
+		if !issueMCPSemanticEvidence(result, declaration, observation) {
+			target.Status = model.TargetPartial
+			target.Errors = append(target.Errors, coverageError("identity_changed", "MCP evidence issuer is unavailable", ""))
+		}
 	}
 	result.Targets = append(result.Targets, target)
 }
@@ -406,18 +413,27 @@ func sortResult(result *model.CollectorResult) {
 	})
 	sort.SliceStable(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.SliceStable(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
+	sort.SliceStable(result.LocalEvidenceTargets, func(i, j int) bool {
+		if result.LocalEvidenceTargets[i].TargetID != result.LocalEvidenceTargets[j].TargetID {
+			return result.LocalEvidenceTargets[i].TargetID < result.LocalEvidenceTargets[j].TargetID
+		}
+		return result.LocalEvidenceTargets[i].ObservationID < result.LocalEvidenceTargets[j].ObservationID
+	})
 }
 
 func buildServerEvidence(home, locationRef string, declaration targetDeclaration, server ServerConfig) (model.Asset, model.Observation, error) {
 	if invalidServerName(server.Name) || privacy.ContainsSensitiveValue(server.Name) {
 		return model.Asset{}, model.Observation{}, identity.ErrRejectedIdentity
 	}
+	if !validServerSemanticLists(server) {
+		return model.Asset{}, model.Observation{}, errors.New("unsafe MCP metadata")
+	}
 	asset := model.Asset{
 		ID:   "mcp:" + declaration.spec.Host + ":" + server.Name,
 		Type: model.AssetMCP, Name: server.Name, Source: declaration.spec.Host,
 	}
-	metadata := observationMetadata(home, declaration.spec.ID, server)
-	if !safeMetadata(metadata) {
+	metadata, metadataOK := observationMetadata(home, declaration.spec.ID, server)
+	if !metadataOK || !safeMetadata(metadata) {
 		return model.Asset{}, model.Observation{}, errors.New("unsafe MCP metadata")
 	}
 	observation, err := identity.FinalizeObservation(model.Observation{
@@ -443,13 +459,17 @@ func invalidServerName(name string) bool {
 	return false
 }
 
-func observationMetadata(home, sourceTarget string, server ServerConfig) map[string]string {
+func observationMetadata(home, sourceTarget string, server ServerConfig) (map[string]string, bool) {
+	args, argsOK := sanitizeArgs(home, server.Args)
+	if !argsOK {
+		return nil, false
+	}
 	metadata := map[string]string{
 		"transport":     server.Transport,
 		"source_target": sourceTarget,
 	}
 	putMetadata(metadata, "command", sanitizeCommand(home, server.Command))
-	putMetadata(metadata, "args", strings.Join(sanitizeArgs(home, server.Args), "\x1f"))
+	putMetadata(metadata, "args", strings.Join(args, "\x1f"))
 	putMetadata(metadata, "url_shape", sanitizeURLShape(server.URL))
 	putMetadata(metadata, "cwd_ref", sanitizeCWD(home, server.CWD))
 	if server.Enabled != nil {
@@ -460,7 +480,7 @@ func observationMetadata(home, sourceTarget string, server ServerConfig) map[str
 	putMetadata(metadata, "enabled_tools", strings.Join(server.EnabledTools, ","))
 	putMetadata(metadata, "disabled_tools", strings.Join(server.DisabledTools, ","))
 	putMetadata(metadata, "unknown_fields", strings.Join(server.UnknownFields, ","))
-	return metadata
+	return metadata, true
 }
 
 func putMetadata(metadata map[string]string, key, value string) {
@@ -471,7 +491,81 @@ func putMetadata(metadata map[string]string, key, value string) {
 
 func safeMetadata(metadata map[string]string) bool {
 	for key, value := range metadata {
-		if key == "" || value == "" || privacy.ContainsSensitiveValue(key) || privacy.ContainsSensitiveValue(value) || containsRawAbsolutePath(value) {
+		if key == "" || value == "" || privacy.ContainsSensitiveValue(key) || containsSensitiveMetadataValue(key, value) || containsRawAbsolutePath(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsSensitiveMetadataValue(key, value string) bool {
+	if key != "args" {
+		return privacy.ContainsSensitiveValue(value)
+	}
+	for _, item := range strings.Split(value, "\x1f") {
+		if privacy.ContainsSensitiveValue(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func validServerSemanticLists(server ServerConfig) bool {
+	return validServerSemanticList(server.EnvKeys, validMCPEnvKey) &&
+		validServerSemanticList(server.HeaderKeys, validMCPHeaderKey) &&
+		validServerSemanticList(server.EnabledTools, validMCPToolName) &&
+		validServerSemanticList(server.DisabledTools, validMCPToolName)
+}
+
+func validServerSemanticList(values []string, validItem func(string) bool) bool {
+	total := 0
+	previous := ""
+	for _, value := range values {
+		if !validItem(value) || (previous != "" && value <= previous) {
+			return false
+		}
+		total += len(value)
+		previous = value
+	}
+	if len(values) > 1 {
+		total += len(values) - 1
+	}
+	return total <= maxMCPSemanticFieldBytes
+}
+
+func validMCPEnvKey(value string) bool {
+	if value == "" || !(value[0] == '_' || value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !(character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPHeaderKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPToolName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.') {
 			return false
 		}
 	}
@@ -482,6 +576,9 @@ func sanitizeCommand(home, command string) string {
 	if command == "" {
 		return ""
 	}
+	if privacy.IsRedactedPlaceholder(command) {
+		return redactedValue
+	}
 	fields := strings.Fields(command)
 	for _, field := range fields {
 		key := field
@@ -491,7 +588,7 @@ func sanitizeCommand(home, command string) string {
 		if credentialFlag(key) || sensitiveName(key) {
 			return redactedValue
 		}
-		if _, sensitive := combinedCredentialFlag(field); sensitive {
+		if _, _, sensitive := combinedCredentialFlag(field); sensitive {
 			return redactedValue
 		}
 		if _, sensitive := sensitiveTextPrefix(field); sensitive {
@@ -504,43 +601,98 @@ func sanitizeCommand(home, command string) string {
 	if filepath.IsAbs(command) {
 		return identity.SafeLocationRef(home, command, "external-command")
 	}
-	if privacy.ContainsSensitiveValue(command) {
+	if privacy.ContainsSensitiveValue(command) || containsRawAbsolutePath(command) {
 		return redactedValue
 	}
 	return redactHomeText(home, command)
 }
 
 func containsRawAbsolutePath(value string) bool {
-	for _, field := range strings.FieldsFunc(value, func(character rune) bool {
-		return character == '\x1f' || character == ',' || character == '=' || unicode.IsSpace(character)
-	}) {
-		if filepath.IsAbs(field) {
+	for index, character := range value {
+		if character != '/' {
+			continue
+		}
+		if mcpURLSchemeSlashes(value, index) {
+			continue
+		}
+		if mcpHTTPAuthorityRootSlash(value, index) {
+			continue
+		}
+		if index == 0 {
+			return true
+		}
+		previous, _ := utf8.DecodeLastRuneInString(value[:index])
+		if !(unicode.IsLetter(previous) || unicode.IsDigit(previous) || strings.ContainsRune("-._~", previous)) {
 			return true
 		}
 	}
 	return false
 }
 
-func sanitizeArgs(home string, args []string) []string {
+func mcpURLSchemeSlashes(value string, slash int) bool {
+	for _, scheme := range []string{"http:", "https:"} {
+		start := slash - len(scheme)
+		if start >= 0 && value[start:slash] == scheme && (start == 0 || !mcpPathSafeByte(value[start-1])) && slash+1 < len(value) && value[slash+1] == '/' {
+			return true
+		}
+		start = slash - len(scheme) - 1
+		if start >= 0 && value[start:slash+1] == scheme+"//" && (start == 0 || !mcpPathSafeByte(value[start-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpHTTPAuthorityRootSlash(value string, slash int) bool {
+	prefix := value[:slash]
+	for _, scheme := range []string{"http://", "https://"} {
+		start := strings.LastIndex(prefix, scheme)
+		if start < 0 || start > 0 && mcpPathSafeByte(value[start-1]) {
+			continue
+		}
+		parsed, err := url.Parse(prefix[start:])
+		if err == nil && parsed.Scheme+"://" == scheme && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpPathSafeByte(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("-._~", rune(character))
+}
+
+func sanitizeArgs(home string, args []string) ([]string, bool) {
 	result := make([]string, len(args))
 	redactNext := false
 	for index, arg := range args {
 		if redactNext {
+			if credentialShapedArgument(arg) {
+				return nil, false
+			}
 			result[index] = redactedValue
 			redactNext = false
+			continue
+		}
+		if privacy.IsRedactedPlaceholder(arg) {
+			result[index] = redactedValue
+			continue
+		}
+		if prefix, ok := sensitiveTextPrefix(arg); ok {
+			result[index] = prefix + redactedValue
+			if standaloneSensitiveTextFlag(arg) {
+				redactNext = true
+			}
+			continue
+		}
+		if prefix, consumeNext, ok := combinedCredentialFlag(arg); ok {
+			result[index] = prefix + redactedValue
+			redactNext = consumeNext
 			continue
 		}
 		if credentialFlag(arg) {
 			result[index] = arg
 			redactNext = true
-			continue
-		}
-		if prefix, ok := combinedCredentialFlag(arg); ok {
-			result[index] = prefix + redactedValue
-			continue
-		}
-		if prefix, ok := sensitiveTextPrefix(arg); ok {
-			result[index] = prefix + redactedValue
 			continue
 		}
 		if key, value, found := strings.Cut(arg, "="); found {
@@ -550,9 +702,11 @@ func sanitizeArgs(home string, args []string) []string {
 			case absoluteURL(value):
 				result[index] = key + "=" + sanitizeURLShape(value)
 			case filepath.IsAbs(value):
-				result[index] = key + "=" + identity.SafeLocationRef(home, value, "external-arg")
+				result[index] = redactedValue
 			case privacy.ContainsSensitiveValue(value):
 				result[index] = key + "=" + redactedValue
+			case containsRawAbsolutePath(arg):
+				result[index] = redactedValue
 			default:
 				result[index] = redactHomeText(home, arg)
 			}
@@ -563,48 +717,154 @@ func sanitizeArgs(home string, args []string) []string {
 			result[index] = sanitizeURLShape(arg)
 		case filepath.IsAbs(arg):
 			result[index] = identity.SafeLocationRef(home, arg, "external-arg")
-		case privacy.ContainsSensitiveValue(arg):
+		case privacy.ContainsSensitiveValue(arg), containsRawAbsolutePath(arg):
 			result[index] = redactedValue
 		default:
 			result[index] = redactHomeText(home, arg)
 		}
 	}
-	return result
+	if redactNext {
+		return nil, false
+	}
+	return result, true
+}
+
+func credentialShapedArgument(value string) bool {
+	if _, _, sensitive := combinedCredentialFlag(value); sensitive {
+		return true
+	}
+	if credentialFlag(value) {
+		return true
+	}
+	if _, sensitive := sensitiveTextPrefix(value); sensitive {
+		return true
+	}
+	trimmed := strings.TrimSpace(value)
+	return strings.EqualFold(trimmed, "bearer") || strings.EqualFold(trimmed, "authorization") || strings.EqualFold(trimmed, "proxy-authorization")
 }
 
 func sanitizeURLShape(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	if privacy.IsRedactedPlaceholder(raw) {
+		return redactedValue
+	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || !safeMCPURLPath(parsed) {
 		return redactedValue
 	}
 	parsed.User = nil
 	shape := parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
-	keys := make([]string, 0, len(parsed.Query()))
-	for key := range parsed.Query() {
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return redactedValue
+	}
+	keys := make([]string, 0, len(query))
+	for key := range query {
+		if !safeMCPURLQueryKey(key) {
+			return redactedValue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	if len(keys) > 0 {
 		shape += "?query_keys=" + strings.Join(keys, ",")
 	}
+	if len(shape) > maxMCPSemanticFieldBytes {
+		return redactedValue
+	}
 	return shape
+}
+
+func safeMCPURLPath(parsed *url.URL) bool {
+	escaped := parsed.EscapedPath()
+	lowerEscaped := strings.ToLower(escaped)
+	if strings.Contains(lowerEscaped, "%2f") || strings.Contains(lowerEscaped, "%5c") {
+		return false
+	}
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil || containsMCPValidPercentEscape(decoded) || len(decoded) > maxMCPSemanticFieldBytes || !utf8.ValidString(decoded) || strings.ContainsRune(decoded, '\\') || privacy.ContainsSensitiveValue(decoded) {
+		return false
+	}
+	for _, character := range decoded {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	segments := strings.Split(decoded, "/")
+	for _, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		if separator := strings.IndexAny(segment, "=:"); separator > 0 && sensitiveName(segment[:separator]) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsMCPValidPercentEscape(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if value[index] == '%' && isMCPASCIIHex(value[index+1]) && isMCPASCIIHex(value[index+2]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMCPASCIIHex(character byte) bool {
+	return character >= '0' && character <= '9' || character >= 'a' && character <= 'f' || character >= 'A' && character <= 'F'
+}
+
+func safeMCPURLQueryKey(value string) bool {
+	if value == "" || len(value) > maxMCPSemanticFieldBytes || !utf8.ValidString(value) || privacy.ContainsSensitiveValue(value) {
+		return false
+	}
+	for _, character := range value {
+		if !(unicode.IsLetter(character) || unicode.IsDigit(character) || character == '_' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeCWD(home, cwd string) string {
 	if cwd == "" {
 		return ""
 	}
+	if privacy.IsRedactedPlaceholder(cwd) {
+		return redactedValue
+	}
 	if filepath.IsAbs(cwd) {
 		return identity.SafeLocationRef(home, cwd, "external-cwd")
 	}
 	redacted := redactHomeText(home, cwd)
-	if strings.HasPrefix(redacted, "$HOME") {
+	if redacted == "$HOME" {
+		return redacted
+	}
+	if strings.HasPrefix(redacted, "$HOME/") {
+		if !safeMCPRelativeRef(strings.TrimPrefix(redacted, "$HOME/")) {
+			return redactedValue
+		}
 		return filepath.ToSlash(redacted)
 	}
-	return "config-relative/" + filepath.ToSlash(filepath.Clean(cwd))
+	if !safeMCPRelativeRef(cwd) {
+		return redactedValue
+	}
+	return "config-relative/" + filepath.ToSlash(cwd)
+}
+
+func safeMCPRelativeRef(value string) bool {
+	if value == "" || len(value) > maxMCPSemanticFieldBytes || !utf8.ValidString(value) || strings.ContainsRune(value, '\\') || filepath.IsAbs(value) || filepath.Clean(value) != value || value == "." || value == ".." || strings.HasPrefix(value, ".."+string(filepath.Separator)) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func absoluteURL(value string) bool {
@@ -619,24 +879,41 @@ func credentialFlag(value string) bool {
 	return value == "-H" || value == "-e" || sensitiveLongFlag(value)
 }
 
-func combinedCredentialFlag(value string) (string, bool) {
+func combinedCredentialFlag(value string) (prefix string, consumeNext, sensitive bool) {
 	lower := strings.ToLower(value)
-	if strings.HasPrefix(value, "-H") && len(value) > 2 {
-		return value[:2], true
+	if (strings.HasPrefix(value, "-H") || strings.HasPrefix(value, "-e")) && len(value) > 2 {
+		prefix = value[:2]
+		if value[2] == ':' || value[2] == '=' {
+			prefix += value[2:3]
+			return prefix, len(value) == 3, true
+		}
+		if privacy.IsRedactedPlaceholder(value[2:]) || mcpLongFlagCharacter(value[2]) {
+			return prefix, false, true
+		}
+		return "", false, true
+	}
+	if prefix, attached := attachedSensitiveLongFlag(value); attached {
+		return prefix, prefix != "" && len(prefix) == len(value), true
+	}
+	if separator := strings.IndexAny(value, "=:"); separator > 2 {
+		key := value[:separator]
+		if sensitiveLongFlag(key) || sensitiveName(key) {
+			return value[:separator+1], separator+1 == len(value), true
+		}
 	}
 	for _, flag := range []string{"--api-key", "--apikey", "--token"} {
 		if strings.HasPrefix(lower, flag) && len(value) > len(flag) {
 			if flag == "--token" && strings.HasPrefix(lower[len(flag):], "izer") {
-				return "", false
+				return "", false, false
 			}
-			return value[:len(flag)], true
+			return value[:len(flag)], false, true
 		}
 	}
-	return "", false
+	return "", false, false
 }
 
 func sensitiveLongFlag(value string) bool {
-	if !strings.HasPrefix(value, "--") {
+	if !validMCPLongFlag(value) {
 		return false
 	}
 	name := strings.TrimPrefix(value, "--")
@@ -646,6 +923,39 @@ func sensitiveLongFlag(value string) bool {
 		}
 	}
 	return hasSensitiveComponent(name)
+}
+
+func attachedSensitiveLongFlag(value string) (canonicalPrefix string, attached bool) {
+	if !strings.HasPrefix(value, "--") {
+		return "", false
+	}
+	end := 2
+	for end < len(value) && mcpLongFlagCharacter(value[end]) {
+		end++
+	}
+	if end == len(value) || end == 2 || !sensitiveLongFlag(value[:end]) {
+		return "", false
+	}
+	if value[end] == ':' || value[end] == '=' {
+		return value[:end+1], true
+	}
+	return "", true
+}
+
+func validMCPLongFlag(value string) bool {
+	if len(value) <= 2 || !strings.HasPrefix(value, "--") {
+		return false
+	}
+	for index := 2; index < len(value); index++ {
+		if !mcpLongFlagCharacter(value[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func mcpLongFlagCharacter(character byte) bool {
+	return character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_'
 }
 
 func sensitiveTextPrefix(value string) (string, bool) {
@@ -661,56 +971,17 @@ func sensitiveTextPrefix(value string) (string, bool) {
 	return "", false
 }
 
+func standaloneSensitiveTextFlag(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return strings.EqualFold(trimmed, "authorization:") || strings.EqualFold(trimmed, "proxy-authorization:")
+}
+
 func sensitiveName(value string) bool {
 	return hasSensitiveComponent(strings.TrimLeft(value, "-"))
 }
 
 func hasSensitiveComponent(value string) bool {
-	if value == "authorizationHelper" || value == "AuthorizationHelper" {
-		return false
-	}
-	if strings.EqualFold(value, "authorizationhelper") {
-		return true
-	}
-	for _, component := range semanticComponents(value) {
-		switch component {
-		case "token", "secret", "password", "passwd", "credential", "credentials",
-			"apikey", "accesskey", "privatekey", "clientsecret", "bearer", "signature", "key",
-			"authorization", "auth", "header", "headers", "env":
-			return true
-		}
-	}
-	return false
-}
-
-func semanticComponents(value string) []string {
-	runes := []rune(value)
-	components := make([]string, 0, 4)
-	for start := 0; start < len(runes); {
-		for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsDigit(runes[start]) {
-			start++
-		}
-		if start == len(runes) {
-			break
-		}
-		end := start
-		for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end])) {
-			end++
-		}
-		word := runes[start:end]
-		wordStart := 0
-		for index := 1; index < len(word); index++ {
-			lowerToUpper := (unicode.IsLower(word[index-1]) || unicode.IsDigit(word[index-1])) && unicode.IsUpper(word[index])
-			acronymToWord := unicode.IsUpper(word[index-1]) && unicode.IsUpper(word[index]) && index+1 < len(word) && unicode.IsLower(word[index+1])
-			if lowerToUpper || acronymToWord {
-				components = append(components, strings.ToLower(string(word[wordStart:index])))
-				wordStart = index
-			}
-		}
-		components = append(components, strings.ToLower(string(word[wordStart:])))
-		start = end
-	}
-	return components
+	return privacy.ContainsCredentialComponent(value)
 }
 
 func redactHomeText(home, value string) string {

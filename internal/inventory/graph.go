@@ -52,7 +52,7 @@ func Build(results []model.CollectorResult) model.Inventory {
 	}
 	sort.Strings(assetIDs)
 
-	inventory := model.Inventory{Assets: make([]model.Asset, 0, len(assetIDs))}
+	inventory := model.Inventory{Assets: make([]model.Asset, 0, len(assetIDs)), Evidence: make([]model.ContentEvidence, 0)}
 	for _, id := range assetIDs {
 		accumulated := assetsByID[id]
 		keys := make([]string, 0, len(accumulated.metadataValues))
@@ -154,10 +154,22 @@ func Build(results []model.CollectorResult) model.Inventory {
 	return inventory
 }
 
+// NormalizeEvidence returns a deterministically ID-ordered copy of evidence.
+// Evidence is appended after discovery graph construction, so it is normalized
+// separately from Build.
+func NormalizeEvidence(evidence []model.ContentEvidence) []model.ContentEvidence {
+	normalized := append([]model.ContentEvidence(nil), evidence...)
+	sort.SliceStable(normalized, func(i, j int) bool {
+		return normalized[i].ID < normalized[j].ID
+	})
+	return normalized
+}
+
 // Diff compares normalized inventory entities in deterministic entity and ID order.
 func Diff(previous, current model.Inventory) model.Delta {
 	delta := model.Delta{Changes: make([]model.Change, 0)}
 	appendEntityChanges(&delta.Changes, model.ChangeEntityAsset, canonicalAssetsByID(previous.Assets), canonicalAssetsByID(current.Assets))
+	appendEntityChanges(&delta.Changes, model.ChangeEntityEvidence, canonicalEvidenceByID(previous.Evidence), canonicalEvidenceByID(current.Evidence))
 	appendEntityChanges(&delta.Changes, model.ChangeEntityObservation, canonicalObservationsForDiffByID(previous.Observations), canonicalObservationsForDiffByID(current.Observations))
 	sort.Slice(delta.Changes, func(i, j int) bool {
 		left, right := delta.Changes[i], delta.Changes[j]
@@ -224,6 +236,15 @@ func canonicalAssetsByID(assets []model.Asset) map[string][]byte {
 
 func canonicalObservationsForDiffByID(observations []model.Observation) map[string][]byte {
 	return canonicalValuesByID(observations, func(observation model.Observation) string { return observation.ID }, canonicalObservation)
+}
+
+func canonicalEvidenceByID(evidence []model.ContentEvidence) map[string][]byte {
+	return canonicalValuesByID(evidence, func(value model.ContentEvidence) string { return value.ID }, canonicalEvidence)
+}
+
+func canonicalEvidence(evidence model.ContentEvidence) []byte {
+	canonical, _ := json.Marshal(evidence)
+	return canonical
 }
 
 func canonicalValuesByID[T any](values []T, id func(T) string, canonicalize func(T) []byte) map[string][]byte {

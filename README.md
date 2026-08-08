@@ -2,22 +2,23 @@
 
 **Initialize Your Software Supply Chain Security.**
 
-SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain. The current foundation provides macOS local inventory within versioned developer-tool catalogs and configured project roots, records a local baseline, and reports explicit target coverage.
+SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain. The current build provides macOS local inventory within versioned developer-tool catalogs and configured project roots, records a local baseline with bounded local content evidence, and reports explicit target and evidence coverage.
 
-This foundation is not an EDR. There is no daemon, kernel sensor, arbitrary personal-file scan, malware verdict, or safety guarantee. It does not continuously monitor processes or files. Missing or failed coverage remains visible instead of being silently treated as success.
+This tool is not an EDR. There is no daemon, kernel sensor, arbitrary personal-file scan, malware verdict, or safety guarantee. It does not continuously monitor processes or files. Missing or failed coverage remains visible instead of being silently treated as success.
 
 ## Current coverage
 
-The baseline collector inventories:
+The baseline collector inventories and, where a bounded local implementation exists, hashes:
 
-- manifest-backed plugins and skills found in supported fixed Claude, Codex, and Cursor catalog paths;
-- user-level and project-level MCP configurations and their declared commands or endpoints;
-- VS Code, Cursor, Windsurf, and JetBrains extensions;
-- global developer package ecosystems and Docker only when command probes are explicitly enabled.
+- manifest-backed plugins and skills found in supported fixed Claude, Codex, and Cursor catalog paths, with SHA-256 file evidence for each recognized plugin manifest and skill `SKILL.md` document plus a bounded `ssc-init.tree.v1` payload-tree digest per plugin or skill directory;
+- VS Code, VS Code Insiders, VS Code OSS, Cursor, Windsurf, and JetBrains extensions, with file evidence for each supported manifest and each declared `main`/`browser` entry point validated beneath the extension root, plus a bounded payload-tree digest (JetBrains trees include JAR bytes without enumerating or analyzing archive members);
+- user-level and project-level MCP configurations, with one secret-free semantic digest (`ssc-init.semantic-mcp.v1`) per parsed declaration — raw MCP configuration files are never hashed, persisted, or exposed because they can contain credentials;
+- an exact, closed project manifest and lockfile filename catalog (npm-compatible, Python, Go, Cargo, and Homebrew names) inside explicitly configured project roots, with per-file SHA-256 evidence; project source trees, vendored dependencies, and caches are never hashed;
+- global developer package ecosystems and Docker only when command probes are explicitly enabled; discovered package payloads and Docker image identities receive explicit `unsupported` evidence rather than a claim.
 
-Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed.
+Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Plugin/project content hashing, threat intelligence (TI), Git-managed policy, organization integrations, host adapters, warnings, and blocking remain later programs.
+Package payload hashing, immutable Docker image identity, code-signature validation, threat intelligence (TI), behavior analysis, Git-managed policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs.
 
 ## Commands
 
@@ -32,7 +33,7 @@ ssc-init scan --baseline --json --project-root '$HOME/Projects' --project-root '
 ssc-init status --json
 ```
 
-`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery and persists one baseline. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted full inventory snapshot.
+`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim.
 
 State is local-first and stored at:
 

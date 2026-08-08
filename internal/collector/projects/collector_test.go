@@ -11,9 +11,218 @@ import (
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/evidence"
+	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/testutil"
 )
+
+func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "package.json"), `{"name":"fixture"}`)
+	roots, err := projects.ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Assets) != 1 || result.Assets[0].Type != model.AssetProject || len(result.Observations) != 1 {
+		t.Fatalf("assets=%+v observations=%+v", result.Assets, result.Observations)
+	}
+	observation := result.Observations[0]
+	if observation.AssetID != result.Assets[0].ID || observation.LocationRef != "$HOME/workspace" || observation.Metadata["root_ref"] != "$HOME/workspace" {
+		t.Fatalf("observation=%+v asset=%+v", observation, result.Assets[0])
+	}
+	if len(result.LocalEvidenceTargets) != 1 {
+		t.Fatalf("evidence targets=%+v", result.LocalEvidenceTargets)
+	}
+	target := result.LocalEvidenceTargets[0]
+	if target.TargetID != "projects.manifest.package.json" || target.AssetID != observation.AssetID || target.ObservationID != observation.ID || target.Subject != "project-manifest:package.json" || target.RootPath != root || target.RelativePath != "package.json" || target.PresetStatus != "" {
+		t.Fatalf("evidence target=%+v", target)
+	}
+	graph := inventory.Build([]model.CollectorResult{result})
+	collection := (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete || collection.Evidence[0].Digest == "" || collection.Evidence[0].ObservationID != observation.ID {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	names := []string{
+		"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+		"pyproject.toml", "Pipfile", "requirements.txt", "poetry.lock", "Pipfile.lock", "uv.lock", "go.mod", "go.sum",
+		"Cargo.toml", "Cargo.lock", "Brewfile",
+	}
+	for _, name := range names {
+		writeProjectFile(t, filepath.Join(root, name), name+" contents")
+	}
+	for _, name := range []string{"requirements-dev.txt", "Package.json", "package.json.bak", "xCargo.toml"} {
+		writeProjectFile(t, filepath.Join(root, name), "must not be evidence")
+	}
+	result := collectProjectsAt(t, home, root)
+	if len(result.Assets) != 1 || len(result.Observations) != 1 || len(result.LocalEvidenceTargets) != len(names) {
+		t.Fatalf("assets=%+v observations=%+v targets=%+v", result.Assets, result.Observations, result.LocalEvidenceTargets)
+	}
+	wantTargets := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		prefix := "projects.manifest."
+		if strings.Contains(projectEvidenceSubjectForTest(name), "lockfile") {
+			prefix = "projects.lockfile."
+		}
+		wantTargets[prefix+name] = struct{}{}
+	}
+	for _, target := range result.LocalEvidenceTargets {
+		if _, ok := wantTargets[target.TargetID]; !ok || target.Subject != projectEvidenceSubjectForTest(filepath.Base(target.RelativePath)) || target.ObservationID != result.Observations[0].ID || target.AssetID != result.Assets[0].ID {
+			t.Fatalf("unexpected target=%+v", target)
+		}
+		delete(wantTargets, target.TargetID)
+	}
+	if len(wantTargets) != 0 {
+		t.Fatalf("missing targets=%v", wantTargets)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if collection.Coverage.Status != model.CoverageComplete || len(collection.Evidence) != len(names) {
+		t.Fatalf("collection=%+v", collection)
+	}
+	for _, record := range collection.Evidence {
+		if record.Status != model.EvidenceComplete || record.Algorithm != "sha256" || len(record.Digest) != 64 {
+			t.Fatalf("record=%+v", record)
+		}
+	}
+}
+
+func TestProjectEvidenceSeparatesProjectsSharingBasenames(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "a", "package.json"), `{"name":"same"}`)
+	writeProjectFile(t, filepath.Join(root, "b", "package.json"), `{"name":"same"}`)
+	result := collectProjectsAt(t, home, root)
+	if len(result.Assets) != 2 || len(result.Observations) != 2 || len(result.LocalEvidenceTargets) != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.LocalEvidenceTargets[0].TargetID != result.LocalEvidenceTargets[1].TargetID || result.LocalEvidenceTargets[0].ObservationID == result.LocalEvidenceTargets[1].ObservationID || result.LocalEvidenceTargets[0].AssetID == result.LocalEvidenceTargets[1].AssetID {
+		t.Fatalf("targets=%+v", result.LocalEvidenceTargets)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 2 || collection.Evidence[0].ID == collection.Evidence[1].ID {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestProjectEvidenceOversizeDoesNotSuppressSafeSibling(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	large := filepath.Join(root, "package-lock.json")
+	writeProjectFile(t, large, "x")
+	if err := os.Truncate(large, (32<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, filepath.Join(root, "package.json"), `{"name":"safe"}`)
+	result := collectProjectsAt(t, home, root)
+	if len(result.LocalEvidenceTargets) != 2 {
+		t.Fatalf("targets=%+v", result.LocalEvidenceTargets)
+	}
+	for _, target := range result.LocalEvidenceTargets {
+		if target.TargetID == "projects.lockfile.package-lock.json" && (target.PresetStatus != model.EvidenceOversize || target.RootPath != "" || target.RelativePath != "") {
+			t.Fatalf("oversize target=%+v", target)
+		}
+	}
+	collection := collectProjectEvidence(t, home, result)
+	statuses := map[string]model.EvidenceStatus{}
+	for _, record := range collection.Evidence {
+		statuses[record.Subject] = record.Status
+	}
+	if statuses["project-manifest:package.json"] != model.EvidenceComplete || statuses["project-lockfile:package-lock.json"] != model.EvidenceOversize {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestProjectEvidenceDetectsMutationAfterCollection(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	manifest := filepath.Join(root, "package.json")
+	writeProjectFile(t, manifest, `{"name":"before"}`)
+	result := collectProjectsAt(t, home, root)
+	writeProjectFile(t, manifest, `{"name":"after-longer"}`)
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceUnavailable || len(collection.Evidence[0].Errors) != 1 || collection.Evidence[0].Errors[0].Code != "identity_changed" {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestProjectEvidenceRuntimePathsNeverSerialize(t *testing.T) {
+	home := t.TempDir()
+	external := filepath.Join(t.TempDir(), "secret-client-name")
+	writeProjectFile(t, filepath.Join(external, "package.json"), `{"token":"RAW_PROJECT_CONTENT_SECRET"}`)
+	result := collectProjectsAt(t, home, external)
+	graph := inventory.Build([]model.CollectorResult{result})
+	collection := (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+	encoded, err := json.Marshal(struct {
+		Result     model.CollectorResult
+		Inventory  model.Inventory
+		Collection evidence.Collection
+	}{result, graph, collection})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Catalog target IDs and subjects intentionally disclose only the closed
+	// basename vocabulary; runtime absolute and project directory names do not.
+	for _, forbidden := range []string{external, "secret-client-name", "RAW_PROJECT_CONTENT_SECRET"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("serialized result leaked %q: %s", forbidden, encoded)
+		}
+	}
+	if len(result.Observations) != 1 || !strings.HasPrefix(result.Observations[0].LocationRef, "external-root-1/path-sha256:") || len(collection.Evidence) != 1 {
+		t.Fatalf("observation=%+v", result.Observations)
+	}
+}
+
+func TestEveryProjectCatalogFileMutationChangesOnlyItsEvidence(t *testing.T) {
+	names := []string{
+		"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+		"pyproject.toml", "Pipfile", "requirements.txt", "poetry.lock", "Pipfile.lock", "uv.lock", "go.mod", "go.sum",
+		"Cargo.toml", "Cargo.lock", "Brewfile",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			root := filepath.Join(home, "workspace")
+			path := filepath.Join(root, name)
+			sibling := "package.json"
+			if name == sibling {
+				sibling = "requirements.txt"
+			}
+			writeProjectFile(t, path, "before")
+			writeProjectFile(t, filepath.Join(root, sibling), "stable sibling")
+			beforeCollection, beforeInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
+			writeProjectFile(t, path, "after")
+			afterCollection, afterInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
+			if len(beforeCollection.Evidence) != 2 || len(afterCollection.Evidence) != 2 {
+				t.Fatalf("before=%+v after=%+v", beforeCollection, afterCollection)
+			}
+			beforeBySubject := evidenceBySubject(beforeCollection.Evidence)
+			afterBySubject := evidenceBySubject(afterCollection.Evidence)
+			mutatedSubject := projectEvidenceSubjectForTest(name)
+			siblingSubject := projectEvidenceSubjectForTest(sibling)
+			if beforeBySubject[mutatedSubject].ID == "" || beforeBySubject[mutatedSubject].ID != afterBySubject[mutatedSubject].ID || beforeBySubject[mutatedSubject].Digest == afterBySubject[mutatedSubject].Digest {
+				t.Fatalf("mutated evidence before=%+v after=%+v", beforeBySubject[mutatedSubject], afterBySubject[mutatedSubject])
+			}
+			if beforeBySubject[siblingSubject].ID == "" || !reflect.DeepEqual(beforeBySubject[siblingSubject], afterBySubject[siblingSubject]) {
+				t.Fatalf("sibling evidence changed: before=%+v after=%+v", beforeBySubject[siblingSubject], afterBySubject[siblingSubject])
+			}
+			delta := inventory.Diff(beforeInventory, afterInventory)
+			want := []model.Change{{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: beforeBySubject[mutatedSubject].ID}}
+			if !reflect.DeepEqual(delta.Changes, want) {
+				t.Fatalf("delta=%+v want=%+v before=%+v after=%+v", delta.Changes, want, beforeInventory.Evidence, afterInventory.Evidence)
+			}
+		})
+	}
+}
 
 func TestProjectCollectorAdvertisesOnlyRootTarget(t *testing.T) {
 	home := t.TempDir()
@@ -161,11 +370,11 @@ func TestProjectCollectorRecognizesOnlyFixedProjectConfigs(t *testing.T) {
 		t.Fatalf("targets=%+v", got.Targets)
 	}
 	target := got.Targets[0]
-	if target.TargetID != "projects.root" || target.InstanceRef != "$HOME/Projects" || target.Status != model.TargetComplete || target.Assets != 5 || target.Observations != 4 {
+	if target.TargetID != "projects.root" || target.InstanceRef != "$HOME/Projects" || target.Status != model.TargetComplete || target.Assets != 5 || target.Observations != 5 {
 		t.Fatalf("target=%+v", target)
 	}
-	if len(got.Assets) != 5 || len(got.Observations) != 4 || len(got.LocalTargets) != 4 || len(got.Relationships) != 4 {
-		t.Fatalf("assets=%d observations=%d localTargets=%d relationships=%d", len(got.Assets), len(got.Observations), len(got.LocalTargets), len(got.Relationships))
+	if len(got.Assets) != 5 || len(got.Observations) != 5 || len(got.LocalTargets) != 4 || len(got.LocalEvidenceTargets) != 1 || len(got.Relationships) != 4 {
+		t.Fatalf("assets=%d observations=%d localTargets=%d localEvidenceTargets=%d relationships=%d", len(got.Assets), len(got.Observations), len(got.LocalTargets), len(got.LocalEvidenceTargets), len(got.Relationships))
 	}
 
 	wantTargets := []model.LocalTarget{
@@ -192,7 +401,7 @@ func TestProjectCollectorRecognizesOnlyFixedProjectConfigs(t *testing.T) {
 		}
 	}
 	for _, observation := range got.Observations {
-		if !strings.HasPrefix(observation.LocationRef, "$HOME/Projects/sample/") || observation.ProjectID == "" {
+		if !strings.HasPrefix(observation.LocationRef, "$HOME/Projects/sample") || observation.ProjectID == "" {
 			t.Fatalf("observation=%+v", observation)
 		}
 		if _, exists := assetIDs[observation.AssetID]; !exists {
@@ -275,10 +484,19 @@ func TestProjectCollectorHidesExternalAbsoluteLocations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Observations) != 1 || !strings.HasPrefix(got.Observations[0].LocationRef, "external-root-1/path-sha256:") {
+	if len(got.Observations) != 2 {
 		t.Fatalf("observations=%+v", got.Observations)
 	}
-	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != rawConfig || got.LocalTargets[0].InstanceRef != got.Observations[0].LocationRef {
+	configObservation := model.Observation{}
+	for _, observation := range got.Observations {
+		if observation.Source == "mcp.shared.project" {
+			configObservation = observation
+		}
+		if !strings.HasPrefix(observation.LocationRef, "external-root-1/path-sha256:") {
+			t.Fatalf("unsafe external observation=%+v", observation)
+		}
+	}
+	if len(got.LocalTargets) != 1 || got.LocalTargets[0].Path != rawConfig || got.LocalTargets[0].InstanceRef != configObservation.LocationRef {
 		t.Fatalf("localTargets=%+v observations=%+v", got.LocalTargets, got.Observations)
 	}
 	encoded, err := json.Marshal(got)
@@ -298,6 +516,52 @@ func writeProjectFile(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func collectProjectsAt(t *testing.T, home, root string) model.CollectorResult {
+	t.Helper()
+	roots, err := projects.ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func collectProjectEvidence(t *testing.T, home string, result model.CollectorResult) evidence.Collection {
+	t.Helper()
+	graph := inventory.Build([]model.CollectorResult{result})
+	return (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+}
+
+func collectProjectInventory(t *testing.T, home string, result model.CollectorResult) (evidence.Collection, model.Inventory) {
+	t.Helper()
+	graph := inventory.Build([]model.CollectorResult{result})
+	collection := (evidence.Engine{}).Collect(context.Background(), testutil.Environment(t, home), graph, []model.CollectorResult{result})
+	graph.Evidence = inventory.NormalizeEvidence(collection.Evidence)
+	return collection, graph
+}
+
+func evidenceBySubject(values []model.ContentEvidence) map[string]model.ContentEvidence {
+	result := make(map[string]model.ContentEvidence, len(values))
+	for _, value := range values {
+		result[value.Subject] = value
+	}
+	return result
+}
+
+func projectEvidenceSubjectForTest(name string) string {
+	lockfiles := map[string]struct{}{
+		"package-lock.json": {}, "npm-shrinkwrap.json": {}, "pnpm-lock.yaml": {}, "yarn.lock": {}, "bun.lock": {}, "bun.lockb": {},
+		"poetry.lock": {}, "Pipfile.lock": {}, "uv.lock": {}, "go.sum": {}, "Cargo.lock": {},
+	}
+	if _, ok := lockfiles[name]; ok {
+		return "project-lockfile:" + name
+	}
+	return "project-manifest:" + name
 }
 
 func assertRejectedRoots(t *testing.T, roots []projects.Root, forbidden ...string) {

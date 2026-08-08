@@ -703,7 +703,7 @@ func TestHostileMalformedAndSymlinkSiblingsRemainPartialWithoutLosingSafeInvento
 	assertPrivacyBoundary(t, result, hostileIdentity, outside, "outside-fixture")
 }
 
-func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV2(t *testing.T) {
+func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV3AsLegacyInventory(t *testing.T) {
 	databasePath := createMigrationThreeLegacyDatabase(t)
 	snapshots, err := store.Open(databasePath)
 	if err != nil {
@@ -726,20 +726,38 @@ func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV2(t *testing.T) {
 	if !reflect.DeepEqual(snapshot.Scan.Scope, model.ScanScope{}) || snapshot.Inventory.Observations != nil {
 		t.Fatalf("legacy snapshot gained v2-only state: scope=%+v observations=%+v", snapshot.Scan.Scope, snapshot.Inventory.Observations)
 	}
+	if snapshot.Inventory.Evidence != nil || !reflect.DeepEqual(snapshot.Scan.EvidenceCoverage, model.EvidenceCoverage{}) {
+		t.Fatalf("legacy snapshot invented evidence state: %+v %+v", snapshot.Inventory.Evidence, snapshot.Scan.EvidenceCoverage)
+	}
 
-	status := readMatrixStatusFromReader(t, snapshots)
-	if status.SchemaVersion != "ssc-init.status.v2" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
+	// A v1 snapshot cannot substantiate v3 evidence claims: the status contract
+	// is v3, but the payload is explicitly legacy with nil evidence and no
+	// scope, coverage, or evidence-coverage echo.
+	raw := readMatrixStatusRaw(t, snapshots)
+	var status matrixStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode status: %v\n%s", err, raw)
+	}
+	if status.SchemaVersion != "ssc-init.status.v3" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
 		t.Fatalf("legacy status=%+v", status)
 	}
-	if status.Scope != nil || status.Coverage != nil || status.Inventory == nil {
-		t.Fatalf("legacy status exposed v2 provenance: %+v", status)
+	if status.Scope != nil || status.Coverage != nil || status.EvidenceCoverage != nil || status.Inventory == nil {
+		t.Fatalf("legacy status exposed v3 provenance it cannot substantiate: %+v", status)
 	}
-	if !reflect.DeepEqual(*status.Inventory, wantInventory) || status.Inventory.Observations != nil {
+	if !reflect.DeepEqual(*status.Inventory, wantInventory) || status.Inventory.Observations != nil || status.Inventory.Evidence != nil {
 		t.Fatalf("legacy status inventory=\n%#v\nwant=\n%#v", *status.Inventory, wantInventory)
+	}
+	if !bytes.Contains(raw, []byte(`"evidence":null`)) {
+		t.Fatalf("legacy status must encode \"evidence\":null: %s", raw)
+	}
+	for _, forbidden := range []string{`"scope"`, `"coverage"`, `"evidenceCoverage"`} {
+		if bytes.Contains(raw, []byte(forbidden)) {
+			t.Fatalf("legacy status leaked %s: %s", forbidden, raw)
+		}
 	}
 }
 
-func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
+func TestV3BaselineReopenStatusCacheWarmRescanAndObservedLocationDelta(t *testing.T) {
 	home := copyOfficialFixtureHome(t)
 	databasePath := filepath.Join(privateMatrixTempDir(t), "state.db")
 	const extensionAssetID = "ide-extension:vscode:acme.safe@1.2.3"
@@ -764,22 +782,57 @@ func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
 		scanID: "00000000-0000-4000-8000-000000000013",
 	})
 	status := readMatrixStatusFromPath(t, databasePath)
-	if status.SchemaVersion != "ssc-init.status.v2" || status.InventorySchemaVersion != "ssc-init.scan.v2" || status.LegacyInventory || !status.Initialized {
-		t.Fatalf("v2 status provenance=%+v", status)
+	if status.SchemaVersion != "ssc-init.status.v3" || status.InventorySchemaVersion != "ssc-init.scan.v3" || status.LegacyInventory || !status.Initialized {
+		t.Fatalf("v3 status provenance=%+v", status)
 	}
 	if status.Scope == nil || !reflect.DeepEqual(*status.Scope, first.Scan.Scope) || !reflect.DeepEqual(status.Coverage, first.Scan.Coverage) || status.Inventory == nil || !reflect.DeepEqual(*status.Inventory, first.Inventory) {
-		t.Fatalf("reopened v2 status did not preserve the full snapshot: %+v", status)
+		t.Fatalf("reopened v3 status did not preserve the full snapshot: %+v", status)
+	}
+	if status.EvidenceCoverage == nil || !reflect.DeepEqual(*status.EvidenceCoverage, first.Scan.EvidenceCoverage) {
+		t.Fatalf("reopened v3 status evidence coverage=%+v want=%+v", status.EvidenceCoverage, first.Scan.EvidenceCoverage)
 	}
 	if got := matrixObservationsForAsset(first.Inventory, extensionAssetID); !reflect.DeepEqual(got, []model.Observation{preObservation}) {
 		t.Fatalf("pre-move extension observation=\n%+v\nwant=\n%+v", got, preObservation)
 	}
 
+	// A cache-warm rescan of an unchanged home reuses complete leaf digests.
+	// Evidence diffing excludes only observation timestamps, so the recorded
+	// tree cache provenance flipping miss->hit is a deterministic "changed"
+	// entry for exactly the payload-tree records; every digest stays
+	// identical.
 	second := runIsolatedBaseline(t, baselineOptions{
 		home: home, databasePath: databasePath,
 		scanID: "00000000-0000-4000-8000-000000000014",
 	})
-	if len(second.Delta.Changes) != 0 || !reflect.DeepEqual(second.Inventory, first.Inventory) || !reflect.DeepEqual(second.Scan.Scope, first.Scan.Scope) || !reflect.DeepEqual(second.Scan.Coverage, first.Scan.Coverage) {
-		t.Fatalf("unchanged second scan delta=%+v", second.Delta)
+	wantWarmChanges := make([]model.Change, 0, 4)
+	firstEvidenceByID := map[string]model.ContentEvidence{}
+	for _, record := range first.Inventory.Evidence {
+		firstEvidenceByID[record.ID] = record
+		if record.Kind == model.EvidenceTreeSHA256 && record.Metadata["cache"] == "miss" {
+			wantWarmChanges = append(wantWarmChanges, model.Change{Kind: model.ChangeChanged, Entity: model.ChangeEntityEvidence, EntityID: record.ID})
+		}
+	}
+	if len(wantWarmChanges) == 0 {
+		t.Fatal("fixture home produced no store-cached payload trees")
+	}
+	sort.Slice(wantWarmChanges, func(i, j int) bool { return wantWarmChanges[i].EntityID < wantWarmChanges[j].EntityID })
+	if !reflect.DeepEqual(second.Delta.Changes, wantWarmChanges) {
+		t.Fatalf("cache-warm rescan delta=\n%+v\nwant exactly=\n%+v", second.Delta.Changes, wantWarmChanges)
+	}
+	for _, record := range second.Inventory.Evidence {
+		previous, exists := firstEvidenceByID[record.ID]
+		if !exists {
+			t.Fatalf("cache-warm rescan invented evidence %+v", record)
+		}
+		if record.Digest != previous.Digest || record.Status != previous.Status {
+			t.Fatalf("cache-warm rescan altered content evidence:\n%+v\nwas\n%+v", record, previous)
+		}
+		if previous.Metadata["cache"] == "miss" && record.Metadata["cache"] != "hit" {
+			t.Fatalf("cache-warm rescan did not hit the content cache: %+v", record)
+		}
+	}
+	if len(second.Inventory.Evidence) != len(first.Inventory.Evidence) || !reflect.DeepEqual(second.Inventory.Assets, first.Inventory.Assets) || !reflect.DeepEqual(second.Inventory.Observations, first.Inventory.Observations) || !reflect.DeepEqual(second.Scan.Scope, first.Scan.Scope) || !reflect.DeepEqual(second.Scan.Coverage, first.Scan.Coverage) {
+		t.Fatalf("unchanged second scan drifted beyond cache provenance: %+v", second.Delta)
 	}
 
 	oldLocation := filepath.Join(home, ".vscode", "extensions", "acme.safe-1.2.3")
@@ -798,13 +851,44 @@ func TestV2BaselineReopenStatusUnchangedAndObservedLocationDelta(t *testing.T) {
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityObservation, EntityID: preObservation.ID},
 		{Kind: model.ChangeAdded, Entity: model.ChangeEntityObservation, EntityID: postObservation.ID},
 	}
-	sort.Slice(wantChanges, func(i, j int) bool { return wantChanges[i].EntityID < wantChanges[j].EntityID })
-	if !reflect.DeepEqual(third.Delta.Changes, wantChanges) {
+	// The moved observation carries its evidence identities with it: every
+	// evidence record bound to the old observation is removed and re-added
+	// under the new observation with an identical digest.
+	movedDigests := map[string]string{}
+	for _, record := range second.Inventory.Evidence {
+		if record.ObservationID == preObservation.ID {
+			wantChanges = append(wantChanges, model.Change{Kind: model.ChangeRemoved, Entity: model.ChangeEntityEvidence, EntityID: record.ID})
+			movedDigests[record.Subject] = record.Digest
+		}
+	}
+	if len(movedDigests) != 3 {
+		t.Fatalf("moved extension evidence subjects=%v want manifest, entrypoint-main, payload-tree", movedDigests)
+	}
+	for _, record := range third.Inventory.Evidence {
+		if record.ObservationID != postObservation.ID {
+			continue
+		}
+		wantChanges = append(wantChanges, model.Change{Kind: model.ChangeAdded, Entity: model.ChangeEntityEvidence, EntityID: record.ID})
+		if record.Digest != movedDigests[record.Subject] {
+			t.Fatalf("relocated %s evidence digest drifted: %+v", record.Subject, record)
+		}
+	}
+	sort.Slice(wantChanges, func(i, j int) bool {
+		left, right := wantChanges[i], wantChanges[j]
+		if left.Entity != right.Entity {
+			return left.Entity < right.Entity
+		}
+		return left.EntityID < right.EntityID
+	})
+	if len(wantChanges) != 8 || !reflect.DeepEqual(third.Delta.Changes, wantChanges) {
 		t.Fatalf("observed-location delta=\n%+v\nwant exactly=\n%+v", third.Delta.Changes, wantChanges)
 	}
 	latestStatus := readMatrixStatusFromPath(t, databasePath)
 	if latestStatus.Inventory == nil || !reflect.DeepEqual(*latestStatus.Inventory, third.Inventory) || latestStatus.Scope == nil || !reflect.DeepEqual(*latestStatus.Scope, third.Scan.Scope) || !reflect.DeepEqual(latestStatus.Coverage, third.Scan.Coverage) {
 		t.Fatalf("latest status did not use the third full snapshot: %+v", latestStatus)
+	}
+	if latestStatus.EvidenceCoverage == nil || !reflect.DeepEqual(*latestStatus.EvidenceCoverage, third.Scan.EvidenceCoverage) {
+		t.Fatalf("latest status evidence coverage=%+v", latestStatus.EvidenceCoverage)
 	}
 }
 
@@ -1341,21 +1425,28 @@ type matrixStatus struct {
 	LegacyInventory        bool                    `json:"legacyInventory"`
 	Scope                  *model.ScanScope        `json:"scope"`
 	Coverage               []model.CollectorResult `json:"coverage"`
+	EvidenceCoverage       *model.EvidenceCoverage `json:"evidenceCoverage"`
 	Inventory              *model.Inventory        `json:"inventory"`
 }
 
 func readMatrixStatusFromReader(t *testing.T, reader cli.StatusReader) matrixStatus {
+	t.Helper()
+	raw := readMatrixStatusRaw(t, reader)
+	var status matrixStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode status: %v\n%s", err, raw)
+	}
+	return status
+}
+
+func readMatrixStatusRaw(t *testing.T, reader cli.StatusReader) []byte {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	code := (cli.App{StatusReader: reader}).Run(context.Background(), []string{"status", "--json"}, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 {
 		t.Fatalf("status exit=%d stderr=%q", code, stderr.String())
 	}
-	var status matrixStatus
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		t.Fatalf("decode status: %v\n%s", err, stdout.String())
-	}
-	return status
+	return stdout.Bytes()
 }
 
 func readMatrixStatusFromPath(t *testing.T, databasePath string) matrixStatus {

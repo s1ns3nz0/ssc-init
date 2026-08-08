@@ -4,6 +4,8 @@ package ide
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"io/fs"
@@ -202,21 +204,23 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 			continue
 		}
 		manifestRelative := filepath.ToSlash(filepath.Join(entry.Name(), declaration.manifestPath))
-		contents, code := readManifest(ctx, extensionRoot, declaration.manifestPath, func() {
+		manifest, code := readManifest(ctx, extensionRoot, declaration.manifestPath, func() {
 			c.invokeAfterManifestRead(declaration.spec.ID, manifestRelative)
 		})
-		_ = extensionRoot.Close()
 		if err := ctx.Err(); err != nil {
+			_ = extensionRoot.Close()
 			return err
 		}
 		manifestPath := filepath.Join(entryPath, declaration.manifestPath)
 		if code != "" {
+			_ = extensionRoot.Close()
 			issue := manifestError(code, redactPath(home, manifestPath))
 			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
 			continue
 		}
-		evidence, err := parseVSCodeManifest(contents, declaration.spec.Host, home)
+		parsed, err := parseVSCodeManifest(manifest.contents, declaration.spec.Host, home)
 		if err != nil {
+			_ = extensionRoot.Close()
 			code, message := "manifest_invalid", "IDE extension manifest is invalid"
 			if errors.Is(err, errRejectedIDEIdentity) {
 				code, message = "identity_rejected", "IDE extension identity was rejected"
@@ -224,9 +228,17 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 			c.addIssue(result, &target, model.TargetPartial, code, message, "")
 			continue
 		}
-		if !c.appendEvidence(home, declaration, "", entryPath, manifestRelative, evidence, result, &target) {
+		manifestAnchor, anchored := captureIDEManifestAnchor(extensionsRoot, extensionRoot, entry.Name(), manifestRelative, manifest)
+		if !anchored {
+			_ = extensionRoot.Close()
+			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension evidence anchor identity changed", redactPath(home, entryPath))
 			continue
 		}
+		if !c.appendEvidence(rootPath, home, declaration, "", entryPath, manifestRelative, parsed, result, &target, manifestAnchor) {
+			_ = extensionRoot.Close()
+			continue
+		}
+		_ = extensionRoot.Close()
 	}
 	result.Targets = append(result.Targets, target)
 	return nil
@@ -427,8 +439,8 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			continue
 		}
 		metaRoot, err := platform.OpenVerifiedRoot(ctx, pluginRoot, "META-INF")
-		_ = pluginRoot.Close()
 		if err != nil {
+			_ = pluginRoot.Close()
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -436,21 +448,24 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			continue
 		}
 		manifestRelative := filepath.ToSlash(filepath.Join(plugin.Name(), "META-INF", "plugin.xml"))
-		contents, code := readManifest(ctx, metaRoot, "plugin.xml", func() {
+		manifest, code := readManifest(ctx, metaRoot, "plugin.xml", func() {
 			c.invokeAfterManifestRead(declaration.spec.ID, filepath.ToSlash(filepath.Join(product, "plugins", manifestRelative)))
 		})
 		_ = metaRoot.Close()
 		if err := ctx.Err(); err != nil {
+			_ = pluginRoot.Close()
 			return err
 		}
 		manifestPath := filepath.Join(pluginPath, "META-INF", "plugin.xml")
 		if code != "" {
+			_ = pluginRoot.Close()
 			issue := manifestError(code, redactPath(home, manifestPath))
 			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
 			continue
 		}
-		evidence, err := parseJetBrainsManifest(contents)
+		parsed, err := parseJetBrainsManifest(manifest.contents)
 		if err != nil {
+			_ = pluginRoot.Close()
 			code, message := "manifest_invalid", "IDE extension manifest is invalid"
 			if errors.Is(err, errRejectedIDEIdentity) {
 				code, message = "identity_rejected", "IDE extension identity was rejected"
@@ -458,13 +473,20 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 			c.addIssue(result, &target, model.TargetPartial, code, message, "")
 			continue
 		}
-		c.appendEvidence(home, declaration, product, pluginPath, manifestRelative, evidence, result, &target)
+		manifestAnchor, anchored := captureIDEManifestAnchor(pluginsRoot, pluginRoot, plugin.Name(), manifestRelative, manifest)
+		if !anchored {
+			_ = pluginRoot.Close()
+			c.addIssue(result, &target, model.TargetPartial, "identity_changed", "IDE extension evidence anchor identity changed", redactPath(home, pluginPath))
+			continue
+		}
+		c.appendEvidence(filepath.Join(productPath, "plugins"), home, declaration, product, pluginPath, manifestRelative, parsed, result, &target, manifestAnchor)
+		_ = pluginRoot.Close()
 	}
 	result.Targets = append(result.Targets, target)
 	return nil
 }
 
-func (c *ideCollector) appendEvidence(home string, declaration targetDeclaration, product, locationPath, manifestRelative string, evidence manifestEvidence, result *model.CollectorResult, target *model.TargetCoverage) bool {
+func (c *ideCollector) appendEvidence(rootPath, home string, declaration targetDeclaration, product, locationPath, manifestRelative string, evidence manifestEvidence, result *model.CollectorResult, target *model.TargetCoverage, manifestAnchor ideEvidenceAnchor) bool {
 	metadata := make(map[string]string, len(evidence.metadata)+3)
 	for key, value := range evidence.metadata {
 		if value != "" {
@@ -494,6 +516,7 @@ func (c *ideCollector) appendEvidence(home string, declaration targetDeclaration
 	result.Observations = append(result.Observations, observation)
 	target.Assets++
 	target.Observations++
+	c.issueIDEManifestTargets(rootPath, declaration, evidence, observation, result, target, manifestAnchor)
 	return true
 }
 
@@ -601,39 +624,52 @@ func readDirectory(ctx context.Context, root platform.RootedDirectory, limit int
 	return entries, nil
 }
 
-func readManifest(ctx context.Context, root platform.RootedDirectory, name string, afterRead func()) ([]byte, string) {
+type ideManifestRead struct {
+	contents    []byte
+	digest      string
+	size        int64
+	mode        uint32
+	fingerprint platform.FileFingerprint
+}
+
+func readManifest(ctx context.Context, root platform.RootedDirectory, name string, afterRead func()) (ideManifestRead, string) {
 	if err := ctx.Err(); err != nil {
-		return nil, "manifest_unavailable"
+		return ideManifestRead{}, "manifest_unavailable"
 	}
 	file, beforeOpen, opened, err := platform.OpenVerifiedFile(root, name)
 	if err != nil {
-		return nil, "manifest_unavailable"
+		return ideManifestRead{}, "manifest_unavailable"
 	}
 	defer file.Close()
 	if beforeOpen.Size() < 0 || beforeOpen.Size() > maxManifestBytes || opened.Size() < 0 || opened.Size() > maxManifestBytes {
-		return nil, "manifest_oversized"
+		return ideManifestRead{}, "manifest_oversized"
 	}
 	if !sameManifestSnapshot(beforeOpen, opened) {
-		return nil, "manifest_changed"
+		return ideManifestRead{}, "manifest_changed"
 	}
 	contents, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, reader: file}, maxManifestBytes+1))
 	if afterRead != nil {
 		afterRead()
 	}
 	if err != nil {
-		return nil, "manifest_unavailable"
+		return ideManifestRead{}, "manifest_unavailable"
 	}
 	postRead, statErr := file.Stat()
 	if statErr != nil || postRead == nil {
-		return nil, "manifest_unavailable"
+		return ideManifestRead{}, "manifest_unavailable"
 	}
 	if postRead.Size() < 0 || postRead.Size() > maxManifestBytes || len(contents) > maxManifestBytes {
-		return nil, "manifest_oversized"
+		return ideManifestRead{}, "manifest_oversized"
 	}
 	if !sameManifestSnapshot(opened, postRead) || int64(len(contents)) != opened.Size() || int64(len(contents)) != postRead.Size() {
-		return nil, "manifest_changed"
+		return ideManifestRead{}, "manifest_changed"
 	}
-	return contents, ""
+	fingerprint, ok := platform.Fingerprint(postRead)
+	if !ok {
+		return ideManifestRead{}, "manifest_changed"
+	}
+	digest := sha256.Sum256(contents)
+	return ideManifestRead{contents: contents, digest: hex.EncodeToString(digest[:]), size: int64(len(contents)), mode: uint32(postRead.Mode().Perm()), fingerprint: fingerprint}, ""
 }
 
 func sameManifestSnapshot(left, right os.FileInfo) bool {

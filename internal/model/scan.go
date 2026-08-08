@@ -2,6 +2,13 @@ package model
 
 import "time"
 
+// RuntimeEvidenceClearer removes non-serializable evidence state at the end
+// of a collection pass. Implementations must be idempotent because the same
+// hook may be reached through more than one runtime slot.
+type RuntimeEvidenceClearer interface {
+	ClearRuntimeEvidence()
+}
+
 // CoverageStatus describes a collector's coverage outcome.
 type CoverageStatus string
 
@@ -22,22 +29,25 @@ type CoverageError struct {
 
 // CollectorResult contains the discovery output for one collector.
 type CollectorResult struct {
-	Collector     string           `json:"collector"`
-	Status        CoverageStatus   `json:"status"`
-	Assets        []Asset          `json:"assets,omitempty"`
-	Relationships []Relationship   `json:"relationships,omitempty"`
-	Errors        []CoverageError  `json:"errors,omitempty"`
-	Targets       []TargetCoverage `json:"targets,omitempty"`
-	Observations  []Observation    `json:"observations,omitempty"`
-	LocalTargets  []LocalTarget    `json:"-"`
+	Collector            string                 `json:"collector"`
+	Status               CoverageStatus         `json:"status"`
+	Assets               []Asset                `json:"assets,omitempty"`
+	Relationships        []Relationship         `json:"relationships,omitempty"`
+	Errors               []CoverageError        `json:"errors,omitempty"`
+	Targets              []TargetCoverage       `json:"targets,omitempty"`
+	Observations         []Observation          `json:"observations,omitempty"`
+	LocalEvidenceIssuer  RuntimeEvidenceClearer `json:"-"`
+	LocalEvidenceTargets []LocalEvidenceTarget  `json:"-"`
+	LocalTargets         []LocalTarget          `json:"-"`
 }
 
 // Inventory is a normalized asset graph.
 type Inventory struct {
-	Assets        []Asset         `json:"assets"`
-	Observations  []Observation   `json:"observations,omitempty"`
-	Relationships []Relationship  `json:"relationships"`
-	Errors        []CoverageError `json:"errors,omitempty"`
+	Assets        []Asset           `json:"assets"`
+	Observations  []Observation     `json:"observations,omitempty"`
+	Evidence      []ContentEvidence `json:"evidence"`
+	Relationships []Relationship    `json:"relationships"`
+	Errors        []CoverageError   `json:"errors,omitempty"`
 }
 
 // ChangeKind identifies how an asset changed from the previous inventory.
@@ -72,13 +82,14 @@ const (
 
 // ScanResult contains the complete scan result.
 type ScanResult struct {
-	SchemaVersion string            `json:"schemaVersion"`
-	ScanID        string            `json:"scanId"`
-	Status        string            `json:"status"`
-	StartedAt     time.Time         `json:"startedAt"`
-	FinishedAt    time.Time         `json:"finishedAt"`
-	Coverage      []CollectorResult `json:"coverage"`
-	Scope         ScanScope         `json:"scope,omitempty,omitzero"`
+	SchemaVersion    string            `json:"schemaVersion"`
+	ScanID           string            `json:"scanId"`
+	Status           string            `json:"status"`
+	StartedAt        time.Time         `json:"startedAt"`
+	FinishedAt       time.Time         `json:"finishedAt"`
+	Coverage         []CollectorResult `json:"coverage"`
+	EvidenceCoverage EvidenceCoverage  `json:"evidenceCoverage"`
+	Scope            ScanScope         `json:"scope,omitempty,omitzero"`
 }
 
 // Snapshot combines a persisted scan result with its immutable inventory.

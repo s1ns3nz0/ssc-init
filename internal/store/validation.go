@@ -87,7 +87,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 			return err
 		}
 	}
-	observationIDs := make(map[string]struct{}, len(inventory.Observations))
+	observationAssets := make(map[string]string, len(inventory.Observations))
 	for _, observation := range inventory.Observations {
 		if err := validateObservation(observation); err != nil {
 			return err
@@ -95,10 +95,34 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 		if _, ok := assetIDs[observation.AssetID]; !ok {
 			return errors.New("inventory observation references missing asset")
 		}
-		if _, duplicate := observationIDs[observation.ID]; duplicate {
+		if _, duplicate := observationAssets[observation.ID]; duplicate {
 			return errors.New("duplicate inventory observation id")
 		}
-		observationIDs[observation.ID] = struct{}{}
+		observationAssets[observation.ID] = observation.AssetID
+	}
+	// Task 13 gating decision: a v3 snapshot always carries one non-zero
+	// evidence coverage object and a non-nil evidence slice. Earlier schema
+	// versions predate content evidence and stay valid without either.
+	if scan.SchemaVersion == "ssc-init.scan.v3" {
+		if evidenceCoverageIsZero(scan.EvidenceCoverage) {
+			return errors.New("v3 snapshot requires evidence coverage")
+		}
+		if inventory.Evidence == nil {
+			return errors.New("v3 snapshot requires an evidence inventory")
+		}
+	}
+	evidenceByID := make(map[string]model.ContentEvidence, len(inventory.Evidence))
+	for _, evidence := range inventory.Evidence {
+		if err := validateContentEvidence(evidence, assetIDs, observationAssets); err != nil {
+			return err
+		}
+		if _, duplicate := evidenceByID[evidence.ID]; duplicate {
+			return errors.New("duplicate inventory evidence id")
+		}
+		evidenceByID[evidence.ID] = evidence
+	}
+	if err := validateEvidenceCoverageResult(scan.EvidenceCoverage, evidenceByID); err != nil {
+		return err
 	}
 
 	collectors := make(map[string]struct{}, len(scan.Coverage))

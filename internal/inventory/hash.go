@@ -2,18 +2,17 @@ package inventory
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"io"
 	"path/filepath"
 	"strings"
 
+	"github.com/ssc-init/ssc-init/internal/evidence"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
 var errRootedHashingUnavailable = errors.New("rooted file access is unavailable")
+var errVerifiedHashingUnavailable = errors.New("verified file hashing is unavailable")
 
 // HashFile hashes a verified regular file while reading at most maxBytes+1.
 func HashFile(ctx context.Context, filesystem platform.FileSystem, path string, maxBytes int64) (string, model.HashStatus, error) {
@@ -38,67 +37,24 @@ func HashFile(ctx context.Context, filesystem platform.FileSystem, path string, 
 	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", model.HashUnavailable, platform.ErrUnsafeRootedPath
 	}
-	components := strings.Split(relative, string(filepath.Separator))
-	name := components[len(components)-1]
-
 	root, err := rooted.OpenRoot(volumeRoot)
 	if err != nil {
 		return "", model.HashUnavailable, err
 	}
 	defer root.Close()
-	parent := root
-	if len(components) > 1 {
-		parent, err = platform.OpenVerifiedRoot(ctx, root, components[:len(components)-1]...)
-		if err != nil {
-			return "", model.HashUnavailable, err
-		}
-		defer parent.Close()
-	}
+	digest, status, evidenceErrors := evidence.HashVerifiedFile(ctx, root, relative, maxBytes)
 	if err := ctx.Err(); err != nil {
 		return "", model.HashUnavailable, err
 	}
-	file, _, _, err := platform.OpenVerifiedFile(parent, name)
-	if err != nil {
-		return "", model.HashUnavailable, err
-	}
-	defer file.Close()
-
-	reader := &contextReader{ctx: ctx, reader: file}
-	hasher := sha256.New()
-	limited := &io.LimitedReader{R: reader, N: maxBytes}
-	bytesHashed, err := io.Copy(hasher, limited)
-	if err != nil {
-		return "", model.HashUnavailable, err
-	}
-	if bytesHashed == maxBytes {
-		var extra [1]byte
-		for {
-			count, readErr := reader.Read(extra[:])
-			if count > 0 {
-				return "", model.HashOversize, nil
-			}
-			if readErr != nil {
-				if errors.Is(readErr, io.EOF) {
-					break
-				}
-				return "", model.HashUnavailable, readErr
-			}
+	switch status {
+	case model.EvidenceComplete:
+		return digest.SHA256, model.HashComplete, nil
+	case model.EvidenceOversize:
+		return "", model.HashOversize, nil
+	default:
+		if len(evidenceErrors) == 1 && (evidenceErrors[0].Code == "symlink_rejected" || evidenceErrors[0].Code == "identity_changed") {
+			return "", model.HashUnavailable, platform.ErrUnsafeRootedPath
 		}
+		return "", model.HashUnavailable, errVerifiedHashingUnavailable
 	}
-	if err := ctx.Err(); err != nil {
-		return "", model.HashUnavailable, err
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), model.HashComplete, nil
-}
-
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r *contextReader) Read(buffer []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(buffer)
 }

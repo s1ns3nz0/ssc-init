@@ -3,6 +3,8 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"io/fs"
@@ -51,8 +53,9 @@ func (limits walkLimits) valid() bool {
 }
 
 type agentCollector struct {
-	limits     walkLimits
-	beforeOpen func(targetID, relative string)
+	limits            walkLimits
+	beforeOpen        func(targetID, relative string)
+	afterManifestRead func(relative string)
 }
 
 // New returns a targeted collector restricted to the immutable AI host catalog.
@@ -161,6 +164,8 @@ func (c *agentCollector) collectTarget(ctx context.Context, result *model.Collec
 
 	walker := &agentWalker{
 		ctx: ctx, declaration: declaration, limits: limits, beforeOpen: c.beforeOpen,
+		afterManifestRead: c.afterManifestRead,
+		targetRoot:        root,
 	}
 	_, walkErr := walker.walkDirectory(root, directory, ".", 0)
 	closeErr := directory.Close()
@@ -201,19 +206,35 @@ type markerCandidate struct {
 	skillName    string
 	parseErr     error
 	expected     os.FileInfo
+	evidence     *agentManifestEvidence
+}
+
+// agentManifestEvidence remains in the collector's runtime candidate until a
+// sealed target is issued. It is never copied to asset or observation data.
+type agentManifestEvidence struct {
+	digest      string
+	size        int64
+	mode        uint32
+	fingerprint platform.FileFingerprint
+	root        platform.FileFingerprint
+	assetRoot   platform.FileFingerprint
+	assetPath   string
+	maxBytes    int64
 }
 
 type agentWalker struct {
-	ctx           context.Context
-	declaration   targetDeclaration
-	limits        walkLimits
-	beforeOpen    func(targetID, relative string)
-	entries       int
-	manifests     int
-	plugins       []markerCandidate
-	skills        []markerCandidate
-	pendingSkills []markerCandidate
-	issues        []model.CoverageError
+	ctx               context.Context
+	declaration       targetDeclaration
+	limits            walkLimits
+	beforeOpen        func(targetID, relative string)
+	afterManifestRead func(relative string)
+	targetRoot        platform.RootedDirectory
+	entries           int
+	manifests         int
+	plugins           []markerCandidate
+	skills            []markerCandidate
+	pendingSkills     []markerCandidate
+	issues            []model.CoverageError
 }
 
 func (walker *agentWalker) walkDirectory(root platform.RootedDirectory, directory platform.RootedFile, relative string, depth int) (bool, error) {
@@ -304,7 +325,7 @@ func (walker *agentWalker) walkDirectory(root platform.RootedDirectory, director
 			return true, nil
 		}
 		walker.manifests++
-		contents, readErr := walker.readManifest(root, name, entryRelative, expected)
+		read, readErr := walker.readManifest(root, name, entryRelative, expected)
 		if readErr != nil {
 			if errors.Is(readErr, errAgentManifestOversized) {
 				walker.addIssue("manifest_size_limit", "agent manifest exceeds the size limit")
@@ -313,13 +334,20 @@ func (walker *agentWalker) walkDirectory(root platform.RootedDirectory, director
 			}
 			continue
 		}
+		candidate.evidence = &agentManifestEvidence{
+			digest: read.digest, size: read.size, mode: read.mode, fingerprint: read.fingerprint, maxBytes: walker.limits.maxManifestBytes,
+		}
+		if !walker.captureAgentEvidenceAnchor(&candidate) {
+			walker.addIssue("identity_changed", "agent evidence anchor identity changed")
+			continue
+		}
 		switch kind {
 		case markerClaudePlugin, markerCodexPlugin:
-			candidate.plugin, candidate.parseErr = parsePluginManifest(contents)
+			candidate.plugin, candidate.parseErr = parsePluginManifest(read.contents)
 			walker.plugins = append(walker.plugins, candidate)
 		case markerSkill:
 			fallback := filepath.Base(filepath.Dir(filepath.FromSlash(candidate.relativePath)))
-			candidate.skillName, candidate.parseErr = parseSkillManifest(contents, fallback)
+			candidate.skillName, candidate.parseErr = parseSkillManifest(read.contents, fallback)
 			walker.skills = append(walker.skills, candidate)
 		}
 	}
@@ -328,33 +356,54 @@ func (walker *agentWalker) walkDirectory(root platform.RootedDirectory, director
 
 var errAgentManifestOversized = errors.New("agent manifest oversized")
 
-func (walker *agentWalker) readManifest(root platform.RootedDirectory, name, relative string, enumerated os.FileInfo) ([]byte, error) {
+type agentManifestRead struct {
+	contents    []byte
+	digest      string
+	size        int64
+	mode        uint32
+	fingerprint platform.FileFingerprint
+}
+
+func (walker *agentWalker) readManifest(root platform.RootedDirectory, name, relative string, enumerated os.FileInfo) (agentManifestRead, error) {
 	if enumerated.Size() < 0 || enumerated.Size() > walker.limits.maxManifestBytes {
-		return nil, errAgentManifestOversized
+		return agentManifestRead{}, errAgentManifestOversized
 	}
 	walker.invokeBeforeOpen(relative)
 	if err := walker.ctx.Err(); err != nil {
-		return nil, err
+		return agentManifestRead{}, err
 	}
 	file, beforeOpen, opened, err := platform.OpenVerifiedFile(root, name)
 	if err != nil {
-		return nil, err
+		return agentManifestRead{}, err
 	}
 	defer file.Close()
 	if !os.SameFile(enumerated, beforeOpen) || !os.SameFile(enumerated, opened) {
-		return nil, platform.ErrUnsafeRootedPath
+		return agentManifestRead{}, platform.ErrUnsafeRootedPath
 	}
 	if beforeOpen.Size() < 0 || beforeOpen.Size() > walker.limits.maxManifestBytes || opened.Size() < 0 || opened.Size() > walker.limits.maxManifestBytes {
-		return nil, errAgentManifestOversized
+		return agentManifestRead{}, errAgentManifestOversized
+	}
+	beforeFingerprint, ok := platform.Fingerprint(opened)
+	if !ok {
+		return agentManifestRead{}, platform.ErrUnsafeRootedPath
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, walker.limits.maxManifestBytes+1))
 	if err != nil {
-		return nil, err
+		return agentManifestRead{}, err
 	}
 	if int64(len(contents)) > walker.limits.maxManifestBytes {
-		return nil, errAgentManifestOversized
+		return agentManifestRead{}, errAgentManifestOversized
 	}
-	return contents, nil
+	postRead, err := file.Stat()
+	if err != nil || postRead == nil || !os.SameFile(opened, postRead) {
+		return agentManifestRead{}, platform.ErrUnsafeRootedPath
+	}
+	fingerprint, ok := platform.Fingerprint(postRead)
+	if !ok || fingerprint.Size != int64(len(contents)) || fingerprint != beforeFingerprint {
+		return agentManifestRead{}, platform.ErrUnsafeRootedPath
+	}
+	digest := sha256.Sum256(contents)
+	return agentManifestRead{contents: contents, digest: hex.EncodeToString(digest[:]), size: int64(len(contents)), mode: uint32(postRead.Mode().Perm()), fingerprint: fingerprint}, nil
 }
 
 func readBoundedAgentDirectory(directory platform.RootedFile, remaining int) ([]os.DirEntry, bool, error) {
@@ -392,6 +441,9 @@ func recognizedAgentMarker(relative string, declaration targetDeclaration) (mark
 	markerDirectory := ".claude-plugin"
 	if declaration.marker == markerCodexPlugin {
 		markerDirectory = ".codex-plugin"
+	}
+	if clean == markerDirectory+"/plugin.json" {
+		return declaration.marker, ".", true
 	}
 	pluginSuffix := "/" + markerDirectory + "/plugin.json"
 	if strings.HasSuffix(clean, pluginSuffix) {
@@ -440,8 +492,9 @@ func (c *agentCollector) buildTargetEvidence(home string, root platform.RootedDi
 			}
 			continue
 		}
-		if appendAgentEvidence(home, declaration, candidate, candidate.plugin.name, candidate.plugin.version, result, target) {
+		if observation, accepted := appendAgentObservation(home, declaration, candidate, candidate.plugin.name, candidate.plugin.version, result, target); accepted {
 			acceptedPluginBases[filepath.ToSlash(filepath.Clean(filepath.FromSlash(candidate.pluginBase)))] = struct{}{}
+			c.issueAgentEvidence(home, declaration, candidate, observation, result, target)
 		}
 	}
 	if declaration.kind == model.AssetAgentPlugin {
@@ -457,7 +510,9 @@ func (c *agentCollector) buildTargetEvidence(home string, root platform.RootedDi
 			appendAgentTargetIssue(target, "manifest_invalid", "agent manifest is invalid")
 			continue
 		}
-		appendAgentEvidence(home, declaration, candidate, candidate.skillName, "", result, target)
+		if observation, accepted := appendAgentObservation(home, declaration, candidate, candidate.skillName, "", result, target); accepted {
+			c.issueAgentEvidence(home, declaration, candidate, observation, result, target)
+		}
 	}
 	return nil
 }
@@ -478,7 +533,7 @@ func (walker *agentWalker) readAcceptedBundledSkills(root platform.RootedDirecto
 			return nil
 		}
 		walker.manifests++
-		contents, err := walker.readStagedManifest(root, candidate)
+		read, err := walker.readStagedManifest(root, candidate)
 		if err != nil {
 			if ctxErr := walker.ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -490,14 +545,21 @@ func (walker *agentWalker) readAcceptedBundledSkills(root platform.RootedDirecto
 			}
 			continue
 		}
+		candidate.evidence = &agentManifestEvidence{
+			digest: read.digest, size: read.size, mode: read.mode, fingerprint: read.fingerprint, maxBytes: walker.limits.maxManifestBytes,
+		}
+		if !walker.captureAgentEvidenceAnchor(&candidate) {
+			appendAgentTargetIssue(target, "identity_changed", "agent evidence anchor identity changed")
+			continue
+		}
 		fallback := filepath.Base(filepath.Dir(filepath.FromSlash(candidate.relativePath)))
-		candidate.skillName, candidate.parseErr = parseSkillManifest(contents, fallback)
+		candidate.skillName, candidate.parseErr = parseSkillManifest(read.contents, fallback)
 		walker.skills = append(walker.skills, candidate)
 	}
 	return nil
 }
 
-func (walker *agentWalker) readStagedManifest(root platform.RootedDirectory, candidate markerCandidate) ([]byte, error) {
+func (walker *agentWalker) readStagedManifest(root platform.RootedDirectory, candidate markerCandidate) (agentManifestRead, error) {
 	relative := filepath.Clean(filepath.FromSlash(candidate.relativePath))
 	directoryPath := filepath.Dir(relative)
 	parent := root
@@ -507,7 +569,7 @@ func (walker *agentWalker) readStagedManifest(root platform.RootedDirectory, can
 		var err error
 		parent, err = platform.OpenVerifiedRoot(walker.ctx, root, components...)
 		if err != nil {
-			return nil, err
+			return agentManifestRead{}, err
 		}
 		ownedParent = true
 	}
@@ -517,10 +579,10 @@ func (walker *agentWalker) readStagedManifest(root platform.RootedDirectory, can
 	name := filepath.Base(relative)
 	current, err := parent.Lstat(name)
 	if err != nil || current == nil {
-		return nil, err
+		return agentManifestRead{}, err
 	}
 	if current.Mode()&fs.ModeSymlink != 0 || !current.Mode().IsRegular() || candidate.expected == nil || !os.SameFile(candidate.expected, current) {
-		return nil, platform.ErrUnsafeRootedPath
+		return agentManifestRead{}, platform.ErrUnsafeRootedPath
 	}
 	return walker.readManifest(parent, name, relative, candidate.expected)
 }
@@ -540,9 +602,14 @@ func isBundledSkill(relative string, pluginBases map[string]struct{}) bool {
 }
 
 func appendAgentEvidence(home string, declaration targetDeclaration, candidate markerCandidate, name, version string, result *model.CollectorResult, target *model.TargetCoverage) bool {
+	_, accepted := appendAgentObservation(home, declaration, candidate, name, version, result, target)
+	return accepted
+}
+
+func appendAgentObservation(home string, declaration targetDeclaration, candidate markerCandidate, name, version string, result *model.CollectorResult, target *model.TargetCoverage) (model.Observation, bool) {
 	if invalidAgentIdentity(name, maxAgentNameBytes) || invalidAgentIdentity(version, maxAgentVersionBytes) && version != "" {
 		appendAgentTargetIssue(target, "identity_rejected", "agent identity was rejected")
-		return false
+		return model.Observation{}, false
 	}
 	kind := "agent-plugin"
 	assetType := model.AssetAgentPlugin
@@ -564,7 +631,7 @@ func appendAgentEvidence(home string, declaration targetDeclaration, candidate m
 	}
 	if !safeAgentMetadata(metadata) {
 		appendAgentTargetIssue(target, "identity_rejected", "agent identity was rejected")
-		return false
+		return model.Observation{}, false
 	}
 	observation, err := identity.FinalizeObservation(model.Observation{
 		AssetID: assetID, Collector: "agents", Host: declaration.spec.Host,
@@ -573,7 +640,7 @@ func appendAgentEvidence(home string, declaration targetDeclaration, candidate m
 	})
 	if err != nil {
 		appendAgentTargetIssue(target, "identity_rejected", "agent identity was rejected")
-		return false
+		return model.Observation{}, false
 	}
 	result.Assets = append(result.Assets, model.Asset{
 		ID: assetID, Type: assetType, Name: name, Version: version, Source: declaration.spec.Host,
@@ -581,7 +648,7 @@ func appendAgentEvidence(home string, declaration targetDeclaration, candidate m
 	result.Observations = append(result.Observations, observation)
 	target.Assets++
 	target.Observations++
-	return true
+	return observation, true
 }
 
 func invalidAgentIdentity(value string, maxBytes int) bool {

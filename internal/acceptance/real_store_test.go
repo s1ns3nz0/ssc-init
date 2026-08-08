@@ -64,6 +64,13 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	if !initialized || !reflect.DeepEqual(latestSnapshot.Inventory, inventory) || !reflect.DeepEqual(latestSnapshot.Scan, result) {
 		t.Fatalf("initialized=%v latest=%#v result=%#v inventory=%#v", initialized, latestSnapshot, result, inventory)
 	}
+	if result.SchemaVersion != "ssc-init.scan.v3" {
+		t.Fatalf("persisted schema version=%q", result.SchemaVersion)
+	}
+	if latestSnapshot.Inventory.Evidence == nil || len(latestSnapshot.Inventory.Evidence) == 0 {
+		t.Fatal("v3 snapshot round trip lost the evidence slice")
+	}
+	assertEvidenceCoverageTerminal(t, latestSnapshot.Scan, latestSnapshot.Inventory)
 	latest := latestSnapshot.Inventory
 	projectConfigID := ""
 	foundProjectMCP := false
@@ -109,6 +116,19 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	}
 	if !foundProjectMCPObservation {
 		t.Fatal("round-tripped inventory is missing Task 7 project MCP observation")
+	}
+	foundProjectMCPEvidence := false
+	for _, record := range latest.Evidence {
+		if record.AssetID != "mcp:vscode:workspace" {
+			continue
+		}
+		if record.Kind != model.EvidenceSemanticSHA256 || record.Subject != model.EvidenceSubjectMCPDeclaration || record.Status != model.EvidenceComplete || record.Digest == "" {
+			t.Fatalf("non-canonical project MCP evidence: %+v", record)
+		}
+		foundProjectMCPEvidence = true
+	}
+	if !foundProjectMCPEvidence {
+		t.Fatal("round-tripped inventory is missing project MCP semantic evidence")
 	}
 	foundProject := false
 	for _, asset := range latest.Assets {
@@ -215,6 +235,18 @@ func TestBaselinePersistsSameMCPServerFromTwoProjectsWithRealStore(t *testing.T)
 	}
 	if assetCount != 1 || observationCount != 2 {
 		t.Fatalf("assets=%d observations=%d inventory=%+v", assetCount, observationCount, inventory)
+	}
+	semanticEvidence := 0
+	for _, record := range inventory.Evidence {
+		if record.AssetID == "mcp:shared:same" {
+			if record.Kind != model.EvidenceSemanticSHA256 || record.Status != model.EvidenceComplete || record.Digest == "" {
+				t.Fatalf("same-name semantic evidence=%+v", record)
+			}
+			semanticEvidence++
+		}
+	}
+	if semanticEvidence != 2 {
+		t.Fatalf("same-name semantic evidence records=%d want=2", semanticEvidence)
 	}
 	instances := 0
 	for _, coverage := range result.Coverage {

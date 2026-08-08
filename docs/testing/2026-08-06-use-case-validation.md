@@ -273,3 +273,106 @@ Only these five gaps are closed by this foundation:
 ### Open programs
 
 Content hashing and provenance remain open, including plugin/project payload hashes and immutable Docker digest evidence. Threat intelligence, Git-managed policy, organizational integrations, host adapters, warnings, and blocking also remain open. This revalidation makes no malware verdict and does not claim that inventoried assets are safe.
+
+## Revalidation — 2026-08-08 (local content evidence core, scan v3)
+
+The local content evidence core (Tasks 1–14 of
+`docs/superpowers/plans/2026-08-07-local-content-evidence-core.md`) was
+revalidated on macOS Darwin 25.5.0, Apple Silicon (`arm64`). The commit named
+`test: validate local content evidence scope` contains this section; the
+staged implementation range is recorded in
+`.superpowers/sdd/2026-08-07-local-content-evidence-core/progress.md`. The
+historical foundation results above are preserved unchanged as the
+pre-evidence baseline; in particular, scenario 3 ("Content-only mutation")
+documented that content-only replacements were invisible. That gap is now
+closed for the supported subjects below, and only for them.
+
+Exact acceptance and release commands, all exiting 0:
+
+```sh
+go test ./internal/acceptance -run 'ContentEvidence|EvidenceAdversarial' -count=1
+go test ./internal/acceptance -run 'EvidenceAdversarial' -count=50   # ok 31.9s
+go test ./internal/acceptance -run 'ContentEvidence' -count=50       # ok 43.3s
+go clean -testcache
+go test -race -count=1 ./...
+go vet ./...
+go mod verify
+git diff --check
+sh scripts/build-darwin.sh
+file dist/ssc-init-darwin-arm64 dist/ssc-init-darwin-amd64
+shasum -a 256 -c dist/checksums.txt
+./dist/ssc-init-darwin-arm64 version --json
+arch -x86_64 ./dist/ssc-init-darwin-amd64 version --json
+git status --short
+```
+
+The release build and native/Rosetta smoke outputs, including both
+`dev+git.<full-commit>` version payloads for the committed HEAD, are recorded
+verbatim in
+`.superpowers/sdd/2026-08-07-local-content-evidence-core/task-14-report.md`.
+
+### Fixture scope actually exercised
+
+Every scenario ran against isolated temporary homes with a fail-on-call
+command runner and executable inspector; the report, snapshot, SQLite, WAL,
+and shared-memory files were checked for raw home paths, fixture secrets, and
+outside-path markers.
+
+- **Content mutation matrix** (`TestContentEvidenceMutationMatrix`, 51
+  cases): one baseline, one content-only mutation, one rescan, and one fresh
+  SQLite reopen per supported subject — Claude and Codex plugin manifests and
+  payload trees; Claude, Codex, and Cursor `SKILL.md` bodies; VS Code,
+  Insiders, OSS, Cursor, and Windsurf extension manifests, `main` and
+  `browser` entry points, and payload trees; JetBrains `plugin.xml` and JAR
+  bytes; user and project MCP supported-semantic fields; all 18 project
+  manifest/lockfile catalog filenames; and explicit `unsupported`
+  package-content and Docker container-identity terminal evidence. Each
+  mutation produced exactly the expected deterministic evidence delta with a
+  stable evidence ID and a changed lowercase SHA-256, or the expected
+  observation replacement for semantic MCP changes.
+- **Adversarial coverage** (`TestEvidenceAdversarial*`): symlinked catalog
+  roots, intermediate and final symlinks, post-discovery link and manifest
+  anchor swaps, entry-point escapes (parent traversal, absolute, missing,
+  symlinked), FIFO/socket special files, exact and one-over 32 MiB file byte
+  bounds, tree depth/entry/total-byte limits, cancellation with previous
+  snapshot preservation, permission denial, hostile sibling isolation,
+  decomposed-Unicode and shell-hostile names, cache miss/hit/rejection,
+  corruption and size/mtime-preserving replacement, external project root
+  privacy, and a decoy `$HOME` sentinel that was never read.
+- **v3 report and status contracts**: a byte-exact golden
+  (`testdata/golden/baseline.json`) for the official fixture home, the real
+  CLI `status --json` round trip over the real store, legacy v1 snapshots
+  surfacing through status v3 as `legacyInventory` with `"evidence":null` and
+  no scope/coverage/evidence-coverage echo, and the release-binary
+  isolated-home `status --json` smoke in `scripts/build-darwin_test.go`.
+
+### False-negative boundaries (deliberate, still open)
+
+- Semantic MCP evidence hashes only the closed secret-free field list. A raw
+  MCP file change that does not alter a supported semantic field — including
+  any secret-only change — intentionally produces no evidence change.
+- Package payloads and Docker image identities are reported as explicit
+  `unsupported` evidence; no payload or immutable-digest claim is made.
+- JetBrains JAR bytes enter the payload-tree digest, but archive members are
+  not enumerated or analyzed.
+- Only exact project catalog basenames are recognized; wildcard names such as
+  `requirements-*.txt` are outside the closed subject vocabulary.
+- Non-`complete` evidence digests are diagnostic only and are never a content
+  identity.
+- The first cache-warm rescan reports a deterministic `changed` delta for
+  payload-tree evidence whose recorded `cache` provenance moved from `miss`
+  to `hit` even though every digest is identical; evidence diffing excludes
+  only observation timestamps by contract. Subsequent unchanged rescans are
+  delta-free.
+- Code signatures, TI, behavior analysis, policy, warnings, blocking, and
+  host adapters remain unimplemented; no malware verdict or safety guarantee
+  is made or implied.
+
+### No-contact proof
+
+Default acceptance scans installed a fail-on-call runner and inspector (zero
+invocations observed), a recording filesystem that denies and logs any path
+outside the isolated home (zero denied paths after evidence collection), and
+a sentinel-bearing decoy `$HOME`; the sentinel never appeared in any report,
+snapshot, or SQLite surface. No package manager, Docker daemon, `codesign`,
+network endpoint, or real user directory was contacted.

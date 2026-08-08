@@ -3,6 +3,8 @@ package scan
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/evidence"
+	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
 	"github.com/ssc-init/ssc-init/internal/platform"
 	"github.com/ssc-init/ssc-init/internal/testutil"
@@ -75,7 +79,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v2" {
+	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v3" {
 		t.Fatalf("result=%+v", result)
 	}
 	if len(snapshots.saved) != 1 || snapshots.saved[0].ScanID != result.ScanID {
@@ -98,7 +102,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 	}
 }
 
-func TestBaselineBuildsAndPersistsV2ScopeAndDropsLocalTargets(t *testing.T) {
+func TestBaselineBuildsAndPersistsV3ScopeAndDropsLocalTargets(t *testing.T) {
 	projectRoots := []string{"$HOME/Projects"}
 	wantScope := model.ScanScope{
 		Platform:       "darwin",
@@ -136,7 +140,7 @@ func TestBaselineBuildsAndPersistsV2ScopeAndDropsLocalTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SchemaVersion != "ssc-init.scan.v2" || !reflect.DeepEqual(result.Scope, wantScope) {
+	if result.SchemaVersion != "ssc-init.scan.v3" || !reflect.DeepEqual(result.Scope, wantScope) {
 		t.Fatalf("result=%+v", result)
 	}
 	if !reflect.DeepEqual(collectedScope, wantScope) {
@@ -326,6 +330,30 @@ func TestBaselineFollowsProjectLocalTargetsAndReplacesInitialMCPResult(t *testin
 	}
 	if !found {
 		t.Fatalf("inventory=%+v", inventory)
+	}
+}
+
+// reproClearer records whether the engine-independent clearing path ran for
+// runtime evidence state attached to a dropped collector result.
+type reproClearer struct{ cleared *bool }
+
+func (r reproClearer) ClearRuntimeEvidence() { *r.cleared = true }
+
+func TestBaselineClearsRuntimeStateOfReplacedInitialMCPResult(t *testing.T) {
+	issuerCleared, provenanceCleared := false, false
+	mcpish := collectorFunc{name: "mcp", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{Status: model.CoverageComplete}
+		result.LocalEvidenceIssuer = reproClearer{cleared: &issuerCleared}
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{{TargetID: "mcp.fake", Provenance: reproClearer{cleared: &provenanceCleared}}}
+		return result, nil
+	}}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{mcpish}}, &memorySnapshots{}, fixedTime, fixedUUID, testEnvironment(t))
+
+	if _, _, _, err := service.Baseline(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !issuerCleared || !provenanceCleared {
+		t.Fatalf("dropped initial mcp runtime state not cleared: issuer=%v provenance=%v", issuerCleared, provenanceCleared)
 	}
 }
 
@@ -575,6 +603,461 @@ func TestBaselineCopiesOnlyValidatedProjectLocalTargets(t *testing.T) {
 	if bytes.Contains(encoded, []byte(outside)) || bytes.Contains(encoded, []byte(forgedPath)) || bytes.Contains(encoded, []byte("forged-secret-marker")) {
 		t.Fatalf("forged data persisted: %s", encoded)
 	}
+}
+
+func fixedUUID() string { return "00000000-0000-4000-8000-000000000001" }
+
+// scanEvidenceFixture provides a verified on-disk asset whose collector issues
+// sealed runtime evidence targets through the public evidence API.
+type scanEvidenceFixture struct {
+	root             string
+	assetDir         string
+	manifest         string
+	assetID          string
+	observation      model.Observation
+	anchor           evidence.Anchor
+	manifestRelative string
+}
+
+func newScanEvidenceFixture(t *testing.T, collectorName string) *scanEvidenceFixture {
+	t.Helper()
+	root := t.TempDir()
+	assetDir := filepath.Join(root, "asset")
+	if err := os.MkdirAll(assetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(assetDir, "manifest.json")
+	contents := []byte("manifest")
+	if err := os.WriteFile(manifest, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "asset", Collector: collectorName, Scope: model.ScopeUser, LocationRef: "$HOME/fixture/a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	return &scanEvidenceFixture{
+		root: root, assetDir: assetDir, manifest: manifest, assetID: "asset", observation: observation,
+		manifestRelative: filepath.Join("asset", "manifest.json"),
+		anchor: evidence.Anchor{
+			Root: scanFingerprint(t, root), AssetRoot: scanFingerprint(t, assetDir), AssetRelativePath: "asset",
+			RelativePath: filepath.Join("asset", "manifest.json"), Digest: hex.EncodeToString(digest[:]),
+			Size: int64(len(contents)), Mode: 0o600, Fingerprint: scanFingerprint(t, manifest), MaxBytes: 64 << 20,
+		},
+	}
+}
+
+func scanFingerprint(t *testing.T, path string) platform.FileFingerprint {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, ok := platform.Fingerprint(info)
+	if !ok {
+		t.Fatal("fingerprint unavailable")
+	}
+	return fingerprint
+}
+
+func (f *scanEvidenceFixture) discoveryResult(name string) model.CollectorResult {
+	return model.CollectorResult{
+		Status:       model.CoverageComplete,
+		Assets:       []model.Asset{{ID: f.assetID, Type: model.AssetTool, Name: "fixture"}},
+		Observations: []model.Observation{f.observation},
+	}
+}
+
+func (f *scanEvidenceFixture) fileCollector(name string) collector.Collector {
+	return collectorFunc{name: name, fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := f.discoveryResult(name)
+		issuer := evidence.BindCollectorResult(&result)
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{issuer.Issue(model.LocalEvidenceTarget{
+			TargetID: name + ".manifest", AssetID: f.assetID, ObservationID: f.observation.ID,
+			Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest,
+			RootPath: f.root, RelativePath: f.manifestRelative,
+		}, f.anchor)}
+		return result, nil
+	}}
+}
+
+func (f *scanEvidenceFixture) treeCollector(name string) collector.Collector {
+	anchor := f.anchor
+	anchor.RelativePath, anchor.Digest, anchor.Size, anchor.Mode = "", "", 0, 0
+	anchor.Fingerprint, anchor.MaxBytes = platform.FileFingerprint{}, 0
+	return collectorFunc{name: name, fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := f.discoveryResult(name)
+		issuer := evidence.BindCollectorResult(&result)
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{issuer.Issue(model.LocalEvidenceTarget{
+			TargetID: name + ".payload", AssetID: f.assetID, ObservationID: f.observation.ID,
+			Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree,
+			RootPath: f.root, RelativePath: "asset",
+		}, anchor)}
+		return result, nil
+	}}
+}
+
+func mcpSemanticCollector(t *testing.T) collector.Collector {
+	t.Helper()
+	asset := model.Asset{ID: "mcp:codex:fixture", Type: model.AssetMCP, Name: "fixture"}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "mcp", Host: "codex", Scope: model.ScopeUser,
+		LocationRef: "$HOME/.codex/config.toml", Source: "mcp.codex.user",
+		Metadata: map[string]string{"transport": "stdio", "command": "node"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return collectorFunc{name: "mcp", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{
+			Status: model.CoverageComplete, Assets: []model.Asset{asset}, Observations: []model.Observation{observation},
+		}
+		issuer := evidence.BindCollectorResult(&result)
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{issuer.Issue(model.LocalEvidenceTarget{
+			TargetID: "mcp.codex.user.semantic", AssetID: asset.ID, ObservationID: observation.ID,
+			Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectMCPDeclaration,
+		}, evidence.Anchor{})}
+		return result, nil
+	}}
+}
+
+func testEnvironment(t *testing.T) collector.Environment {
+	t.Helper()
+	return collector.Environment{
+		Home: t.TempDir(), Platform: "darwin",
+		FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime,
+	}
+}
+
+func TestBaselineCollectsEvidenceAfterGraphNormalization(t *testing.T) {
+	fixture := newScanEvidenceFixture(t, "agents")
+	snapshots := &memorySnapshots{}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.fileCollector("agents")}}
+	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
+
+	scanResult, inventoryResult, delta, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanResult.SchemaVersion != "ssc-init.scan.v3" || len(inventoryResult.Evidence) != 1 || scanResult.EvidenceCoverage.Status != model.CoverageComplete {
+		t.Fatalf("scan=%+v inventory=%+v delta=%+v", scanResult, inventoryResult, delta)
+	}
+	wantDigest := sha256.Sum256([]byte("manifest"))
+	record := inventoryResult.Evidence[0]
+	if record.Status != model.EvidenceComplete || record.Digest != hex.EncodeToString(wantDigest[:]) {
+		t.Fatalf("evidence=%+v", record)
+	}
+	if len(scanResult.EvidenceCoverage.Targets) != 1 || scanResult.EvidenceCoverage.Targets[0].EvidenceID != record.ID {
+		t.Fatalf("coverage=%+v", scanResult.EvidenceCoverage)
+	}
+	for _, result := range append(scanResult.Coverage, snapshots.saved[0].Coverage...) {
+		if result.LocalEvidenceTargets != nil {
+			t.Fatalf("runtime targets survived: %+v", result.LocalEvidenceTargets)
+		}
+		if result.LocalEvidenceIssuer != nil {
+			t.Fatalf("runtime issuer survived: %+v", result)
+		}
+	}
+	if snapshots.saved[0].SchemaVersion != "ssc-init.scan.v3" || !reflect.DeepEqual(snapshots.saved[0].EvidenceCoverage, scanResult.EvidenceCoverage) {
+		t.Fatalf("saved=%+v", snapshots.saved[0])
+	}
+	foundEvidenceChange := false
+	for _, change := range delta.Changes {
+		if change.Entity == model.ChangeEntityEvidence && change.Kind == model.ChangeAdded && change.EntityID == record.ID {
+			foundEvidenceChange = true
+		}
+	}
+	if !foundEvidenceChange {
+		t.Fatalf("delta=%+v", delta)
+	}
+	encoded, marshalErr := json.Marshal(struct {
+		Result    model.ScanResult
+		Inventory model.Inventory
+	}{scanResult, inventoryResult})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(fixture.root)) {
+		t.Fatalf("raw evidence path survived: %s", encoded)
+	}
+}
+
+func TestBaselineRejectsEvidenceForObservationRemovedByGraphNormalizationWithoutPathAccess(t *testing.T) {
+	fixture := newScanEvidenceFixture(t, "agents")
+	orphan, err := identity.FinalizeObservation(model.Observation{
+		AssetID: "ghost", Collector: "agents", Scope: model.ScopeUser, LocationRef: "$HOME/fixture/ghost",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanCollector := collectorFunc{name: "agents", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{
+			Status:       model.CoverageComplete,
+			Assets:       []model.Asset{{ID: fixture.assetID, Type: model.AssetTool, Name: "fixture"}},
+			Observations: []model.Observation{orphan},
+		}
+		issuer := evidence.BindCollectorResult(&result)
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{issuer.Issue(model.LocalEvidenceTarget{
+			TargetID: "agents.manifest", AssetID: "ghost", ObservationID: orphan.ID,
+			Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest,
+			RootPath: fixture.root, RelativePath: fixture.manifestRelative,
+		}, fixture.anchor)}
+		return result, nil
+	}}
+	rooted := &recordingRootFileSystem{}
+	env := testEnvironment(t)
+	env.FS = rooted
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{orphanCollector}}, snapshots, fixedTime, fixedUUID, env)
+
+	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rooted.opened(fixture.root) {
+		t.Fatalf("rejected evidence target opened its root: %q", rooted.paths())
+	}
+	if len(inventoryResult.Evidence) != 0 || len(scanResult.EvidenceCoverage.Targets) != 0 {
+		t.Fatalf("scan=%+v inventory=%+v", scanResult, inventoryResult)
+	}
+	if scanResult.Status != "partial" || scanResult.EvidenceCoverage.Status != model.CoveragePartial {
+		t.Fatalf("scan=%+v", scanResult)
+	}
+	foundRejection := false
+	for _, coverageError := range scanResult.EvidenceCoverage.Errors {
+		if coverageError.Code == "target_rejected" {
+			foundRejection = true
+		}
+	}
+	if !foundRejection {
+		t.Fatalf("coverage=%+v", scanResult.EvidenceCoverage)
+	}
+}
+
+func TestBaselineProjectMCPFollowUpPreservesProjectsAndMCPEvidenceTargets(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "Projects", "sample")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".mcp.json"), []byte(`{"mcpServers":{"project-only":{"command":"tool"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"sample"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := collector.Environment{Home: home, Platform: "darwin", FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime}
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{projects.New(roots)}}, snapshots, fixedTime, fixedUUID, env)
+
+	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundProjectManifest := false
+	foundMCPDeclaration := false
+	for _, record := range inventoryResult.Evidence {
+		if record.Subject == "project-manifest:package.json" && record.Status == model.EvidenceComplete {
+			foundProjectManifest = true
+		}
+		if record.Subject == model.EvidenceSubjectMCPDeclaration && record.Status == model.EvidenceComplete {
+			foundMCPDeclaration = true
+		}
+	}
+	if !foundProjectManifest || !foundMCPDeclaration {
+		t.Fatalf("projects/mcp evidence missing: %+v", inventoryResult.Evidence)
+	}
+	if len(scanResult.EvidenceCoverage.Targets) != len(inventoryResult.Evidence) {
+		t.Fatalf("coverage=%+v evidence=%+v", scanResult.EvidenceCoverage, inventoryResult.Evidence)
+	}
+	for _, result := range append(scanResult.Coverage, snapshots.saved[0].Coverage...) {
+		if result.LocalEvidenceTargets != nil || result.LocalEvidenceIssuer != nil {
+			t.Fatalf("runtime evidence state survived: %+v", result)
+		}
+	}
+	encoded, marshalErr := json.Marshal(struct {
+		Result    model.ScanResult
+		Inventory model.Inventory
+	}{scanResult, inventoryResult})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if bytes.Contains(encoded, []byte(home)) {
+		t.Fatalf("raw path survived: %s", encoded)
+	}
+}
+
+func TestBaselineEvidenceChangeContributesToDelta(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{mcpSemanticCollector(t)}}
+
+	_, firstInventory, firstDelta, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstInventory.Evidence) != 1 || firstInventory.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("inventory=%+v", firstInventory)
+	}
+	foundAdded := false
+	for _, change := range firstDelta.Changes {
+		if change.Entity == model.ChangeEntityEvidence && change.Kind == model.ChangeAdded {
+			foundAdded = true
+		}
+	}
+	if !foundAdded {
+		t.Fatalf("delta=%+v", firstDelta)
+	}
+	evidenceID := firstInventory.Evidence[0].ID
+	snapshots.latest.Inventory.Evidence[0].Digest = strings.Repeat("f", 64)
+
+	_, _, secondDelta, err := NewService(orchestrator, snapshots, fixedTime, fixedUUID).Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundChanged := false
+	for _, change := range secondDelta.Changes {
+		if change.Entity == model.ChangeEntityEvidence && change.Kind == model.ChangeChanged && change.EntityID == evidenceID {
+			foundChanged = true
+		}
+	}
+	if !foundChanged {
+		t.Fatalf("delta=%+v", secondDelta)
+	}
+}
+
+func TestBaselinePartialEvidenceMakesCompleteDiscoveryPartial(t *testing.T) {
+	asset := model.Asset{ID: "pkg:npm/fixture", Type: model.AssetPackage, Name: "fixture"}
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: asset.ID, Collector: "packages", Scope: model.ScopeToolEnvironment, LocationRef: "probe-target:packages.npm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	presetCollector := collectorFunc{name: "packages", fn: func(context.Context, collector.Environment) (model.CollectorResult, error) {
+		result := model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{asset}, Observations: []model.Observation{observation}}
+		issuer := evidence.BindCollectorResult(&result)
+		result.LocalEvidenceTargets = []model.LocalEvidenceTarget{issuer.Issue(model.LocalEvidenceTarget{
+			TargetID: "packages.npm.content", AssetID: asset.ID, ObservationID: observation.ID,
+			Kind: model.EvidencePackageContent, Subject: model.EvidenceSubjectPackageContent,
+			PresetStatus: model.EvidenceUnsupported,
+		}, evidence.Anchor{})}
+		return result, nil
+	}}
+	snapshots := &memorySnapshots{}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{presetCollector}}, snapshots, fixedTime, fixedUUID)
+
+	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventoryResult.Errors) != 0 || len(scanResult.Coverage) != 1 || scanResult.Coverage[0].Status != model.CoverageComplete {
+		t.Fatalf("discovery must stay complete: %+v %+v", scanResult, inventoryResult)
+	}
+	if scanResult.EvidenceCoverage.Status != model.CoveragePartial || scanResult.Status != "partial" {
+		t.Fatalf("scan=%+v", scanResult)
+	}
+	if len(inventoryResult.Evidence) != 1 || inventoryResult.Evidence[0].Status != model.EvidenceUnsupported {
+		t.Fatalf("inventory=%+v", inventoryResult)
+	}
+}
+
+func TestBaselineZeroAcceptedTargetsYieldsCompleteEmptyEvidenceCoverage(t *testing.T) {
+	snapshots := &memorySnapshots{}
+	orchestrator := collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "agents", result: model.CollectorResult{Status: model.CoverageComplete, Assets: []model.Asset{{ID: "tool:new", Type: model.AssetTool, Name: "new"}}}},
+	}}
+	service := NewService(orchestrator, snapshots, fixedTime, fixedUUID)
+
+	scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanResult.Status != "complete" || scanResult.EvidenceCoverage.Status != model.CoverageComplete {
+		t.Fatalf("scan=%+v", scanResult)
+	}
+	if scanResult.EvidenceCoverage.Targets == nil || len(scanResult.EvidenceCoverage.Targets) != 0 || len(scanResult.EvidenceCoverage.Errors) != 0 {
+		t.Fatalf("coverage=%+v", scanResult.EvidenceCoverage)
+	}
+	if inventoryResult.Evidence == nil || len(inventoryResult.Evidence) != 0 {
+		t.Fatalf("inventory=%+v", inventoryResult)
+	}
+	if inventoryResult.Observations == nil {
+		t.Fatalf("observations must be non-nil for v3: %+v", inventoryResult)
+	}
+}
+
+type cachingSnapshots struct {
+	memorySnapshots
+	lookups  int
+	stored   [][]evidence.CacheWrite
+	storeErr error
+}
+
+func (c *cachingSnapshots) Lookup(context.Context, evidence.CacheKey) (evidence.CacheEntry, bool, error) {
+	c.lookups++
+	return evidence.CacheEntry{}, false, nil
+}
+
+func (c *cachingSnapshots) StoreContentCache(_ context.Context, writes []evidence.CacheWrite) error {
+	c.stored = append(c.stored, append([]evidence.CacheWrite(nil), writes...))
+	return c.storeErr
+}
+
+func TestBaselineCacheHandoffIsBestEffortAfterSave(t *testing.T) {
+	t.Run("cache write failure keeps persisted scan successful", func(t *testing.T) {
+		fixture := newScanEvidenceFixture(t, "agents")
+		snapshots := &cachingSnapshots{storeErr: context.DeadlineExceeded}
+		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
+		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
+
+		scanResult, inventoryResult, _, err := service.Baseline(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshots.saved) != 1 || scanResult.EvidenceCoverage.Status != model.CoverageComplete {
+			t.Fatalf("scan=%+v saved=%d", scanResult, len(snapshots.saved))
+		}
+		if len(inventoryResult.Evidence) != 1 || inventoryResult.Evidence[0].Metadata["cache"] != "miss" {
+			t.Fatalf("store-backed cache was not wired: %+v", inventoryResult.Evidence)
+		}
+		if snapshots.lookups == 0 || len(snapshots.stored) != 1 || len(snapshots.stored[0]) == 0 {
+			t.Fatalf("lookups=%d stored=%+v", snapshots.lookups, snapshots.stored)
+		}
+	})
+	t.Run("save failure prevents cache writes", func(t *testing.T) {
+		fixture := newScanEvidenceFixture(t, "agents")
+		snapshots := &cachingSnapshots{}
+		snapshots.saveErr = context.DeadlineExceeded
+		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
+		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
+
+		if _, _, _, err := service.Baseline(context.Background()); err == nil {
+			t.Fatal("Baseline error=nil")
+		}
+		if len(snapshots.stored) != 0 {
+			t.Fatalf("cache write before snapshot commit: %+v", snapshots.stored)
+		}
+	})
+	t.Run("memory store without cache interfaces uses disabled cache", func(t *testing.T) {
+		fixture := newScanEvidenceFixture(t, "agents")
+		snapshots := &memorySnapshots{}
+		orchestrator := collector.Orchestrator{Collectors: []collector.Collector{fixture.treeCollector("agents")}}
+		service := NewService(orchestrator, snapshots, fixedTime, fixedUUID, testEnvironment(t))
+
+		_, inventoryResult, _, err := service.Baseline(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inventoryResult.Evidence) != 1 || inventoryResult.Evidence[0].Metadata["cache"] != "disabled" {
+			t.Fatalf("disabled cache expected: %+v", inventoryResult.Evidence)
+		}
+	})
 }
 
 type recordingRootFileSystem struct {

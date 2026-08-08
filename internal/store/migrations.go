@@ -105,6 +105,42 @@ CREATE TABLE observation_state (
     UNIQUE (scan_id, observation_index),
     FOREIGN KEY (scan_id, observation_id) REFERENCES observations(scan_id, observation_id)
 );`,
+	`CREATE TABLE evidence (
+    scan_id TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    evidence_json BLOB NOT NULL,
+    PRIMARY KEY (scan_id, evidence_id),
+    FOREIGN KEY (scan_id) REFERENCES scans(id),
+    FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id),
+    FOREIGN KEY (scan_id, observation_id) REFERENCES observations(scan_id, observation_id)
+);
+CREATE TABLE evidence_state (
+    scan_id TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    evidence_index INTEGER NOT NULL CHECK (evidence_index >= 0),
+    metadata_nil INTEGER NOT NULL CHECK (metadata_nil IN (0, 1)),
+    errors_nil INTEGER NOT NULL CHECK (errors_nil IN (0, 1)),
+    PRIMARY KEY (scan_id, evidence_id),
+    UNIQUE (scan_id, evidence_index),
+    FOREIGN KEY (scan_id, evidence_id) REFERENCES evidence(scan_id, evidence_id)
+);
+CREATE TABLE evidence_coverage (
+    scan_id TEXT PRIMARY KEY,
+    result_json BLOB NOT NULL,
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE content_cache (
+    cache_key BLOB PRIMARY KEY CHECK (length(cache_key) = 32),
+    algorithm TEXT NOT NULL,
+    format TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    last_used_at TEXT NOT NULL
+);
+ALTER TABLE inventory_state ADD COLUMN evidence_nil INTEGER NOT NULL DEFAULT 1 CHECK (evidence_nil IN (0, 1));
+ALTER TABLE inventory_state ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (evidence_count >= 0);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -169,12 +205,16 @@ var requiredColumns = map[string][]columnSpec{
 	"assets":             {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_json", "BLOB", "", 1, 0, false}},
 	"relationships":      {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}},
 	"coverage":           {{"scan_id", "TEXT", "", 1, 1, false}, {"collector", "TEXT", "", 1, 2, false}, {"result_json", "BLOB", "", 1, 0, false}},
-	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}},
+	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}, {"evidence_nil", "INTEGER", "1", 1, 0, true}, {"evidence_count", "INTEGER", "0", 1, 0, true}},
 	"asset_state":        {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}},
 	"observations":       {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"asset_id", "TEXT", "", 1, 0, false}, {"observation_json", "BLOB", "", 1, 0, false}},
 	"observation_state":  {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"observation_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"consumers_nil", "INTEGER", "", 1, 0, false}},
 	"relationship_state": {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}, {"relationship_index", "INTEGER", "", 1, 0, false}},
 	"inventory_errors":   {{"scan_id", "TEXT", "", 1, 1, false}, {"error_index", "INTEGER", "", 1, 2, false}, {"error_json", "BLOB", "", 1, 0, false}},
+	"evidence":           {{"scan_id", "TEXT", "", 1, 1, false}, {"evidence_id", "TEXT", "", 1, 2, false}, {"asset_id", "TEXT", "", 1, 0, false}, {"observation_id", "TEXT", "", 1, 0, false}, {"evidence_json", "BLOB", "", 1, 0, false}},
+	"evidence_state":     {{"scan_id", "TEXT", "", 1, 1, false}, {"evidence_id", "TEXT", "", 1, 2, false}, {"evidence_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}},
+	"evidence_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"result_json", "BLOB", "", 1, 0, false}},
+	"content_cache":      {{"cache_key", "BLOB", "", 0, 1, false}, {"algorithm", "TEXT", "", 1, 0, false}, {"format", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"size", "INTEGER", "", 1, 0, false}, {"last_used_at", "TEXT", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -223,11 +263,13 @@ func normalizeType(value string) string {
 }
 
 var requiredChecks = map[string][]string{
-	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)"},
+	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)", "check(evidence_nilin(0,1))", "check(evidence_count>=0)"},
 	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
 	"observation_state":  {"check(observation_index>=0)", "check(metadata_nilin(0,1))", "check(consumers_nilin(0,1))"},
 	"relationship_state": {"check(relationship_index>=0)"},
 	"inventory_errors":   {"check(error_index>=0)"},
+	"evidence_state":     {"check(evidence_index>=0)", "check(metadata_nilin(0,1))", "check(errors_nilin(0,1))"},
+	"content_cache":      {"check(length(cache_key)=32)", "check(size>=0)"},
 }
 
 func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
@@ -268,6 +310,13 @@ var requiredForeignKeys = map[string][]foreignKeyGroup{
 	"observation_state":  {{"observations", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"observation_id", "observation_id"}}}},
 	"relationship_state": {{"relationships", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"from_id", "from_id"}, {"kind", "kind"}, {"to_id", "to_id"}}}},
 	"inventory_errors":   {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"evidence": {
+		{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}},
+		{"assets", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"asset_id", "asset_id"}}},
+		{"observations", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"observation_id", "observation_id"}}},
+	},
+	"evidence_state":    {{"evidence", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"evidence_id", "evidence_id"}}}},
+	"evidence_coverage": {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 }
 
 func verifyForeignKeys(db *sql.DB) error {
@@ -333,6 +382,10 @@ var requiredIndexFingerprints = map[string][]string{
 	"observation_state":  {"pk:1:scan_id,observation_id", "u:1:scan_id,observation_index"},
 	"relationship_state": {"pk:1:scan_id,from_id,kind,to_id", "u:1:scan_id,relationship_index"},
 	"inventory_errors":   {"pk:1:scan_id,error_index"},
+	"evidence":           {"pk:1:scan_id,evidence_id"},
+	"evidence_state":     {"pk:1:scan_id,evidence_id", "u:1:scan_id,evidence_index"},
+	"evidence_coverage":  {"pk:1:scan_id"},
+	"content_cache":      {"pk:1:cache_key"},
 }
 
 func verifyIndices(db *sql.DB) error {

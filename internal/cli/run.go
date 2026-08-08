@@ -87,15 +87,20 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to read status")
 			return 1
 		}
-		status := statusPayload{SchemaVersion: "ssc-init.status.v2", Initialized: initialized}
+		status := statusPayload{SchemaVersion: "ssc-init.status.v3", Initialized: initialized}
 		if initialized {
 			status.InventorySchemaVersion = snapshot.Scan.SchemaVersion
 			status.Inventory = &snapshot.Inventory
-			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v2" {
+			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v3" {
 				scope := snapshot.Scan.Scope
 				status.Scope = &scope
 				status.Coverage = snapshot.Scan.Coverage
+				evidenceCoverage := snapshot.Scan.EvidenceCoverage
+				status.EvidenceCoverage = &evidenceCoverage
 			} else {
+				// v1/v2 snapshots predate content evidence. They keep their
+				// persisted inventory but never claim scope, coverage, or any
+				// evidence coverage they could not have collected.
 				status.LegacyInventory = true
 			}
 		}
@@ -132,6 +137,7 @@ type statusPayload struct {
 	LegacyInventory        bool                    `json:"legacyInventory,omitempty"`
 	Scope                  *model.ScanScope        `json:"scope,omitempty"`
 	Coverage               []model.CollectorResult `json:"coverage,omitempty"`
+	EvidenceCoverage       *model.EvidenceCoverage `json:"evidenceCoverage,omitempty"`
 	Inventory              *model.Inventory        `json:"inventory,omitempty"`
 }
 

@@ -33,6 +33,7 @@ type RootedFileSystem interface {
 // RootedDirectory exposes only fd-anchored operations needed by collectors.
 type RootedDirectory interface {
 	Lstat(name string) (os.FileInfo, error)
+	Readlink(name string) (string, error)
 	OpenRoot(name string) (RootedDirectory, error)
 	Open(name string) (RootedFile, error)
 	Close() error
@@ -44,6 +45,13 @@ type RootedFile interface {
 	Stat() (os.FileInfo, error)
 	ReadDir(n int) ([]os.DirEntry, error)
 	Close() error
+}
+
+// LocalRootedFile optionally reports whether an opened file belongs to a local
+// filesystem. A false known value means callers must not trust locality.
+type LocalRootedFile interface {
+	RootedFile
+	LocalFilesystem() (local bool, known bool)
 }
 
 // OSFileSystem implements FileSystem using the host operating system.
@@ -77,6 +85,13 @@ func (r *osRootedDirectory) Lstat(name string) (os.FileInfo, error) {
 	return r.root.Lstat(name)
 }
 
+func (r *osRootedDirectory) Readlink(name string) (string, error) {
+	if !validRootComponent(name) {
+		return "", fs.ErrInvalid
+	}
+	return r.root.Readlink(name)
+}
+
 func (r *osRootedDirectory) OpenRoot(name string) (RootedDirectory, error) {
 	root, err := r.root.OpenRoot(name)
 	if err != nil {
@@ -86,11 +101,39 @@ func (r *osRootedDirectory) OpenRoot(name string) (RootedDirectory, error) {
 }
 
 func (r *osRootedDirectory) Open(name string) (RootedFile, error) {
-	return r.root.OpenFile(name, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	file, err := r.root.OpenFile(name, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &osRootedFile{file: file}, nil
 }
 
 func (r *osRootedDirectory) Close() error {
 	return r.root.Close()
+}
+
+type osRootedFile struct {
+	file *os.File
+}
+
+func (f *osRootedFile) Read(p []byte) (int, error) {
+	return f.file.Read(p)
+}
+
+func (f *osRootedFile) Stat() (os.FileInfo, error) {
+	return f.file.Stat()
+}
+
+func (f *osRootedFile) ReadDir(n int) ([]os.DirEntry, error) {
+	return f.file.ReadDir(n)
+}
+
+func (f *osRootedFile) Close() error {
+	return f.file.Close()
+}
+
+func (f *osRootedFile) LocalFilesystem() (local bool, known bool) {
+	return localFilesystem(f.file.Fd())
 }
 
 func (OSFileSystem) ReadFile(name string) ([]byte, error) {

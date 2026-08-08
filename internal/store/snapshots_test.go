@@ -110,6 +110,215 @@ func TestMigrationFourPreservesLegacyV1Snapshot(t *testing.T) {
 	}
 }
 
+func TestMigration5AddsEvidenceAndContentCacheSchema(t *testing.T) {
+	path := createDatabaseAtMigration(t, 4)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	var applied int
+	if err := s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 5 {
+		t.Fatalf("applied migration=%d want=5", applied)
+	}
+	for _, table := range []string{"evidence", "evidence_state", "evidence_coverage", "content_cache"} {
+		assertTableExists(t, s.db, table)
+	}
+	for table, columns := range map[string][]string{
+		"evidence":          {"scan_id", "evidence_id", "asset_id", "observation_id", "evidence_json"},
+		"evidence_state":    {"scan_id", "evidence_id", "evidence_index", "metadata_nil", "errors_nil"},
+		"evidence_coverage": {"scan_id", "result_json"},
+		"content_cache":     {"cache_key", "algorithm", "format", "digest", "size", "last_used_at"},
+		"inventory_state":   {"evidence_nil", "evidence_count"},
+	} {
+		for _, column := range columns {
+			assertColumnExists(t, s.db, table, column)
+		}
+	}
+}
+
+func TestMigration5RollsBackAsOneTransaction(t *testing.T) {
+	path := createDatabaseAtMigration(t, 4)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE content_cache (conflict TEXT)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path); err == nil {
+		reopened.Close()
+		t.Fatal("conflicting migration unexpectedly opened")
+	}
+
+	db, err = sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var applied int
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 4 {
+		t.Fatalf("applied migration=%d want=4", applied)
+	}
+	assertColumnMissing(t, db, "inventory_state", "evidence_nil")
+	assertColumnMissing(t, db, "inventory_state", "evidence_count")
+	for _, table := range []string{"evidence", "evidence_state", "evidence_coverage"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("table %q unexpectedly exists after rollback", table)
+		}
+	}
+}
+
+func TestMigration5PreservesLegacyV2Snapshot(t *testing.T) {
+	path := createDatabaseAtMigration(t, 4)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO scans(id, schema_version, status, started_at, finished_at, scope_json) VALUES (?, ?, ?, ?, ?, '{}')`,
+		"legacy-v2", "ssc-init.scan.v2", "complete", formatTime(time.Unix(1, 0)), formatTime(time.Unix(2, 0))); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count) VALUES (?, 1, 1, 1, 0, 0, 0, 1, 0)`, "legacy-v2"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got, ok, err := s.LatestSnapshot(context.Background())
+	want := model.Snapshot{
+		Scan: model.ScanResult{
+			SchemaVersion: "ssc-init.scan.v2",
+			ScanID:        "legacy-v2",
+			Status:        "complete",
+			StartedAt:     time.Unix(1, 0).UTC(),
+			FinishedAt:    time.Unix(2, 0).UTC(),
+		},
+		Inventory: model.Inventory{},
+	}
+	if err != nil || !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ok=%v\n got=%#v\nwant=%#v\nerr=%v", ok, got, want, err)
+	}
+	if got.Inventory.Evidence != nil {
+		t.Fatal("legacy snapshot loaded a non-nil evidence slice")
+	}
+	if !reflect.DeepEqual(got.Scan.EvidenceCoverage, model.EvidenceCoverage{}) {
+		t.Fatalf("legacy snapshot implied evidence coverage: %#v", got.Scan.EvidenceCoverage)
+	}
+}
+
+func TestEvidenceSchemaRejectsIncompatibleShapes(t *testing.T) {
+	for _, tt := range []struct {
+		name, table, old, replacement string
+	}{
+		{name: "split evidence asset foreign key", table: "evidence",
+			old:         "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)",
+			replacement: "FOREIGN KEY (asset_id) REFERENCES assets(asset_id), FOREIGN KEY (scan_id) REFERENCES assets(scan_id)"},
+		{name: "reordered evidence observation foreign key", table: "evidence",
+			old:         "FOREIGN KEY (scan_id, observation_id) REFERENCES observations(scan_id, observation_id)",
+			replacement: "FOREIGN KEY (scan_id, observation_id) REFERENCES observations(observation_id, scan_id)"},
+		{name: "cross-scan evidence asset foreign key", table: "evidence",
+			old:         "FOREIGN KEY (scan_id, asset_id) REFERENCES assets(scan_id, asset_id)",
+			replacement: "FOREIGN KEY (observation_id, asset_id) REFERENCES assets(scan_id, asset_id)"},
+		{name: "wrong evidence index check", table: "evidence_state",
+			old:         "CHECK (evidence_index >= 0)",
+			replacement: "CHECK (evidence_index >= -1)"},
+		{name: "wrong evidence unique index", table: "evidence_state",
+			old:         "UNIQUE (scan_id, evidence_index)",
+			replacement: "UNIQUE (evidence_index)"},
+		{name: "wrong evidence state foreign key", table: "evidence_state",
+			old:         "REFERENCES evidence(scan_id, evidence_id)",
+			replacement: "REFERENCES evidence(evidence_id, scan_id)"},
+		{name: "wrong coverage foreign key", table: "evidence_coverage",
+			old:         "REFERENCES scans(id)",
+			replacement: "REFERENCES scans(status)"},
+		{name: "wrong evidence nil default", table: "inventory_state",
+			old:         "evidence_nil INTEGER NOT NULL DEFAULT 1",
+			replacement: "evidence_nil INTEGER NOT NULL DEFAULT 0"},
+		{name: "wrong evidence count check", table: "inventory_state",
+			old:         "CHECK (evidence_count >= 0)",
+			replacement: "CHECK (evidence_count >= -1)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRewrittenSchemaRejected(t, tt.table, tt.old, tt.replacement)
+		})
+	}
+}
+
+func TestContentCacheSchemaRejectsIncompatibleShapes(t *testing.T) {
+	for _, tt := range []struct {
+		name, table, old, replacement string
+	}{
+		{name: "wrong key type", table: "content_cache",
+			old:         "cache_key BLOB PRIMARY KEY",
+			replacement: "cache_key TEXT PRIMARY KEY"},
+		{name: "wrong key length check", table: "content_cache",
+			old:         "CHECK (length(cache_key) = 32)",
+			replacement: "CHECK (length(cache_key) = 31)"},
+		{name: "wrong size check", table: "content_cache",
+			old:         "CHECK (size >= 0)",
+			replacement: "CHECK (size >= -1)"},
+		{name: "wrong nullability", table: "content_cache",
+			old:         "digest TEXT NOT NULL",
+			replacement: "digest TEXT"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRewrittenSchemaRejected(t, tt.table, tt.old, tt.replacement)
+		})
+	}
+}
+
+func assertRewrittenSchemaRejected(t *testing.T, table, old, replacement string) {
+	t.Helper()
+	path := filepath.Join(privateTempDir(t), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.db.Exec(`UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = ?`, old, replacement, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		t.Fatalf("affected=%d", affected)
+	}
+	if _, err := s.db.Exec(`PRAGMA writable_schema=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path); err == nil {
+		reopened.Close()
+		t.Fatal("incompatible schema unexpectedly opened")
+	}
+}
+
 func TestObservationAndScopeRoundTrip(t *testing.T) {
 	s := openTestStore(t)
 	scan := testScan("v2", time.Unix(2, 0).UTC())
@@ -410,7 +619,7 @@ func TestRowFailureRollsBackEveryTable(t *testing.T) {
 	if err := s.SaveScan(context.Background(), scan, duplicateAssets); err == nil {
 		t.Fatal("duplicate asset unexpectedly succeeded")
 	}
-	for _, table := range []string{"scans", "assets", "asset_state", "relationships", "relationship_state", "coverage", "inventory_state", "inventory_errors"} {
+	for _, table := range []string{"scans", "assets", "asset_state", "relationships", "relationship_state", "coverage", "evidence", "evidence_state", "evidence_coverage", "inventory_state", "inventory_errors"} {
 		var count int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatalf("count %s: %v", table, err)
@@ -1362,7 +1571,7 @@ func TestOpenRejectsMalformedMigrationHistoryAndSchema(t *testing.T) {
 
 func assertNoSnapshotRows(t *testing.T, s *Store) {
 	t.Helper()
-	for _, table := range []string{"scans", "assets", "observations", "observation_state", "relationships", "coverage", "inventory_errors", "inventory_state"} {
+	for _, table := range []string{"scans", "assets", "observations", "observation_state", "evidence", "evidence_state", "evidence_coverage", "relationships", "coverage", "inventory_errors", "inventory_state"} {
 		var count int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatal(err)

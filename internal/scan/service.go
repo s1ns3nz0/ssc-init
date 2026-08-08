@@ -13,11 +13,12 @@ import (
 	"github.com/ssc-init/ssc-init/internal/collector"
 	"github.com/ssc-init/ssc-init/internal/collector/mcp"
 	"github.com/ssc-init/ssc-init/internal/collector/projects"
+	"github.com/ssc-init/ssc-init/internal/evidence"
 	"github.com/ssc-init/ssc-init/internal/inventory"
 	"github.com/ssc-init/ssc-init/internal/model"
 )
 
-const schemaVersion = "ssc-init.scan.v2"
+const schemaVersion = "ssc-init.scan.v3"
 
 // SnapshotStore is the persistence boundary required by a baseline scan.
 type SnapshotStore interface {
@@ -93,6 +94,18 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 	}
 
 	current := inventory.Build(results)
+	if current.Observations == nil {
+		current.Observations = []model.Observation{}
+	}
+	collection := s.collectLocalEvidence(ctx, current, results)
+	if err := ctx.Err(); err != nil {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, err
+	}
+	current.Evidence = append(current.Evidence, collection.Evidence...)
+	sort.SliceStable(current.Evidence, func(i, j int) bool {
+		return current.Evidence[i].ID < current.Evidence[j].ID
+	})
+
 	previousSnapshot, exists, err := s.snapshots.LatestSnapshot(ctx)
 	if err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("load previous inventory")
@@ -115,18 +128,38 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		finishedAt = startedAt
 	}
 	result := model.ScanResult{
-		SchemaVersion: schemaVersion,
-		ScanID:        scanID,
-		Status:        overallStatus(results, current),
-		StartedAt:     startedAt,
-		FinishedAt:    finishedAt,
-		Coverage:      results,
-		Scope:         s.environment.Scope,
+		SchemaVersion:    schemaVersion,
+		ScanID:           scanID,
+		Status:           overallStatus(results, current, collection.Coverage.Status),
+		StartedAt:        startedAt,
+		FinishedAt:       finishedAt,
+		Coverage:         results,
+		EvidenceCoverage: collection.Coverage,
+		Scope:            s.environment.Scope,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, errors.New("save baseline snapshot")
 	}
+	if writer, ok := s.snapshots.(evidence.CacheWriter); ok && len(collection.CacheWrites) > 0 {
+		_ = writer.StoreContentCache(ctx, collection.CacheWrites)
+	}
 	return result, current, delta, nil
+}
+
+// collectLocalEvidence runs the bounded local evidence engine against the
+// normalized graph and clears every runtime target before the result is used
+// for reporting or persistence. The persistent store's content cache is wired
+// automatically; other snapshot stores use the explicit disabled cache.
+func (s *Service) collectLocalEvidence(ctx context.Context, current model.Inventory, results []model.CollectorResult) evidence.Collection {
+	engine := evidence.Engine{Cache: evidence.DisabledLeafCache{}}
+	if cache, ok := s.snapshots.(evidence.LeafCache); ok {
+		engine.Cache = cache
+	}
+	collection := engine.Collect(ctx, s.environment, current, results)
+	if collection.Coverage.Targets == nil {
+		collection.Coverage.Targets = []model.EvidenceTargetResult{}
+	}
+	return collection
 }
 
 func (s *Service) collectProjectMCP(ctx context.Context, results []model.CollectorResult) []model.CollectorResult {
@@ -156,10 +189,14 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 	}
 
 	merged := make([]model.CollectorResult, 0, len(results)+1)
-	for _, result := range results {
-		if result.Collector != "mcp" {
-			merged = append(merged, result)
+	for index := range results {
+		if results[index].Collector == "mcp" {
+			// The initial MCP result is replaced by the sealed follow-up, so
+			// its runtime evidence state must not survive the merge.
+			collector.ClearLocalEvidenceTargets(results[index : index+1])
+			continue
 		}
+		merged = append(merged, results[index])
 	}
 	merged = append(merged, followUp[0])
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Collector < merged[j].Collector })
@@ -185,7 +222,10 @@ func buildScope(environment collector.Environment) model.ScanScope {
 	return scope
 }
 
-func overallStatus(results []model.CollectorResult, current model.Inventory) string {
+func overallStatus(results []model.CollectorResult, current model.Inventory, evidenceStatus model.CoverageStatus) string {
+	if evidenceStatus != model.CoverageComplete {
+		return "partial"
+	}
 	if len(results) == 0 || len(current.Errors) > 0 {
 		return "partial"
 	}

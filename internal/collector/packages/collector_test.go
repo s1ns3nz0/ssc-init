@@ -104,6 +104,54 @@ func TestPackageProbesAreSkippedByDefault(t *testing.T) {
 	if got.Status != model.CoverageSkipped || len(got.Assets) != 0 || len(got.Observations) != 0 {
 		t.Fatalf("result=%+v", got)
 	}
+	if got.LocalEvidenceIssuer != nil || len(got.LocalEvidenceTargets) != 0 {
+		t.Fatalf("skipped collection issued evidence: %+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestCanceledPackageCollectionReturnsNoPartiallyIssuedEvidence(t *testing.T) {
+	home := t.TempDir()
+	npmRoot := filepath.Join(home, ".npm-global", "lib", "node_modules")
+	writeFile(t, filepath.Join(npmRoot, "eslint", "package.json"), `{"name":"eslint","version":"9.1.0"}`)
+	runner := &testutil.FakeRunner{Results: map[string]platform.CommandResult{
+		commandKey("npm", "root", "-g"): {Stdout: npmRoot + "\n"},
+	}}
+	env := optInEnvironment(t, home, runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	env.Inspector = &cancelingInspector{delegate: env.Inspector, cancelAfter: 1, cancel: cancel}
+
+	got, err := New().Collect(ctx, env)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if got.LocalEvidenceIssuer != nil || got.LocalEvidenceTargets != nil {
+		t.Fatalf("canceled collection returned issued evidence: %+v", got)
+	}
+	if got.Assets != nil || got.Observations != nil || got.Targets != nil || got.Errors != nil {
+		t.Fatalf("canceled collection returned partial state: %+v", got)
+	}
+}
+
+type cancelingInspector struct {
+	delegate    platform.ExecutableInspector
+	cancelAfter int
+	calls       int
+	cancel      context.CancelFunc
+}
+
+func (c *cancelingInspector) Inspect(ctx context.Context, home, command string) (platform.ExecutableEvidence, error) {
+	evidence, err := c.delegate.Inspect(ctx, home, command)
+	c.calls++
+	if c.calls > c.cancelAfter {
+		c.cancel()
+	}
+	return evidence, err
+}
+
+func (c *cancelingInspector) Verify(evidence platform.ExecutableEvidence) error {
+	return c.delegate.Verify(evidence)
 }
 
 func TestOptInPackageProbeInspectsRunsAbsoluteAndVerifiesWithLinkedEvidence(t *testing.T) {

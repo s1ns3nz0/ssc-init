@@ -3,6 +3,7 @@ package projects
 import "path/filepath"
 
 var excludedDirectoryNames = map[string]struct{}{
+	".git":         {},
 	"node_modules": {},
 	".venv":        {},
 	"venv":         {},

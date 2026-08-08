@@ -84,5 +84,6 @@ type ChangeEntity string
 
 const (
 	ChangeEntityAsset       ChangeEntity = "asset"
+	ChangeEntityEvidence    ChangeEntity = "evidence"
 	ChangeEntityObservation ChangeEntity = "observation"
 )

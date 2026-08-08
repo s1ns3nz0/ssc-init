@@ -13,8 +13,10 @@ import (
 	"strings"
 
 	"github.com/ssc-init/ssc-init/internal/collector"
+	"github.com/ssc-init/ssc-init/internal/evidence"
 	"github.com/ssc-init/ssc-init/internal/identity"
 	"github.com/ssc-init/ssc-init/internal/model"
+	"github.com/ssc-init/ssc-init/internal/platform"
 )
 
 const (
@@ -33,10 +35,13 @@ type Root struct {
 }
 
 type projectCollector struct {
-	roots      []Root
-	invalid    bool
-	limits     walkLimits
-	beforeOpen func(string)
+	roots              []Root
+	invalid            bool
+	limits             walkLimits
+	beforeOpen         func(string)
+	afterWalk          func(string)
+	beforeProject      func(string)
+	beforeEvidenceHash func(string)
 }
 
 type localTargetProvenance struct {
@@ -156,7 +161,7 @@ func (*projectCollector) Targets() []model.TargetSpec {
 func (c *projectCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
 	result := model.CollectorResult{Collector: c.Name()}
 	if err := ctx.Err(); err != nil {
-		return result, err
+		return abortProjectCollection(&result, err)
 	}
 	if c.invalid {
 		return result, errors.New("invalid project roots")
@@ -172,30 +177,45 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 
 	for _, root := range roots {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return abortProjectCollection(&result, err)
 		}
 		walked, err := walkConfiguredRoot(ctx, env.FS, root, limits, c.beforeOpen)
 		if err != nil {
-			return result, err
+			return abortProjectCollection(&result, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return abortProjectCollection(&result, err)
+		}
+		if c.afterWalk != nil {
+			c.afterWalk(root.Ref)
+			if err := ctx.Err(); err != nil {
+				return abortProjectCollection(&result, err)
+			}
 		}
 		target := model.TargetCoverage{
 			TargetID: projectRootTargetID, InstanceRef: root.Ref,
 			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
-			assets, relationships, observations, localTargets, evidenceErrors := buildEvidence(c, env.Home, root, walked.configs)
-			result.Assets = append(result.Assets, assets...)
-			result.Relationships = append(result.Relationships, relationships...)
-			result.Observations = append(result.Observations, observations...)
-			result.LocalTargets = append(result.LocalTargets, localTargets...)
-			target.Assets = len(assets)
-			target.Observations = len(observations)
+			assetStart, observationStart := len(result.Assets), len(result.Observations)
+			evidenceErrors, buildErr := buildEvidence(ctx, c, env, root, walked, &result)
+			if buildErr != nil {
+				return abortProjectCollection(&result, buildErr)
+			}
+			if err := ctx.Err(); err != nil {
+				return abortProjectCollection(&result, err)
+			}
+			target.Assets = len(result.Assets) - assetStart
+			target.Observations = len(result.Observations) - observationStart
 			if len(evidenceErrors) > 0 {
 				target.Status = model.TargetPartial
 				target.Errors = append(target.Errors, evidenceErrors...)
 			}
 		}
 		result.Targets = append(result.Targets, target)
+	}
+	if err := ctx.Err(); err != nil {
+		return abortProjectCollection(&result, err)
 	}
 
 	sort.Slice(result.Targets, func(i, j int) bool { return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef })
@@ -217,8 +237,27 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		}
 		return result.LocalTargets[i].TargetID < result.LocalTargets[j].TargetID
 	})
+	sort.SliceStable(result.LocalEvidenceTargets, func(i, j int) bool {
+		if result.LocalEvidenceTargets[i].TargetID != result.LocalEvidenceTargets[j].TargetID {
+			return result.LocalEvidenceTargets[i].TargetID < result.LocalEvidenceTargets[j].TargetID
+		}
+		return result.LocalEvidenceTargets[i].ObservationID < result.LocalEvidenceTargets[j].ObservationID
+	})
 	result.Status = collector.AggregateTargetStatus(result.Targets)
+	if err := ctx.Err(); err != nil {
+		return abortProjectCollection(&result, err)
+	}
 	return result, nil
+}
+
+func abortProjectCollection(result *model.CollectorResult, err error) (model.CollectorResult, error) {
+	if result == nil {
+		return model.CollectorResult{Collector: "projects"}, err
+	}
+	runtime := []model.CollectorResult{*result}
+	collector.ClearLocalEvidenceTargets(runtime)
+	*result = model.CollectorResult{Collector: "projects"}
+	return *result, err
 }
 
 func sealRoot(root Root) [sha256.Size]byte {
@@ -268,19 +307,76 @@ func validateResolvedRoots(roots []Root) error {
 	return nil
 }
 
-func buildEvidence(owner *projectCollector, home string, root Root, configs []discoveredConfig) ([]model.Asset, []model.Relationship, []model.Observation, []model.LocalTarget, []model.CoverageError) {
-	assets := make([]model.Asset, 0, len(configs)*2)
-	relationships := make([]model.Relationship, 0, len(configs))
-	observations := make([]model.Observation, 0, len(configs))
-	localTargets := make([]model.LocalTarget, 0, len(configs))
+func buildEvidence(ctx context.Context, owner *projectCollector, env collector.Environment, root Root, walked rootWalk, result *model.CollectorResult) ([]model.CoverageError, error) {
 	errorsOut := make([]model.CoverageError, 0)
-	seenProjects := make(map[string]struct{})
-	for _, config := range configs {
-		absoluteConfig := filepath.Clean(filepath.Join(root.Path, config.relativePath))
-		absoluteProject := filepath.Clean(filepath.Join(root.Path, config.projectRelative))
-		locationRef := identity.SafeLocationRef(home, absoluteConfig, root.Ref)
-		projectRef := identity.SafeLocationRef(home, absoluteProject, root.Ref)
+	if err := ctx.Err(); err != nil {
+		return errorsOut, err
+	}
+	projectRelatives := make(map[string]struct{}, len(walked.configs)+len(walked.evidence))
+	for _, config := range walked.configs {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		projectRelatives[filepath.Clean(config.projectRelative)] = struct{}{}
+	}
+	for _, item := range walked.evidence {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		projectRelatives[filepath.Clean(item.projectRelative)] = struct{}{}
+	}
+	orderedProjects := make([]string, 0, len(projectRelatives))
+	for relative := range projectRelatives {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		orderedProjects = append(orderedProjects, relative)
+	}
+	sort.Strings(orderedProjects)
+	if err := ctx.Err(); err != nil {
+		return errorsOut, err
+	}
+	projectIDs := make(map[string]string, len(orderedProjects))
+	projectObservations := make(map[string]model.Observation, len(orderedProjects))
+	for _, projectRelative := range orderedProjects {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		if owner.beforeProject != nil {
+			owner.beforeProject(filepath.ToSlash(projectRelative))
+			if err := ctx.Err(); err != nil {
+				return errorsOut, err
+			}
+		}
+		absoluteProject := filepath.Clean(filepath.Join(root.Path, projectRelative))
+		projectRef := identity.SafeLocationRef(env.Home, absoluteProject, root.Ref)
 		projectID := digestID("project", "ssc-init.project.v1", projectRef)
+		observation, err := identity.FinalizeObservation(model.Observation{
+			AssetID: projectID, Collector: "projects", Scope: model.ScopeProject,
+			LocationRef: projectRef, ProjectID: projectID, Source: projectRootTargetID,
+			Metadata: map[string]string{"root_ref": root.Ref},
+		})
+		if err != nil {
+			errorsOut = append(errorsOut, model.CoverageError{Code: "identity_rejected", Message: "project identity was rejected"})
+			continue
+		}
+		projectIDs[projectRelative] = projectID
+		projectObservations[projectRelative] = observation
+		result.Assets = append(result.Assets, model.Asset{ID: projectID, Type: model.AssetProject, Name: "project"})
+		result.Observations = append(result.Observations, observation)
+	}
+
+	for _, config := range walked.configs {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		absoluteConfig := filepath.Clean(filepath.Join(root.Path, config.relativePath))
+		locationRef := identity.SafeLocationRef(env.Home, absoluteConfig, root.Ref)
+		projectRelative := filepath.Clean(config.projectRelative)
+		projectID, exists := projectIDs[projectRelative]
+		if !exists {
+			continue
+		}
 		configID := digestID("project-config", "ssc-init.project-config.v1", locationRef)
 		observation, err := identity.FinalizeObservation(model.Observation{
 			AssetID: configID, Collector: "projects", Host: config.definition.host,
@@ -292,15 +388,11 @@ func buildEvidence(owner *projectCollector, home string, root Root, configs []di
 			errorsOut = append(errorsOut, model.CoverageError{Code: "identity_rejected", Message: "project configuration identity was rejected"})
 			continue
 		}
-		if _, exists := seenProjects[projectID]; !exists {
-			seenProjects[projectID] = struct{}{}
-			assets = append(assets, model.Asset{ID: projectID, Type: model.AssetProject, Name: "project"})
-		}
-		assets = append(assets, model.Asset{
+		result.Assets = append(result.Assets, model.Asset{
 			ID: configID, Type: model.AssetProject, Name: filepath.ToSlash(config.definition.relativePath), Source: "project-config",
 		})
-		relationships = append(relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
-		observations = append(observations, observation)
+		result.Relationships = append(result.Relationships, model.Relationship{From: projectID, To: configID, Kind: "contains"})
+		result.Observations = append(result.Observations, observation)
 		localTarget := model.LocalTarget{
 			TargetID: config.definition.targetID, InstanceRef: locationRef, Path: absoluteConfig,
 			Format: config.definition.format, Host: config.definition.host,
@@ -309,9 +401,138 @@ func buildEvidence(owner *projectCollector, home string, root Root, configs []di
 		localTarget.Provenance = &localTargetProvenance{
 			owner: owner, rootSeal: root.seal, targetSeal: sealLocalTarget(root, &localTarget),
 		}
-		localTargets = append(localTargets, localTarget)
+		result.LocalTargets = append(result.LocalTargets, localTarget)
 	}
-	return assets, relationships, observations, localTargets, errorsOut
+
+	for _, item := range walked.evidence {
+		if err := ctx.Err(); err != nil {
+			return errorsOut, err
+		}
+		projectRelative := filepath.Clean(item.projectRelative)
+		projectID, exists := projectIDs[projectRelative]
+		observation, observed := projectObservations[projectRelative]
+		if !exists || !observed {
+			continue
+		}
+		if err := issueProjectEvidence(ctx, owner, env, root, walked.rootFingerprint, item, projectID, observation, result); err != nil {
+			return errorsOut, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return errorsOut, err
+	}
+	return errorsOut, nil
+}
+
+func issueProjectEvidence(ctx context.Context, owner *projectCollector, env collector.Environment, configured Root, rootFingerprint platform.FileFingerprint, item discoveredProjectEvidence, projectID string, observation model.Observation, result *model.CollectorResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	base := model.LocalEvidenceTarget{
+		TargetID: item.definition.targetID(), AssetID: projectID, ObservationID: observation.ID,
+		Kind: model.EvidenceFileSHA256, Subject: item.definition.subject,
+	}
+	if item.oversize {
+		return issueProjectPreset(ctx, result, base, model.EvidenceOversize)
+	}
+	rooted, ok := env.FS.(platform.RootedFileSystem)
+	if !ok || rooted == nil {
+		return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+	}
+	root, err := rooted.OpenRoot(configured.Path)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+	}
+	defer root.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	openedRoot, rootOK := projectRootFingerprint(root)
+	if !rootOK || openedRoot != rootFingerprint {
+		return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+	}
+	asset := root
+	assetRelative := filepath.Clean(item.projectRelative)
+	if assetRelative == "." {
+		assetRelative = ""
+	}
+	if assetRelative != "" {
+		components := strings.Split(assetRelative, string(filepath.Separator))
+		asset, err = platform.OpenVerifiedRoot(ctx, root, components...)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+		}
+		defer asset.Close()
+	}
+	assetFingerprint, assetOK := projectRootFingerprint(asset)
+	if !assetOK || assetFingerprint != item.projectFingerprint {
+		return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+	}
+	if owner.beforeEvidenceHash != nil {
+		owner.beforeEvidenceHash(filepath.ToSlash(item.relativePath))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	digest, status, _ := evidence.HashVerifiedFile(ctx, root, item.relativePath, item.definition.maxBytes)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if status != model.EvidenceComplete || digest.Fingerprint != item.fileFingerprint {
+		if status == model.EvidenceOversize {
+			return issueProjectPreset(ctx, result, base, model.EvidenceOversize)
+		} else {
+			return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
+		}
+	}
+	base.RootPath = configured.Path
+	base.RelativePath = filepath.Clean(item.relativePath)
+	anchor := evidence.Anchor{
+		Root: rootFingerprint, AssetRoot: assetFingerprint, AssetRelativePath: filepath.ToSlash(assetRelative),
+		RelativePath: filepath.Clean(item.relativePath), Digest: digest.SHA256, Size: digest.Size,
+		Mode: digest.Fingerprint.Mode & 0o777, Fingerprint: digest.Fingerprint, MaxBytes: item.definition.maxBytes,
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	issuer := evidence.BindCollectorResult(result)
+	if issuer != nil {
+		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, anchor))
+	}
+	return ctx.Err()
+}
+
+func issueProjectPreset(ctx context.Context, result *model.CollectorResult, target model.LocalEvidenceTarget, status model.EvidenceStatus) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	issuer := evidence.BindCollectorResult(result)
+	if issuer == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	target.PresetStatus = status
+	result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(target, evidence.Anchor{}))
+	return ctx.Err()
+}
+
+func projectRootFingerprint(root platform.RootedDirectory) (platform.FileFingerprint, bool) {
+	if root == nil {
+		return platform.FileFingerprint{}, false
+	}
+	info, err := root.Lstat(".")
+	if err != nil || info == nil || !info.IsDir() {
+		return platform.FileFingerprint{}, false
+	}
+	return platform.Fingerprint(info)
 }
 
 func sealLocalTarget(root Root, target *model.LocalTarget) [sha256.Size]byte {

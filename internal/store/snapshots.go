@@ -69,6 +69,9 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 			return fmt.Errorf("insert observation state %q: %w", observation.ID, err)
 		}
 	}
+	if err = saveEvidence(ctx, tx, scan.ScanID, inventory.Evidence); err != nil {
+		return err
+	}
 	for index, relationship := range inventory.Relationships {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO relationships(scan_id, from_id, kind, to_id) VALUES (?, ?, ?, ?)`,
 			scan.ScanID, relationship.From, relationship.Kind, relationship.To); err != nil {
@@ -88,6 +91,9 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 			return fmt.Errorf("insert coverage %q: %w", result.Collector, err)
 		}
 	}
+	if err = saveEvidenceCoverage(ctx, tx, scan.ScanID, scan.EvidenceCoverage); err != nil {
+		return err
+	}
 	for index, inventoryError := range inventory.Errors {
 		encoded, marshalErr := json.Marshal(inventoryError)
 		if marshalErr != nil {
@@ -97,9 +103,10 @@ func (s *Store) SaveScan(ctx context.Context, scan model.ScanResult, inventory m
 			return fmt.Errorf("insert inventory error %d: %w", index, err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count, evidence_nil, evidence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		scan.ScanID, boolInt(inventory.Assets == nil), boolInt(inventory.Relationships == nil), boolInt(inventory.Errors == nil),
-		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors), boolInt(inventory.Observations == nil), len(inventory.Observations)); err != nil {
+		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors), boolInt(inventory.Observations == nil), len(inventory.Observations),
+		boolInt(inventory.Evidence == nil), len(inventory.Evidence)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -152,14 +159,17 @@ func (s *Store) LatestSnapshot(ctx context.Context) (model.Snapshot, bool, error
 	if scan.Coverage, err = loadCoverage(ctx, db, scan.ScanID); err != nil {
 		return model.Snapshot{}, false, err
 	}
+	if scan.EvidenceCoverage, err = loadEvidenceCoverage(ctx, db, scan.ScanID); err != nil {
+		return model.Snapshot{}, false, err
+	}
 
-	var assetsNil, relationshipsNil, errorsNil, observationsNil int
-	var assetCount, relationshipCount, errorCount, observationCount int
-	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, observations_nil, asset_count, relationship_count, error_count, observation_count FROM inventory_state WHERE scan_id = ?`, scan.ScanID).
-		Scan(&assetsNil, &relationshipsNil, &errorsNil, &observationsNil, &assetCount, &relationshipCount, &errorCount, &observationCount); err != nil {
+	var assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil int
+	var assetCount, relationshipCount, errorCount, observationCount, evidenceCount int
+	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, observations_nil, evidence_nil, asset_count, relationship_count, error_count, observation_count, evidence_count FROM inventory_state WHERE scan_id = ?`, scan.ScanID).
+		Scan(&assetsNil, &relationshipsNil, &errorsNil, &observationsNil, &evidenceNil, &assetCount, &relationshipCount, &errorCount, &observationCount, &evidenceCount); err != nil {
 		return model.Snapshot{}, false, fmt.Errorf("load inventory state for scan %q: %w", scan.ScanID, err)
 	}
-	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil, observationsNil); err != nil {
+	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil); err != nil {
 		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: %w", scan.ScanID, err)
 	}
 
@@ -191,6 +201,22 @@ func (s *Store) LatestSnapshot(ctx context.Context) (model.Snapshot, bool, error
 		inventory.Observations = observations
 	} else if len(observations) != 0 {
 		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: observations marked nil but rows exist", scan.ScanID)
+	}
+	observationAssets := make(map[string]string, len(observations))
+	for _, observation := range observations {
+		observationAssets[observation.ID] = observation.AssetID
+	}
+	evidence, err := loadEvidence(ctx, db, scan.ScanID, assetIDs, observationAssets)
+	if err != nil {
+		return model.Snapshot{}, false, err
+	}
+	if evidenceCount < 0 || len(evidence) != evidenceCount {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: evidence row count mismatch", scan.ScanID)
+	}
+	if evidenceNil == 0 {
+		inventory.Evidence = evidence
+	} else if len(evidence) != 0 {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: evidence marked nil but rows exist", scan.ScanID)
 	}
 	relationships, err := loadRelationships(ctx, db, scan.ScanID)
 	if err != nil {

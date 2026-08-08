@@ -63,6 +63,8 @@ type jetBrainsManifest struct {
 type manifestEvidence struct {
 	asset    model.Asset
 	metadata map[string]string
+	main     string
+	browser  string
 }
 
 func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, error) {
@@ -85,9 +87,11 @@ func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, 
 	if !ok {
 		return manifestEvidence{}, errRejectedIDEIdentity
 	}
-	entryPoint := strings.TrimSpace(manifest.Main)
+	main := manifest.Main
+	browser := manifest.Browser
+	entryPoint := strings.TrimSpace(main)
 	if entryPoint == "" {
-		entryPoint = strings.TrimSpace(manifest.Browser)
+		entryPoint = strings.TrimSpace(browser)
 	}
 	entryPoint, ok = sanitizeSelectedMetadata(home, entryPoint, false)
 	if !ok {
@@ -125,7 +129,7 @@ func parseVSCodeManifest(contents []byte, host, home string) (manifestEvidence, 
 			Type: model.AssetIDEExtension, Name: name, Version: version, Source: host,
 			Metadata: map[string]string{"publisher": publisher},
 		},
-		metadata: metadata,
+		metadata: metadata, main: main, browser: browser,
 	}, nil
 }
 

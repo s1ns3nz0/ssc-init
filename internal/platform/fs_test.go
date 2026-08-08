@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -67,5 +69,71 @@ func TestOSFileSystemProvidesRootedReadBoundary(t *testing.T) {
 	}
 	if string(contents) != "safe" {
 		t.Fatalf("contents=%q", contents)
+	}
+}
+
+func TestOSRootedDirectoryReadlinkDoesNotResolveTarget(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "secret"), []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("secret", filepath.Join(rootPath, "link")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := (OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	got, err := root.Readlink("link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "secret" {
+		t.Fatalf("target=%q", got)
+	}
+}
+
+func TestOSRootedDirectoryReadlinkRejectsInvalidComponent(t *testing.T) {
+	root, err := (OSFileSystem{}).OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	for _, name := range []string{"nested/link", "link\x00"} {
+		if _, err := root.Readlink(name); !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("name=%q error=%v", name, err)
+		}
+	}
+}
+
+func TestOSRootedFileReportsLocalFilesystem(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("local filesystem classification is Darwin-specific")
+	}
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "file"), []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := (OSFileSystem{}).OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	file, err := root.Open("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	localFile, ok := file.(LocalRootedFile)
+	if !ok {
+		t.Fatal("opened file does not report filesystem locality")
+	}
+	local, known := localFile.LocalFilesystem()
+	if !known || !local {
+		t.Fatalf("local=%t known=%t", local, known)
 	}
 }
