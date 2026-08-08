@@ -68,6 +68,18 @@ $HOME/Library/Application Support/SSC Init/state.db
 
 The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity of the executable used; it does not make that executable trusted.
 
+## Retention and store size
+
+Every `scan --baseline` persists one snapshot, and `hook` runs a scan per session, so the store is pruned on each save:
+
+- full snapshots are kept for 30 days. The window includes its own edge — a snapshot finished exactly at the cutoff is kept — so a machine scanning once a day plateaus at 31 stored snapshots rather than 30;
+- asset change history is kept for 90 days as one small row per distinct asset, so first-seen and last-seen times survive the pruning of the snapshots that observed them;
+- the newest snapshot is never deleted regardless of its age, because without it there is no baseline to diff against and the next scan would report every asset as new.
+
+`doctor --json` reports the footprint under `store`: `sizeBytes` (the database plus its `-wal` and `-shm` files), `reclaimableBytes`, `snapshotCount`, and both retention windows in seconds.
+
+Pruning frees pages for reuse, but those pages return to the filesystem only when a full rewrite runs, and that rewrite is gated: it fires only when the freed pages are at least 256 pages and at least a quarter of the file. Under daily scanning that gate is never reached, so an actively used store plateaus rather than shrinking; the space is recovered after an idle gap or when a batch of snapshots ages out at once. `reclaimableBytes` is the only signal that a store is holding freed pages it cannot yet hand back.
+
 ## Download and verify
 
 Release artifacts are named for both supported macOS architectures:
