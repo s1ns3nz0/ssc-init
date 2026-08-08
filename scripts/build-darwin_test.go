@@ -34,6 +34,8 @@ func TestBuildScriptDeclaresStaticTargets(t *testing.T) {
 		"SOURCE_DATE_EPOCH",
 		"lipo -create",
 		"shasum -a 256",
+		"go version -m",
+		"bomFormat",
 	} {
 		if !bytes.Contains(raw, []byte(want)) {
 			t.Fatalf("build script missing %q", want)
@@ -56,8 +58,8 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("build failed: %v\n%s", err, output)
 		}
-		digests := make(map[string][32]byte, 4)
-		for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "ssc-init-darwin-universal", "checksums.txt"} {
+		digests := make(map[string][32]byte, 5)
+		for _, name := range releaseArtifactNames {
 			path := filepath.Join(repositoryRoot, "dist", name)
 			content, err := os.ReadFile(path)
 			if err != nil {
@@ -66,7 +68,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 			if name != "checksums.txt" && bytes.Contains(content, []byte(repositoryRoot)) {
 				t.Fatalf("%s contains absolute repository path %q", name, repositoryRoot)
 			}
-			if name != "checksums.txt" {
+			if strings.HasPrefix(name, "ssc-init-darwin-") {
 				if !bytes.Contains(content, []byte(wantVersion)) {
 					t.Fatalf("%s does not contain release version %q", name, wantVersion)
 				}
@@ -92,11 +94,93 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(checksums)), "\n")
-	if len(lines) != 3 ||
-		!strings.HasSuffix(lines[0], "  dist/ssc-init-darwin-amd64") ||
-		!strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-arm64") ||
-		!strings.HasSuffix(lines[2], "  dist/ssc-init-darwin-universal") {
+	if len(lines) != 4 ||
+		!strings.HasSuffix(lines[0], "  dist/sbom.cdx.json") ||
+		!strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-amd64") ||
+		!strings.HasSuffix(lines[2], "  dist/ssc-init-darwin-arm64") ||
+		!strings.HasSuffix(lines[3], "  dist/ssc-init-darwin-universal") {
 		t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+	}
+}
+
+// releaseArtifactNames is every file a release build writes into dist/.
+var releaseArtifactNames = []string{
+	"ssc-init-darwin-amd64",
+	"ssc-init-darwin-arm64",
+	"ssc-init-darwin-universal",
+	"sbom.cdx.json",
+	"checksums.txt",
+}
+
+func TestBuildScriptEmitsCycloneDXSBOM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cross-build smoke test")
+	}
+	repositoryRoot := repositoryRoot(t)
+	command := exec.Command("sh", filepath.Join(repositoryRoot, "scripts", "build-darwin.sh"))
+	command.Dir = t.TempDir()
+	command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(filepath.Join(repositoryRoot, "dist", "sbom.cdx.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		BOMFormat   string `json:"bomFormat"`
+		SpecVersion string `json:"specVersion"`
+		Metadata    struct {
+			Component struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"component"`
+		} `json:"metadata"`
+		Components []struct {
+			Name       string `json:"name"`
+			Version    string `json:"version"`
+			PURL       string `json:"purl"`
+			Hashes     []any  `json:"hashes"`
+			Properties []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"properties"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("sbom is not valid JSON: %v\n%s", err, raw)
+	}
+	if document.BOMFormat != "CycloneDX" || document.SpecVersion != "1.5" {
+		t.Fatalf("unexpected sbom envelope: %+v", document)
+	}
+	if document.Metadata.Component.Name != "ssc-init" ||
+		document.Metadata.Component.Version != expectedReleaseVersion(t, repositoryRoot) {
+		t.Fatalf("sbom does not describe this release: %+v", document.Metadata.Component)
+	}
+	if len(document.Components) == 0 {
+		t.Fatal("sbom lists no dependencies")
+	}
+	for _, component := range document.Components {
+		if component.PURL != "pkg:golang/"+component.Name+"@"+component.Version {
+			t.Fatalf("malformed purl for %s: %q", component.Name, component.PURL)
+		}
+		// The go.sum h1: value is a base64 module dirhash, not a hex
+		// SHA-256, so it may never be stated as a CycloneDX hash.
+		if len(component.Hashes) != 0 {
+			t.Fatalf("%s states a hash the build cannot verify: %v", component.Name, component.Hashes)
+		}
+		var recorded string
+		for _, property := range component.Properties {
+			if property.Name == "go:mod:h1" {
+				recorded = property.Value
+			}
+		}
+		if !strings.HasPrefix(recorded, "h1:") {
+			t.Fatalf("%s does not carry its module dirhash as a property: %+v", component.Name, component.Properties)
+		}
+	}
+	if bytes.Contains(raw, []byte(repositoryRoot)) {
+		t.Fatal("sbom contains an absolute repository path")
 	}
 }
 
@@ -206,7 +290,7 @@ func TestBuildScriptAllowsIgnoredEntries(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("ignored entries blocked build: %v\n%s", err, output)
 	}
-	for _, name := range []string{"ssc-init-darwin-amd64", "ssc-init-darwin-arm64", "ssc-init-darwin-universal", "checksums.txt"} {
+	for _, name := range releaseArtifactNames {
 		if _, err := os.Stat(filepath.Join(root, "dist", name)); err != nil {
 			t.Fatalf("missing %s after ignored-entry build: %v", name, err)
 		}
@@ -287,13 +371,23 @@ func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []strin
 	root, script, _ := newIsolatedReleaseRepository(t)
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := "#!/bin/sh\noutput=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
+	fakeGoSource := fakeGoVersionBranch + "output=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFakeLipo(t, binDirectory)
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
 }
+
+// fakeGoVersionBranch answers `go version -m` for the isolated fixtures, whose
+// fake go writes text the real toolchain cannot read module metadata out of.
+// It prefixes the fixtures' argument-scanning bodies, which exit 2 without -o.
+const fakeGoVersionBranch = `#!/bin/sh
+if [ "$1" = version ]; then
+  printf '%s: go1.26.5\n\tpath\tfixture\n\tdep\texample.com/fixture\tv1.0.0\th1:fixture=\n' "$3"
+  exit 0
+fi
+`
 
 // writeFakeLipo shadows /usr/bin/lipo for the isolated fixtures, whose fake go
 // writes text rather than Mach-O objects that the real lipo would accept.
@@ -334,7 +428,7 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := "#!/bin/sh\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
+	fakeGoSource := fakeGoVersionBranch + "output=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}

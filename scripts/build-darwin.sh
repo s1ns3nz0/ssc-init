@@ -64,7 +64,54 @@ lipo -create -output "$DIST_DIR/ssc-init-darwin-universal" \
 	"$DIST_DIR/ssc-init-darwin-arm64" \
 	"$DIST_DIR/ssc-init-darwin-amd64"
 
+# The dependency set that actually shipped is embedded in the artifact, so the
+# CycloneDX document is derived from the universal binary rather than go.mod.
+# The go.sum h1: value is a base64 module dirhash, not a hex SHA-256; it is
+# recorded as a property because a CycloneDX hash would misstate its algorithm.
+# A pipeline would hide a go failure from set -e, leaving a dependency-free
+# SBOM that claims the build had no dependencies.
+EMBEDDED_MODULES=$(go version -m dist/ssc-init-darwin-universal)
+
+printf '%s\n' "$EMBEDDED_MODULES" |
+	awk -v version="$VERSION" -v revision="$REVISION" '
+		BEGIN {
+			printf "{\n"
+			printf "  \"bomFormat\": \"CycloneDX\",\n"
+			printf "  \"specVersion\": \"1.5\",\n"
+			printf "  \"version\": 1,\n"
+			printf "  \"metadata\": {\n"
+			printf "    \"component\": {\n"
+			printf "      \"type\": \"application\",\n"
+			printf "      \"bom-ref\": \"pkg:golang/github.com/s1ns3nz0/ssc-init@%s\",\n", version
+			printf "      \"name\": \"ssc-init\",\n"
+			printf "      \"version\": \"%s\",\n", version
+			printf "      \"purl\": \"pkg:golang/github.com/s1ns3nz0/ssc-init@%s\",\n", version
+			printf "      \"licenses\": [{\"license\": {\"id\": \"Apache-2.0\"}}],\n"
+			printf "      \"properties\": [{\"name\": \"ssc-init:revision\", \"value\": \"%s\"}]\n", revision
+			printf "    }\n"
+			printf "  },\n"
+			printf "  \"components\": ["
+		}
+		$1 == "dep" {
+			if (count++) printf ","
+			printf "\n    {"
+			printf "\"type\": \"library\", "
+			printf "\"bom-ref\": \"pkg:golang/%s@%s\", ", $2, $3
+			printf "\"name\": \"%s\", ", $2
+			printf "\"version\": \"%s\", ", $3
+			printf "\"purl\": \"pkg:golang/%s@%s\"", $2, $3
+			if ($4 != "") {
+				printf ", \"properties\": [{\"name\": \"go:mod:h1\", \"value\": \"%s\"}]", $4
+			}
+			printf "}"
+		}
+		END {
+			if (count) printf "\n  "
+			printf "]\n}\n"
+		}' > "$DIST_DIR/sbom.cdx.json"
+
 shasum -a 256 \
+	dist/sbom.cdx.json \
 	dist/ssc-init-darwin-amd64 \
 	dist/ssc-init-darwin-arm64 \
 	dist/ssc-init-darwin-universal | sort -k 2 > "$DIST_DIR/checksums.txt"
