@@ -32,6 +32,8 @@ func finalizeTestEvidence(t *testing.T, value model.ContentEvidence) model.Conte
 // validV3Snapshot builds a v3-shaped snapshot containing complete, partial,
 // unsupported, and skipped evidence with nil-error, populated-error,
 // empty-error, nil-metadata, populated-metadata, and empty-metadata shapes.
+// It also carries at least one row for every table keyed by scan_id, so
+// retention tests that assert no table is left behind cannot pass vacuously.
 func validV3Snapshot(t *testing.T, scanID string) (model.ScanResult, model.Inventory) {
 	t.Helper()
 	obsManifest := finalizeTestObservation(t, model.Observation{
@@ -83,13 +85,16 @@ func validV3Snapshot(t *testing.T, scanID string) (model.ScanResult, model.Inven
 		},
 		Errors: []model.CoverageError{{Code: "target_rejected", Message: "evidence target was rejected"}},
 	}
+	scan.Coverage = []model.CollectorResult{{Collector: "plugins", Status: model.CoveragePartial}}
 	inventory := model.Inventory{
 		Assets: []model.Asset{
 			{ID: "asset-one", Type: model.AssetAgentPlugin, Name: "plugin-one"},
 			{ID: "asset-two", Type: model.AssetPackage, Name: "package-two"},
 		},
-		Observations: []model.Observation{obsManifest, obsTree, obsPackage, obsContainer},
-		Evidence:     []model.ContentEvidence{complete, partial, unsupported, skipped},
+		Observations:  []model.Observation{obsManifest, obsTree, obsPackage, obsContainer},
+		Evidence:      []model.ContentEvidence{complete, partial, unsupported, skipped},
+		Relationships: []model.Relationship{{From: "asset-one", Kind: "uses", To: "asset-two"}},
+		Errors:        []model.CoverageError{{Code: "collector_failed", Message: "collector failed"}},
 	}
 	return scan, inventory
 }
