@@ -12,6 +12,7 @@ const maxHookDetailRows = 20
 // WriteHookSummary renders an advisory severity ladder. An empty delta writes
 // nothing. Output carries asset types, names, hosts, versions, rungs, and
 // counts only — never digests, paths, or contents, and never a safety verdict.
+// This build performs no content analysis, so it has no basis for one.
 //
 // firstRun says whether the scan found no previous snapshot at all. On a first
 // run "NEW" would describe the absence of history, not the machine, so the run

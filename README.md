@@ -4,7 +4,7 @@
 
 SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain. The current build provides macOS local inventory within versioned developer-tool catalogs and configured project roots, records a local baseline with bounded local content evidence, and reports explicit target and evidence coverage.
 
-This tool is not an EDR. There is no daemon, kernel sensor, arbitrary personal-file scan, malware verdict, or safety guarantee. It does not continuously monitor processes or files. Missing or failed coverage remains visible instead of being silently treated as success.
+This tool is not an EDR. There is no daemon, kernel sensor, or arbitrary personal-file scan, and it does not continuously monitor processes or files. No scan result is a guarantee that an asset is safe. This build performs no content analysis and has no threat intelligence, so it produces no malware verdicts and blocks nothing. Missing or failed coverage remains visible instead of being silently treated as success.
 
 ## Current coverage
 
@@ -42,11 +42,12 @@ ssc-init hook
 prints one line per changed asset (asset types, names, hosts, versions, and
 counts only), each tagged `NEW`, `CHANGED`, `UNVERIFIED`, `UPGRADED`, or
 `REMOVED`. These tags describe what changed and how well it could be verified,
-never whether anything is safe: SSC Init performs no content analysis and
-issues no verdicts. The hook stays completely silent when nothing changed, and
+never whether anything is safe: this build performs no content analysis and has
+no threat intelligence, so it issues no verdicts. The hook stays completely
+silent when nothing changed, and
 a first run reports an initial baseline count instead of tagging every
 discovered asset. It always exits zero — including on scan failure, and except
-for invalid arguments — so wiring it into an agent session can never block
+for invalid arguments — so wiring it into an agent session does not block
 startup. Claude Code example (`~/.claude/settings.json`):
 
 ```json

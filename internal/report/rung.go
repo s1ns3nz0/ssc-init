@@ -9,8 +9,10 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
-// rung ranks a change by what the tool established about it. No rung expresses
-// a safety verdict: SSC Init hashes bytes and analyses nothing.
+// rung ranks a change by what the tool established about it. A rung states what
+// changed and how well it could be verified, never whether anything is safe.
+// This build performs no content analysis and has no threat intelligence, so it
+// has no basis for a risk claim.
 type rung int
 
 const (
