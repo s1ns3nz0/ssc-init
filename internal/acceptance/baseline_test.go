@@ -71,8 +71,11 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, output.String())
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v2" {
+	if document["schemaVersion"] != "ssc-init.scan.v3" {
 		t.Fatalf("schemaVersion=%v", document["schemaVersion"])
+	}
+	if _, ok := document["evidenceCoverage"].(map[string]any); !ok {
+		t.Fatalf("baseline report is missing evidence coverage: %v", document["evidenceCoverage"])
 	}
 	if scope, ok := document["scope"].(map[string]any); !ok || scope["platform"] != "darwin" || scope["catalogVersion"] != collector.CatalogVersion {
 		t.Fatalf("scope=%v", document["scope"])
