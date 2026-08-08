@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
@@ -151,5 +152,42 @@ func forEachString(value any, visit func(string)) {
 		for _, element := range typed {
 			forEachString(element, visit)
 		}
+	}
+}
+
+// TestStoreUsageReportsTheWindowsItMeasuredWith pins the reported seconds to the
+// options the measurement ran with rather than to today's defaults, so that
+// configured retention reaches the report the day it becomes configurable.
+func TestStoreUsageReportsTheWindowsItMeasuredWith(t *testing.T) {
+	home := canonicalTempDir(t)
+	databasePath := filepath.Join(platform.PathsForHome(home).DataDir, "state.db")
+	openFixtureStore(t, databasePath)
+
+	usage, err := storeUsage(context.Background(), databasePath, store.Options{
+		SnapshotRetention:     3 * time.Hour,
+		AssetHistoryRetention: 5 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.SnapshotRetentionSeconds != 10800 || usage.AssetHistoryRetentionSeconds != 18000 {
+		t.Fatalf("retention=%d/%d want 10800/18000", usage.SnapshotRetentionSeconds, usage.AssetHistoryRetentionSeconds)
+	}
+}
+
+// TestCheckDegradesWhenTheStoreCannotBeMeasured keeps failed coverage visible:
+// an unmeasurable store is reported as degraded rather than as a zero footprint
+// indistinguishable from a store that was never created.
+func TestCheckDegradesWhenTheStoreCannotBeMeasured(t *testing.T) {
+	home := canonicalTempDir(t)
+	databasePath := filepath.Join(platform.PathsForHome(home).DataDir, "state.db")
+	if err := os.MkdirAll(databasePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	result := checkerForHome(t, home).Check(context.Background())
+
+	if result.Status != "degraded" {
+		t.Fatalf("status=%q want degraded when the store cannot be measured", result.Status)
 	}
 }

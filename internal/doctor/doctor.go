@@ -115,7 +115,7 @@ func (c *Checker) Check(ctx context.Context) Result {
 	if !result.DatabaseDirectoryWritable {
 		result.Status = "degraded"
 	}
-	usage, usageErr := storeUsage(ctx, c.config.DatabasePath)
+	usage, usageErr := storeUsage(ctx, c.config.DatabasePath, store.Options{})
 	result.Store = usage
 	if usageErr != nil {
 		result.Status = "degraded"
@@ -133,13 +133,14 @@ func (c *Checker) Check(ctx context.Context) Result {
 	return result
 }
 
-// storeUsage measures the store without creating or migrating one. The windows
-// come back populated even when measurement fails, because they are
-// construction-time settings rather than something read off disk. Options are
-// the documented defaults: the binary opens the store with store.Open, and
-// policy-configurable retention does not exist yet.
-func storeUsage(ctx context.Context, databasePath string) (StoreUsage, error) {
-	usage, err := store.UsageAt(ctx, databasePath, store.Options{})
+// storeUsage measures the store without creating or migrating one, and reports
+// the windows the given options select. The windows come back populated even
+// when measurement fails, because they are construction-time settings rather
+// than something read off disk. Check passes the documented defaults: the binary
+// opens the store with store.Open, and policy-configurable retention does not
+// exist yet.
+func storeUsage(ctx context.Context, databasePath string, options store.Options) (StoreUsage, error) {
+	usage, err := store.UsageAt(ctx, databasePath, options)
 	return StoreUsage{
 		SizeBytes:                    usage.SizeBytes,
 		ReclaimableBytes:             usage.ReclaimableBytes,

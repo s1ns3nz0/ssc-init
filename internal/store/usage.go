@@ -62,32 +62,86 @@ func UsageAt(ctx context.Context, path string, options Options) (Usage, error) {
 	}
 	usage.SizeBytes = database.Size()
 	logged := false
+	measured := map[string]os.FileInfo{}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		info, statErr := os.Lstat(abs + suffix)
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
-		logged = true
 		if statErr != nil {
 			return usage, fmt.Errorf("inspect sqlite file: %w", statErr)
 		}
 		if !info.Mode().IsRegular() {
 			return usage, errors.New("sqlite file is not a regular file")
 		}
+		// Only a log with frames holds rows the database file does not. A
+		// shared-memory file is an index into the log, so a leftover one on its
+		// own — a crashed writer's residue — is no reason to read through
+		// anything, and reading through nothing is what keeps this measurement
+		// from creating the log it claimed to find.
+		if suffix == "-wal" && info.Size() > 0 {
+			logged = true
+		}
+		measured[suffix] = info
 		usage.SizeBytes += info.Size()
 	}
 	if usage.SizeBytes == 0 {
 		return usage, nil
 	}
-	if err := readUsageCounts(ctx, abs, logged, &usage); err != nil {
+	err = readUsageCounts(ctx, abs, logged, &usage)
+	if logged {
+		if discardErr := discardMeasurementSQLiteFiles(abs, measured); err == nil {
+			err = discardErr
+		}
+	}
+	if err != nil {
 		return usage, err
 	}
-	if !logged {
-		return usage, nil
-	}
-	// Reading through an existing log can create the shared-memory file, which
-	// would otherwise inherit the process umask instead of the store's mode.
+	// Measurement is the only pass that touches these files between store opens,
+	// so it is where a mode loosened out of band is pulled back, and where a
+	// shared-memory file that reading through a log had to create gets the
+	// store's mode instead of the process umask.
 	return usage, secureSQLiteFiles(abs, nil)
+}
+
+// discardMeasurementSQLiteFiles removes log and shared-memory files that
+// measurement itself created. A writer that checkpoints its log away between the
+// stats above and the read below leaves this connection creating both files
+// again, and files measurement adds are files the next measurement counts.
+//
+// Only files whose identity changed since they were stat'd are removed, and only
+// while the log holds no frames: a log unchanged since it was measured, or one
+// carrying frames, belongs to a writer and is left alone. A writer that appears
+// inside that window and has not yet committed can still lose the empty log it
+// just made, which costs it nothing durable — its frames go to the descriptor it
+// already holds and its own close checkpoints them into the database.
+func discardMeasurementSQLiteFiles(path string, measured map[string]os.FileInfo) error {
+	log, err := os.Lstat(path + "-wal")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect sqlite file: %w", err)
+	}
+	if !log.Mode().IsRegular() || log.Size() > 0 || os.SameFile(measured["-wal"], log) {
+		return nil
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		info, err := os.Lstat(path + suffix)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect sqlite file: %w", err)
+		}
+		if !info.Mode().IsRegular() || os.SameFile(measured[suffix], info) {
+			continue
+		}
+		if err := os.Remove(path + suffix); err != nil {
+			return fmt.Errorf("discard measurement sqlite file: %w", err)
+		}
+	}
+	return nil
 }
 
 func readUsageCounts(ctx context.Context, path string, logged bool, usage *Usage) error {
@@ -114,13 +168,13 @@ func readUsageCounts(ctx context.Context, path string, logged bool, usage *Usage
 
 // readOnlySQLiteDSN opens the database for measurement only.
 //
-// With no log present the database is fully checkpointed, and an immutable
+// With no log frames to read the database stands on its own, and an immutable
 // connection reads it without creating anything: a plain read-only connection
 // would create the log and shared-memory files, leaving umask-moded files in the
-// state directory and inflating the footprint being measured. With a log present
-// the log holds rows the database file does not — a store open elsewhere keeps
+// state directory and inflating the footprint being measured. With frames in the
+// log it holds rows the database file does not — a store open elsewhere keeps
 // its whole uncheckpointed schema there — so measurement must read through it,
-// and the shared-memory file it needs is the one that connection already made.
+// and the shared-memory file it needs is the one that writer already made.
 func readOnlySQLiteDSN(path string, logged bool) string {
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	query := url.Values{}
