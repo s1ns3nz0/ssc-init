@@ -236,7 +236,9 @@ it would make silence a lie.
 Same engine, different exit-code policy. Lists every violation, standing and
 new, and states which precedence levels are active and which are inert.
 
-**It reads the latest snapshot and does not scan** — no filesystem access — so
+**It reads the latest snapshot and does not scan** — it opens only the policy
+document and the store, and touches no collector root, no discovered asset, and
+no path outside its own state directory — so
 adopting a rule and seeing what it would flag against yesterday's inventory is
 instant, and CI can evaluate a committed snapshot without touching a developer's
 machine.
