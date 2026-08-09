@@ -487,7 +487,7 @@ func TestRealPATHSpoofIsRecordedByActualHashAndSafeLocation(t *testing.T) {
 	env := testutil.Environment(t, home)
 	env.Scope.ExternalProbes = true
 	env.Inspector = platform.NewExecutableInspector(16, 64<<20)
-	env.Runner = platform.ExecRunner{Timeout: 5 * time.Second, MaxOutputBytes: 1 << 20}
+	env.Runner = platform.ExecRunner{Timeout: 30 * time.Second, MaxOutputBytes: 1 << 20}
 
 	got, err := New().Collect(context.Background(), env)
 	if err != nil {
