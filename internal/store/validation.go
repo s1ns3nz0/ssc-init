@@ -30,6 +30,9 @@ const (
 )
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
+	if scan.AnalyzerCoverage != nil || inventory.AnalyzerFacts != nil {
+		return errors.New("analyzer persistence requires schema v7")
+	}
 	for field, value := range map[string]string{
 		"scan schema version": scan.SchemaVersion,
 		"scan id":             scan.ScanID,
