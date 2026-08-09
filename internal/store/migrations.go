@@ -156,6 +156,35 @@ ALTER TABLE inventory_state ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0
 INSERT INTO asset_history(asset_id, first_seen_at, last_seen_at, content_digest, content_changed_at)
 SELECT a.asset_id, min(s.finished_at), max(s.finished_at), '', min(s.finished_at)
 FROM assets a JOIN scans s ON s.id = a.scan_id GROUP BY a.asset_id;`,
+	// Policy audit state is separate from immutable snapshots but shares the
+	// one §5.3 database. No policy table carries scan_id or a foreign key, so
+	// snapshot pruning cannot erase user approvals or decision history.
+	`CREATE TABLE policy_pins (
+    asset_id TEXT NOT NULL,
+    evidence_kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    pinned_at TEXT NOT NULL,
+    PRIMARY KEY (asset_id, evidence_kind, subject)
+);
+CREATE TABLE policy_exceptions (
+    rule_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    subject_ref TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (rule_id, scope, subject_ref)
+);
+CREATE TABLE policy_decisions (
+    rule_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    level INTEGER NOT NULL CHECK (level >= 1 AND level <= 5),
+    outcome TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (rule_id, asset_id)
+);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -231,6 +260,9 @@ var requiredColumns = map[string][]columnSpec{
 	"evidence_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"result_json", "BLOB", "", 1, 0, false}},
 	"content_cache":      {{"cache_key", "BLOB", "", 0, 1, false}, {"algorithm", "TEXT", "", 1, 0, false}, {"format", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"size", "INTEGER", "", 1, 0, false}, {"last_used_at", "TEXT", "", 1, 0, false}},
 	"asset_history":      {{"asset_id", "TEXT", "", 0, 1, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}, {"content_digest", "TEXT", "", 1, 0, false}, {"content_changed_at", "TEXT", "", 1, 0, false}},
+	"policy_pins":        {{"asset_id", "TEXT", "", 1, 1, false}, {"evidence_kind", "TEXT", "", 1, 2, false}, {"subject", "TEXT", "", 1, 3, false}, {"digest", "TEXT", "", 1, 0, false}, {"pinned_at", "TEXT", "", 1, 0, false}},
+	"policy_exceptions":  {{"rule_id", "TEXT", "", 1, 1, false}, {"scope", "TEXT", "", 1, 2, false}, {"subject_ref", "TEXT", "", 1, 3, false}, {"reason", "TEXT", "", 1, 0, false}, {"created_at", "TEXT", "", 1, 0, false}, {"expires_at", "TEXT", "", 1, 0, false}},
+	"policy_decisions":   {{"rule_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"level", "INTEGER", "", 1, 0, false}, {"outcome", "TEXT", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -286,6 +318,7 @@ var requiredChecks = map[string][]string{
 	"inventory_errors":   {"check(error_index>=0)"},
 	"evidence_state":     {"check(evidence_index>=0)", "check(metadata_nilin(0,1))", "check(errors_nilin(0,1))"},
 	"content_cache":      {"check(length(cache_key)=32)", "check(size>=0)"},
+	"policy_decisions":   {"check(level>=1andlevel<=5)"},
 }
 
 func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
@@ -403,6 +436,9 @@ var requiredIndexFingerprints = map[string][]string{
 	"evidence_coverage":  {"pk:1:scan_id"},
 	"content_cache":      {"pk:1:cache_key"},
 	"asset_history":      {"pk:1:asset_id"},
+	"policy_pins":        {"pk:1:asset_id,evidence_kind,subject"},
+	"policy_exceptions":  {"pk:1:rule_id,scope,subject_ref"},
+	"policy_decisions":   {"pk:1:rule_id,asset_id"},
 }
 
 func verifyIndices(db *sql.DB) error {
