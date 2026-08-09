@@ -50,6 +50,7 @@ func (c *runtimeCollector) Collect(ctx context.Context, env collector.Environmen
 	}
 
 	processTarget := model.TargetCoverage{TargetID: processTargetID, Status: model.TargetComplete}
+	processAssetsByPID := make(map[int]string)
 	processOutput, runErr := env.Runner.Run(ctx, psPath, "-axo", "pid=,comm=")
 	if err := ctx.Err(); err != nil {
 		return model.CollectorResult{Collector: c.Name()}, err
@@ -72,6 +73,7 @@ func (c *runtimeCollector) Collect(ctx context.Context, env collector.Environmen
 			}
 			result.Assets = append(result.Assets, asset)
 			result.Observations = append(result.Observations, observation)
+			processAssetsByPID[fact.PID] = asset.ID
 			processTarget.Assets++
 			processTarget.Observations++
 		}
@@ -99,6 +101,13 @@ func (c *runtimeCollector) Collect(ctx context.Context, env collector.Environmen
 			}
 			result.Assets = append(result.Assets, asset)
 			result.Observations = append(result.Observations, observation)
+			if processID, ok := processAssetsByPID[fact.PID]; ok {
+				result.Relationships = append(result.Relationships, model.Relationship{
+					From: asset.ID,
+					Kind: model.RelationshipConnectsTo,
+					To:   processID,
+				})
+			}
 			listenerTarget.Assets++
 			listenerTarget.Observations++
 		}
@@ -106,6 +115,16 @@ func (c *runtimeCollector) Collect(ctx context.Context, env collector.Environmen
 	result.Targets = append(result.Targets, listenerTarget)
 	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.Slice(result.Observations, func(i, j int) bool { return result.Observations[i].ID < result.Observations[j].ID })
+	sort.Slice(result.Relationships, func(i, j int) bool {
+		left, right := result.Relationships[i], result.Relationships[j]
+		if left.From != right.From {
+			return left.From < right.From
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.To < right.To
+	})
 	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
 }
