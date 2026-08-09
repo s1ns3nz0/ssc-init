@@ -382,6 +382,7 @@ func scanConfiguration(home string, options cli.Options) (collector.Environment,
 	}
 	if options.ExternalProbes {
 		environment.Inspector = platform.NewExecutableInspector(16, 64<<20)
+		environment.SignatureInspector = platform.NewSignatureInspector(environment.Runner)
 	}
 	configuredCollectors := []collector.Collector{
 		agents.New(),

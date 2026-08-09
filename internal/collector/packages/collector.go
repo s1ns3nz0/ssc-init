@@ -108,7 +108,10 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 			result.Targets = append(result.Targets, target)
 			continue
 		}
-		executableObservation, ok := appendExecutableEvidence(&result, &target, probe, evidence)
+		executableObservation, ok := appendExecutableEvidence(ctx, env, &result, &target, probe, evidence)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return abortPackageCollection(&result, ctxErr)
+		}
 		if !ok {
 			result.Targets = append(result.Targets, target)
 			continue
@@ -193,7 +196,7 @@ func dockerDaemonUnavailable(result platform.CommandResult, runErr error) bool {
 	return false
 }
 
-func appendExecutableEvidence(result *model.CollectorResult, target *model.TargetCoverage, probe commandProbe, evidence platform.ExecutableEvidence) (model.Observation, bool) {
+func appendExecutableEvidence(ctx context.Context, env collector.Environment, result *model.CollectorResult, target *model.TargetCoverage, probe commandProbe, evidence platform.ExecutableEvidence) (model.Observation, bool) {
 	asset := model.Asset{
 		ID: "tool-executable:sha256:" + evidence.SHA256, Type: model.AssetTool,
 		Name: "executable", SHA256: evidence.SHA256,
@@ -214,6 +217,13 @@ func appendExecutableEvidence(result *model.CollectorResult, target *model.Targe
 	if err != nil || !validExecutableEvidence(probe, evidence) {
 		appendPackageIssue(result, target, model.TargetPartial, "executable_evidence_invalid", "package probe executable evidence is invalid")
 		return model.Observation{}, false
+	}
+	if env.SignatureInspector != nil {
+		signature, signatureErr := env.SignatureInspector.Inspect(ctx, evidence, env.Inspector)
+		asset.Signature = &signature
+		if signatureErr != nil && ctx.Err() == nil {
+			appendPackageIssue(result, target, model.TargetPartial, "signature_unavailable", "package probe signature is unavailable")
+		}
 	}
 	result.Assets = append(result.Assets, asset)
 	result.Observations = append(result.Observations, observation)

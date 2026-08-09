@@ -352,8 +352,8 @@ func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) 
 	if !reflect.DeepEqual(environment.Scope, wantScope) || environment.Platform != runtime.GOOS {
 		t.Fatalf("environment=%+v wantScope=%+v", environment, wantScope)
 	}
-	if environment.Inspector == nil {
-		t.Fatal("external-probe scan did not construct an executable inspector")
+	if environment.Inspector == nil || environment.SignatureInspector == nil {
+		t.Fatal("external-probe scan did not construct executable and signature inspectors")
 	}
 	wantNames := []string{"agents", "ide", "projects", "packages"}
 	gotNames := make([]string, len(collectors))
@@ -374,7 +374,7 @@ func TestScanConfigurationLeavesInspectorUnwiredWhenExternalProbesAreDisabled(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if environment.Scope.ExternalProbes || environment.Inspector != nil {
+	if environment.Scope.ExternalProbes || environment.Inspector != nil || environment.SignatureInspector != nil {
 		t.Fatalf("environment=%+v", environment)
 	}
 }

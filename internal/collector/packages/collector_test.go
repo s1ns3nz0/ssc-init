@@ -87,6 +87,7 @@ func TestPackageProbesAreSkippedByDefault(t *testing.T) {
 	env := testutil.Environment(t, t.TempDir())
 	env.Scope.ExternalProbes = false
 	env.Inspector = &fakeInspector{failOnCall: true}
+	env.SignatureInspector = &fixedSignatureInspector{failOnCall: true}
 	env.Runner = failRunner{}
 
 	got, err := New().Collect(context.Background(), env)
@@ -106,6 +107,51 @@ func TestPackageProbesAreSkippedByDefault(t *testing.T) {
 	}
 	if got.LocalEvidenceIssuer != nil || len(got.LocalEvidenceTargets) != 0 {
 		t.Fatalf("skipped collection issued evidence: %+v", got.LocalEvidenceTargets)
+	}
+}
+
+func TestPackageCollectorEnrichesVerifiedExecutablesWithSignatureFacts(t *testing.T) {
+	env := optInEnvironment(t, t.TempDir(), successfulRunner(t))
+	signatures := &fixedSignatureInspector{signature: model.Signature{Status: model.SignatureValid, Identifier: "dev.example.tool", TeamID: "ABCDE12345"}}
+	env.SignatureInspector = signatures
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := 0
+	for _, asset := range got.Assets {
+		if asset.Type != model.AssetTool {
+			continue
+		}
+		tools++
+		if asset.Signature == nil || *asset.Signature != signatures.signature {
+			t.Fatalf("tool asset=%+v", asset)
+		}
+	}
+	if tools == 0 || signatures.calls != tools {
+		t.Fatalf("tools=%d signature calls=%d", tools, signatures.calls)
+	}
+}
+
+func TestPackageCollectorDegradesOnlySignatureFailure(t *testing.T) {
+	env := optInEnvironment(t, t.TempDir(), successfulRunner(t))
+	env.SignatureInspector = &fixedSignatureInspector{
+		signature: model.Signature{Status: model.SignatureUnavailable},
+		err:       errors.New("signature inspection failed"),
+	}
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Assets) == 0 || got.Status != model.CoveragePartial || !hasPackageError(got, "signature_unavailable") {
+		t.Fatalf("assets=%d status=%s errors=%+v", len(got.Assets), got.Status, got.Errors)
+	}
+	for _, asset := range got.Assets {
+		if asset.Type == model.AssetTool && (asset.Signature == nil || asset.Signature.Status != model.SignatureUnavailable) {
+			t.Fatalf("tool asset=%+v", asset)
+		}
 	}
 }
 
@@ -1512,6 +1558,21 @@ type fakeInspector struct {
 	errors     map[string]error
 	verifyErr  map[string]error
 	events     *[]string
+}
+
+type fixedSignatureInspector struct {
+	signature  model.Signature
+	err        error
+	calls      int
+	failOnCall bool
+}
+
+func (f *fixedSignatureInspector) Inspect(context.Context, platform.ExecutableEvidence, platform.ExecutableIdentityVerifier) (model.Signature, error) {
+	if f.failOnCall {
+		panic("signature inspector called")
+	}
+	f.calls++
+	return f.signature, f.err
 }
 
 func (f *fakeInspector) Inspect(_ context.Context, _ string, command string) (platform.ExecutableEvidence, error) {

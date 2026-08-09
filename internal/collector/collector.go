@@ -11,13 +11,14 @@ import (
 
 // Environment contains the bounded host access available to collectors.
 type Environment struct {
-	Home      string
-	Platform  string
-	Scope     model.ScanScope
-	FS        platform.FileSystem
-	Runner    platform.Runner
-	Inspector platform.ExecutableInspector
-	Now       func() time.Time
+	Home               string
+	Platform           string
+	Scope              model.ScanScope
+	FS                 platform.FileSystem
+	Runner             platform.Runner
+	Inspector          platform.ExecutableInspector
+	SignatureInspector platform.SignatureInspector
+	Now                func() time.Time
 }
 
 // Collector discovers one portion of the local software supply chain.
