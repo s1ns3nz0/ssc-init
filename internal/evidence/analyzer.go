@@ -44,6 +44,12 @@ func runContentAnalyzer(ctx context.Context, analyzer ContentAnalyzer, candidate
 		coverage.SkippedRules = []string{"oversize-or-unsupported"}
 		return nil, coverage
 	}
+	if bytes.IndexByte(raw, 0) >= 0 {
+		clear(raw)
+		coverage.Status = model.CoverageSkipped
+		coverage.SkippedRules = []string{"binary-content"}
+		return nil, coverage
+	}
 	coverage.FilesRead, coverage.BytesRead = 1, int64(len(raw))
 	content := &sealedContent{assetID: candidate.target.AssetID, evidenceID: candidate.evidenceID, subject: candidate.target.Subject, size: int64(len(raw)), reader: bytes.NewReader(raw)}
 	defer func() {

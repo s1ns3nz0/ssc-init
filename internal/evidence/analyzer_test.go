@@ -53,3 +53,21 @@ func TestRunContentAnalyzerContainsPanicAsFailedCoverage(t *testing.T) {
 		t.Fatalf("facts=%+v coverage=%+v", facts, coverage)
 	}
 }
+
+func TestRunContentAnalyzerSkipsBinaryWithoutInvokingAnalyzer(t *testing.T) {
+	candidate := &issuedCandidate{target: model.LocalEvidenceTarget{AssetID: "tool:fixture"}, evidenceID: "evidence:fixture"}
+	called := false
+	raw := []byte{'e', 'v', 'a', 'l', '(', 0, ')'}
+	facts, coverage := runContentAnalyzer(context.Background(), analyzerFunc(func(context.Context, SealedContent) ([]model.AnalyzerFact, error) {
+		called = true
+		return nil, nil
+	}), candidate, raw)
+	if called || len(facts) != 0 || coverage.Status != model.CoverageSkipped || !reflect.DeepEqual(coverage.SkippedRules, []string{"binary-content"}) {
+		t.Fatalf("called=%v facts=%+v coverage=%+v", called, facts, coverage)
+	}
+	for _, value := range raw {
+		if value != 0 {
+			t.Fatalf("binary bytes not cleared: %q", raw)
+		}
+	}
+}
