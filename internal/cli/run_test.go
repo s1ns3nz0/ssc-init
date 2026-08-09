@@ -20,6 +20,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 )
 
 type failingWriter struct {
@@ -35,6 +36,21 @@ func (f fakeFindingService) Evaluate(context.Context, model.Inventory) (finding.
 type fakeWebhook struct {
 	destination string
 	body        []byte
+}
+
+type fakeSchedule struct {
+	preview schedule.Preview
+	err     error
+}
+
+func (f fakeSchedule) Preview() (schedule.Preview, error) { return f.preview, f.err }
+
+func TestRunSchedulePreviewWritesExactContract(t *testing.T) {
+	preview := schedule.Preview{SchemaVersion: schedule.SchemaV1, Label: schedule.Label, Command: []string{"$HOME/a/ssc-init", "scan", "--baseline", "--json"}, Hour: 9, Minute: 0, StandardOut: "$HOME/a/daily.stdout.log", StandardError: "$HOME/a/daily.stderr.log", RemovalCommand: "ssc-init schedule remove --json", Capability: "scheduled"}
+	var out, errOut bytes.Buffer
+	if code := (App{Schedule: fakeSchedule{preview: preview}}).Run(context.Background(), []string{"schedule", "preview", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.schedule-preview.v1"`) || strings.Contains(out.String(), "/Users/") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
 }
 
 func (f *fakeWebhook) Deliver(_ context.Context, destination string, body []byte) error {

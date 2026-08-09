@@ -44,6 +44,7 @@ type Options struct {
 	QuarantineEvidenceID    string
 	QuarantineRecordID      string
 	QuarantineApprovalID    string
+	ScheduleCommand         string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -126,6 +127,11 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parseQuarantineOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
+	case "schedule":
+		if len(args) != 3 || args[1] != "preview" || args[2] != "--json" {
+			return Options{}, ErrInvalidOptions
+		}
+		options.ScheduleCommand, options.JSON = args[1], true
 	case "hook":
 		if len(args) != 1 {
 			return Options{}, ErrInvalidOptions

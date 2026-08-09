@@ -22,6 +22,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
+	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 )
 
 // BaselineScanner performs and persists one baseline scan. The reported bool
@@ -91,6 +92,10 @@ type QuarantineReader interface {
 	QuarantineRecords(context.Context) ([]quarantine.Record, error)
 }
 
+type ScheduleManager interface {
+	Preview() (schedule.Preview, error)
+}
+
 // Install and rollback failure sentinels. They are the classification an
 // adapter acts on; the messages below are the only thing ever printed, so no
 // supplied path, version, or digest can be echoed back.
@@ -138,6 +143,7 @@ type App struct {
 	AdapterInput     io.Reader
 	Quarantine       QuarantineManager
 	QuarantineReader QuarantineReader
+	Schedule         ScheduleManager
 }
 
 // Run executes the CLI with the development version.
@@ -350,6 +356,17 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		}
 		if operationErr != nil || writeJSON(stdout, output) != nil {
 			fmt.Fprintln(stderr, "quarantine operation failed")
+			return 1
+		}
+		return 0
+	case "schedule":
+		if options.ScheduleCommand != "preview" || a.Schedule == nil {
+			fmt.Fprintln(stderr, "schedule operation failed")
+			return 1
+		}
+		preview, err := a.Schedule.Preview()
+		if err != nil || writeJSON(stdout, preview) != nil {
+			fmt.Fprintln(stderr, "schedule operation failed")
 			return 1
 		}
 		return 0

@@ -270,3 +270,15 @@ func TestParseQuarantinePreviewApplyAndRestoreOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSchedulePreviewOptions(t *testing.T) {
+	got, err := ParseOptions([]string{"schedule", "preview", "--json"})
+	if err != nil || got.ScheduleCommand != "preview" || !got.JSON {
+		t.Fatalf("options=%+v err=%v", got, err)
+	}
+	for _, args := range [][]string{{"schedule"}, {"schedule", "preview"}, {"schedule", "preview", "--pretty"}, {"schedule", "install", "--json"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}
