@@ -75,7 +75,7 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, output.String())
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v5" {
+	if document["schemaVersion"] != "ssc-init.scan.v6" {
 		t.Fatalf("schemaVersion=%v", document["schemaVersion"])
 	}
 	if _, ok := document["evidenceCoverage"].(map[string]any); !ok {

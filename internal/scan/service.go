@@ -18,7 +18,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
-const schemaVersion = "ssc-init.scan.v5"
+const schemaVersion = "ssc-init.scan.v6"
 
 // DefaultBudget bounds one baseline scan. Design §12 allows the initial
 // baseline at most 10 minutes; exceeding a time budget must produce a partial

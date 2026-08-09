@@ -106,7 +106,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	// Content-evidence snapshots (v3 onward) always carry one non-zero
 	// evidence coverage object and a non-nil evidence slice. Earlier schema
 	// versions predate content evidence and stay valid without either.
-	if scan.SchemaVersion == "ssc-init.scan.v3" || scan.SchemaVersion == "ssc-init.scan.v4" || scan.SchemaVersion == "ssc-init.scan.v5" {
+	if scan.SchemaVersion == "ssc-init.scan.v3" || scan.SchemaVersion == "ssc-init.scan.v4" || scan.SchemaVersion == "ssc-init.scan.v5" || scan.SchemaVersion == "ssc-init.scan.v6" {
 		if evidenceCoverageIsZero(scan.EvidenceCoverage) {
 			return errors.New("evidence snapshot requires evidence coverage")
 		}
