@@ -2,6 +2,7 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,12 +39,19 @@ type afterOpenFileContextKey struct{}
 // symbolic links. It returns evidence only if the file identity remains stable
 // throughout the read.
 func HashVerifiedFile(ctx context.Context, root platform.RootedDirectory, relativePath string, maxBytes int64) (FileDigest, model.EvidenceStatus, []model.EvidenceError) {
+	digest, _, status, errs := hashVerifiedFileContent(ctx, root, relativePath, maxBytes, 0)
+	return digest, status, errs
+}
+
+func hashVerifiedFileContent(ctx context.Context, root platform.RootedDirectory, relativePath string, maxBytes, captureMax int64) (FileDigest, []byte, model.EvidenceStatus, []model.EvidenceError) {
 	if root == nil || maxBytes <= 0 || maxBytes == math.MaxInt64 || ctx.Err() != nil {
-		return unavailableFile("read")
+		digest, status, errs := unavailableFile("read")
+		return digest, nil, status, errs
 	}
 	components, ok := filePathComponents(relativePath)
 	if !ok {
-		return unavailableFile("symlink")
+		digest, status, errs := unavailableFile("symlink")
+		return digest, nil, status, errs
 	}
 
 	parent := root
@@ -51,49 +59,62 @@ func HashVerifiedFile(ctx context.Context, root platform.RootedDirectory, relati
 		var err error
 		parent, err = platform.OpenVerifiedRoot(ctx, root, components[:len(components)-1]...)
 		if err != nil {
-			return unavailableForOpen(err)
+			digest, status, errs := unavailableForOpen(err)
+			return digest, nil, status, errs
 		}
 		defer parent.Close()
 	}
 	if err := ctx.Err(); err != nil {
-		return unavailableFile("read")
+		digest, status, errs := unavailableFile("read")
+		return digest, nil, status, errs
 	}
 
 	file, expected, opened, err := platform.OpenVerifiedFile(parent, components[len(components)-1])
 	if err != nil {
-		return unavailableForOpen(err)
+		digest, status, errs := unavailableForOpen(err)
+		return digest, nil, status, errs
 	}
 	defer file.Close()
 	before, ok := platform.Fingerprint(opened)
 	if !ok {
-		return unavailableFile("read")
+		digest, status, errs := unavailableFile("read")
+		return digest, nil, status, errs
 	}
 	if afterOpen, ok := ctx.Value(afterOpenFileContextKey{}).(func()); ok {
 		afterOpen()
 	}
 
 	hasher := sha256.New()
-	count, err := io.Copy(hasher, &io.LimitedReader{R: &fileContextReader{ctx: ctx, reader: file}, N: maxBytes + 1})
+	var captured bytes.Buffer
+	writer := io.Writer(hasher)
+	if captureMax > 0 && opened.Size() <= captureMax {
+		writer = io.MultiWriter(hasher, &captured)
+	}
+	count, err := io.Copy(writer, &io.LimitedReader{R: &fileContextReader{ctx: ctx, reader: file}, N: maxBytes + 1})
 	if err != nil || ctx.Err() != nil {
-		return unavailableFile("read")
+		digest, status, errs := unavailableFile("read")
+		return digest, nil, status, errs
 	}
 	if count > maxBytes {
-		return FileDigest{}, model.EvidenceOversize, []model.EvidenceError{fixedFileErrors["oversize"]}
+		return FileDigest{}, nil, model.EvidenceOversize, []model.EvidenceError{fixedFileErrors["oversize"]}
 	}
 
 	postRead, err := file.Stat()
 	if err != nil {
-		return unavailableFile("read")
+		digest, status, errs := unavailableFile("read")
+		return digest, nil, status, errs
 	}
 	postName, err := parent.Lstat(components[len(components)-1])
 	if err != nil || postName == nil || !os.SameFile(expected, postName) {
-		return unavailableFile("identity")
+		digest, status, errs := unavailableFile("identity")
+		return digest, nil, status, errs
 	}
 	after, ok := platform.Fingerprint(postRead)
 	if !ok || before != after || postRead.Size() != opened.Size() || postRead.Size() != count {
-		return unavailableFile("identity")
+		digest, status, errs := unavailableFile("identity")
+		return digest, nil, status, errs
 	}
-	return FileDigest{SHA256: hex.EncodeToString(hasher.Sum(nil)), Size: count, Fingerprint: before}, model.EvidenceComplete, nil
+	return FileDigest{SHA256: hex.EncodeToString(hasher.Sum(nil)), Size: count, Fingerprint: before}, captured.Bytes(), model.EvidenceComplete, nil
 }
 
 func unavailableForOpen(err error) (FileDigest, model.EvidenceStatus, []model.EvidenceError) {

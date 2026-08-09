@@ -156,6 +156,96 @@ ALTER TABLE inventory_state ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0
 INSERT INTO asset_history(asset_id, first_seen_at, last_seen_at, content_digest, content_changed_at)
 SELECT a.asset_id, min(s.finished_at), max(s.finished_at), '', min(s.finished_at)
 FROM assets a JOIN scans s ON s.id = a.scan_id GROUP BY a.asset_id;`,
+	// Policy audit state is separate from immutable snapshots but shares the
+	// one §5.3 database. No policy table carries scan_id or a foreign key, so
+	// snapshot pruning cannot erase user approvals or decision history.
+	`CREATE TABLE policy_pins (
+    asset_id TEXT NOT NULL,
+    evidence_kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    pinned_at TEXT NOT NULL,
+    PRIMARY KEY (asset_id, evidence_kind, subject)
+);
+CREATE TABLE policy_exceptions (
+    rule_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    subject_ref TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (rule_id, scope, subject_ref)
+);
+CREATE TABLE policy_decisions (
+    rule_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    level INTEGER NOT NULL CHECK (level >= 1 AND level <= 5),
+    outcome TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (rule_id, asset_id)
+);`,
+	// Verified bundle state is a rebuildable index and bounded audit trail. It
+	// carries no scan_id: snapshot pruning cannot alter active trust state.
+	`CREATE TABLE bundle_index (
+    family TEXT PRIMARY KEY CHECK (family IN ('ti', 'policy')),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    version TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    freshness TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale', 'expired', 'unavailable')),
+    valid_until TEXT NOT NULL,
+    indexed_at TEXT NOT NULL
+);
+CREATE TABLE bundle_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    family TEXT NOT NULL CHECK (family IN ('ti', 'policy')),
+    action TEXT NOT NULL CHECK (action IN ('install', 'rollback')),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    recorded_at TEXT NOT NULL
+);`,
+	// Findings belong to immutable v6 snapshots. Critical/high incident
+	// metadata deliberately has no scan_id so routine snapshot pruning cannot
+	// erase the security history that requires an explicit retention decision.
+	`CREATE TABLE findings (
+    scan_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    finding_index INTEGER NOT NULL CHECK (finding_index >= 0),
+    finding_json BLOB NOT NULL,
+    PRIMARY KEY (scan_id, finding_id),
+    UNIQUE (scan_id, finding_index),
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE incidents (
+    finding_id TEXT PRIMARY KEY,
+    severity TEXT NOT NULL CHECK (severity IN ('critical', 'high')),
+    finding_json BLOB NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+ALTER TABLE inventory_state ADD COLUMN findings_nil INTEGER NOT NULL DEFAULT 1 CHECK (findings_nil IN (0, 1));
+ALTER TABLE inventory_state ADD COLUMN finding_count INTEGER NOT NULL DEFAULT 0 CHECK (finding_count >= 0);`,
+	`CREATE TABLE analyzer_facts (
+    scan_id TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    fact_index INTEGER NOT NULL CHECK (fact_index >= 0),
+    fact_json BLOB NOT NULL,
+    PRIMARY KEY (scan_id, fact_id),
+    UNIQUE (scan_id, fact_index),
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE analyzer_coverage (
+    scan_id TEXT PRIMARY KEY,
+    coverage_json BLOB NOT NULL,
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+ALTER TABLE inventory_state ADD COLUMN analyzer_facts_nil INTEGER NOT NULL DEFAULT 1 CHECK (analyzer_facts_nil IN (0, 1));
+ALTER TABLE inventory_state ADD COLUMN analyzer_fact_count INTEGER NOT NULL DEFAULT 0 CHECK (analyzer_fact_count >= 0);`,
+	`CREATE TABLE quarantine_records (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('requested','quarantined','restored','failed')),
+    record_json BLOB NOT NULL
+);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -220,7 +310,7 @@ var requiredColumns = map[string][]columnSpec{
 	"assets":             {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_json", "BLOB", "", 1, 0, false}},
 	"relationships":      {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}},
 	"coverage":           {{"scan_id", "TEXT", "", 1, 1, false}, {"collector", "TEXT", "", 1, 2, false}, {"result_json", "BLOB", "", 1, 0, false}},
-	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}, {"evidence_nil", "INTEGER", "1", 1, 0, true}, {"evidence_count", "INTEGER", "0", 1, 0, true}},
+	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}, {"evidence_nil", "INTEGER", "1", 1, 0, true}, {"evidence_count", "INTEGER", "0", 1, 0, true}, {"findings_nil", "INTEGER", "1", 1, 0, true}, {"finding_count", "INTEGER", "0", 1, 0, true}, {"analyzer_facts_nil", "INTEGER", "1", 1, 0, true}, {"analyzer_fact_count", "INTEGER", "0", 1, 0, true}},
 	"asset_state":        {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}},
 	"observations":       {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"asset_id", "TEXT", "", 1, 0, false}, {"observation_json", "BLOB", "", 1, 0, false}},
 	"observation_state":  {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"observation_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"consumers_nil", "INTEGER", "", 1, 0, false}},
@@ -231,6 +321,16 @@ var requiredColumns = map[string][]columnSpec{
 	"evidence_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"result_json", "BLOB", "", 1, 0, false}},
 	"content_cache":      {{"cache_key", "BLOB", "", 0, 1, false}, {"algorithm", "TEXT", "", 1, 0, false}, {"format", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"size", "INTEGER", "", 1, 0, false}, {"last_used_at", "TEXT", "", 1, 0, false}},
 	"asset_history":      {{"asset_id", "TEXT", "", 0, 1, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}, {"content_digest", "TEXT", "", 1, 0, false}, {"content_changed_at", "TEXT", "", 1, 0, false}},
+	"policy_pins":        {{"asset_id", "TEXT", "", 1, 1, false}, {"evidence_kind", "TEXT", "", 1, 2, false}, {"subject", "TEXT", "", 1, 3, false}, {"digest", "TEXT", "", 1, 0, false}, {"pinned_at", "TEXT", "", 1, 0, false}},
+	"policy_exceptions":  {{"rule_id", "TEXT", "", 1, 1, false}, {"scope", "TEXT", "", 1, 2, false}, {"subject_ref", "TEXT", "", 1, 3, false}, {"reason", "TEXT", "", 1, 0, false}, {"created_at", "TEXT", "", 1, 0, false}, {"expires_at", "TEXT", "", 1, 0, false}},
+	"policy_decisions":   {{"rule_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"level", "INTEGER", "", 1, 0, false}, {"outcome", "TEXT", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
+	"bundle_index":       {{"family", "TEXT", "", 0, 1, false}, {"sequence", "INTEGER", "", 1, 0, false}, {"version", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"freshness", "TEXT", "", 1, 0, false}, {"valid_until", "TEXT", "", 1, 0, false}, {"indexed_at", "TEXT", "", 1, 0, false}},
+	"bundle_audit":       {{"id", "INTEGER", "", 0, 1, false}, {"family", "TEXT", "", 1, 0, false}, {"action", "TEXT", "", 1, 0, false}, {"sequence", "INTEGER", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"recorded_at", "TEXT", "", 1, 0, false}},
+	"findings":           {{"scan_id", "TEXT", "", 1, 1, false}, {"finding_id", "TEXT", "", 1, 2, false}, {"finding_index", "INTEGER", "", 1, 0, false}, {"finding_json", "BLOB", "", 1, 0, false}},
+	"incidents":          {{"finding_id", "TEXT", "", 0, 1, false}, {"severity", "TEXT", "", 1, 0, false}, {"finding_json", "BLOB", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
+	"analyzer_facts":     {{"scan_id", "TEXT", "", 1, 1, false}, {"fact_id", "TEXT", "", 1, 2, false}, {"fact_index", "INTEGER", "", 1, 0, false}, {"fact_json", "BLOB", "", 1, 0, false}},
+	"analyzer_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"coverage_json", "BLOB", "", 1, 0, false}},
+	"quarantine_records": {{"id", "TEXT", "", 0, 1, false}, {"state", "TEXT", "", 1, 0, false}, {"record_json", "BLOB", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -279,13 +379,20 @@ func normalizeType(value string) string {
 }
 
 var requiredChecks = map[string][]string{
-	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)", "check(evidence_nilin(0,1))", "check(evidence_count>=0)"},
+	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)", "check(evidence_nilin(0,1))", "check(evidence_count>=0)", "check(findings_nilin(0,1))", "check(finding_count>=0)", "check(analyzer_facts_nilin(0,1))", "check(analyzer_fact_count>=0)"},
+	"findings":           {"check(finding_index>=0)"},
+	"incidents":          {"check(severityin('critical','high'))"},
+	"analyzer_facts":     {"check(fact_index>=0)"},
+	"quarantine_records": {"check(statein('requested','quarantined','restored','failed'))"},
 	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
 	"observation_state":  {"check(observation_index>=0)", "check(metadata_nilin(0,1))", "check(consumers_nilin(0,1))"},
 	"relationship_state": {"check(relationship_index>=0)"},
 	"inventory_errors":   {"check(error_index>=0)"},
 	"evidence_state":     {"check(evidence_index>=0)", "check(metadata_nilin(0,1))", "check(errors_nilin(0,1))"},
 	"content_cache":      {"check(length(cache_key)=32)", "check(size>=0)"},
+	"policy_decisions":   {"check(level>=1andlevel<=5)"},
+	"bundle_index":       {"check(familyin('ti','policy'))", "check(sequence>0)", "check(length(digest)=64)", "check(freshnessin('fresh','stale','expired','unavailable'))"},
+	"bundle_audit":       {"check(familyin('ti','policy'))", "check(actionin('install','rollback'))", "check(sequence>0)", "check(length(digest)=64)"},
 }
 
 func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
@@ -333,6 +440,9 @@ var requiredForeignKeys = map[string][]foreignKeyGroup{
 	},
 	"evidence_state":    {{"evidence", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"evidence_id", "evidence_id"}}}},
 	"evidence_coverage": {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"findings":          {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"analyzer_facts":    {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"analyzer_coverage": {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 }
 
 func verifyForeignKeys(db *sql.DB) error {
@@ -403,6 +513,16 @@ var requiredIndexFingerprints = map[string][]string{
 	"evidence_coverage":  {"pk:1:scan_id"},
 	"content_cache":      {"pk:1:cache_key"},
 	"asset_history":      {"pk:1:asset_id"},
+	"policy_pins":        {"pk:1:asset_id,evidence_kind,subject"},
+	"policy_exceptions":  {"pk:1:rule_id,scope,subject_ref"},
+	"policy_decisions":   {"pk:1:rule_id,asset_id"},
+	"bundle_index":       {"pk:1:family"},
+	"bundle_audit":       {},
+	"findings":           {"pk:1:scan_id,finding_id", "u:1:scan_id,finding_index"},
+	"incidents":          {"pk:1:finding_id"},
+	"analyzer_facts":     {"pk:1:scan_id,fact_id", "u:1:scan_id,fact_index"},
+	"analyzer_coverage":  {"pk:1:scan_id"},
+	"quarantine_records": {"pk:1:id"},
 }
 
 func verifyIndices(db *sql.DB) error {

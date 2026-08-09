@@ -16,14 +16,15 @@ func TestProjectEvidenceCatalogIsExactAndBounded(t *testing.T) {
 		"Pipfile.lock": "project-lockfile:Pipfile.lock", "uv.lock": "project-lockfile:uv.lock",
 		"go.mod": "project-manifest:go.mod", "go.sum": "project-lockfile:go.sum",
 		"Cargo.toml": "project-manifest:Cargo.toml", "Cargo.lock": "project-lockfile:Cargo.lock",
-		"Brewfile": "project-manifest:Brewfile",
+		"Brewfile": "project-manifest:Brewfile", "launch.json": model.EvidenceSubjectLaunchConfig,
 	}
 	if len(evidenceCatalog) != len(want) {
 		t.Fatalf("catalog entries=%d want=%d", len(evidenceCatalog), len(want))
 	}
 	for basename, subject := range want {
 		definition, ok := evidenceCatalog[basename]
-		if !ok || definition.basename != basename || definition.subject != subject || definition.maxBytes != 32<<20 || !model.ProjectEvidenceSubject(definition.subject) {
+		closedSubject := model.ProjectEvidenceSubject(definition.subject) || definition.subject == model.EvidenceSubjectLaunchConfig
+		if !ok || definition.basename != basename || definition.subject != subject || definition.maxBytes != 32<<20 || !closedSubject {
 			t.Fatalf("basename=%q definition=%+v present=%v", basename, definition, ok)
 		}
 	}

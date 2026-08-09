@@ -167,11 +167,11 @@ func validIdentifier(value string, allowUpper bool) bool {
 func validKindSubject(kind model.EvidenceKind, subject string) bool {
 	switch kind {
 	case model.EvidenceFileSHA256:
-		return subject == model.EvidenceSubjectManifest || subject == model.EvidenceSubjectSkillDocument || subject == model.EvidenceSubjectEntrypointMain || subject == model.EvidenceSubjectEntrypointBrowser || model.ProjectEvidenceSubject(subject)
+		return subject == model.EvidenceSubjectManifest || subject == model.EvidenceSubjectSkillDocument || subject == model.EvidenceSubjectEntrypointMain || subject == model.EvidenceSubjectEntrypointBrowser || subject == model.EvidenceSubjectShellStartup || subject == model.EvidenceSubjectGitHook || subject == model.EvidenceSubjectLaunchConfig || model.ProjectEvidenceSubject(subject)
 	case model.EvidenceTreeSHA256:
 		return subject == model.EvidenceSubjectPayloadTree
 	case model.EvidenceSemanticSHA256:
-		return subject == model.EvidenceSubjectMCPDeclaration
+		return subject == model.EvidenceSubjectMCPDeclaration || subject == model.EvidenceSubjectCredentialConfig
 	case model.EvidencePackageContent:
 		return subject == model.EvidenceSubjectPackageContent
 	case model.EvidenceContainerIdentity:
@@ -182,19 +182,29 @@ func validKindSubject(kind model.EvidenceKind, subject string) bool {
 }
 
 func validPresetShape(collectorName string, target model.LocalEvidenceTarget, anchor Anchor) bool {
-	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
-		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	if target.Kind == model.EvidenceContainerIdentity && target.PresetStatus == model.EvidenceComplete {
+		return target.PresetAlgorithm == "sha256" && lowercaseSHA256(target.PresetDigest) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
-	if target.Kind == model.EvidenceFileSHA256 && collectorName == "projects" && model.ProjectEvidenceSubject(target.Subject) && (target.PresetStatus == model.EvidenceOversize || target.PresetStatus == model.EvidenceUnavailable) {
-		return target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	if target.Kind == model.EvidenceSemanticSHA256 && target.Subject == model.EvidenceSubjectCredentialConfig && target.PresetStatus == model.EvidenceComplete {
+		return collectorName == "surfaces" && target.PresetAlgorithm == "sha256" && lowercaseSHA256(target.PresetDigest) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	}
+	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
+		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	}
+	if target.Kind == model.EvidenceFileSHA256 && (collectorName == "projects" && (model.ProjectEvidenceSubject(target.Subject) || developerFileSubject(target.Subject)) || collectorName == "surfaces" && developerFileSubject(target.Subject)) && (target.PresetStatus == model.EvidenceOversize || target.PresetStatus == model.EvidenceUnavailable) {
+		return target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.PresetStatus != "" {
-		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.Kind == model.EvidenceSemanticSHA256 {
-		return target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
-	return true
+	return target.PresetAlgorithm == "" && target.PresetDigest == ""
+}
+
+func developerFileSubject(subject string) bool {
+	return subject == model.EvidenceSubjectShellStartup || subject == model.EvidenceSubjectGitHook || subject == model.EvidenceSubjectLaunchConfig
 }
 
 func validFilesystemShape(target model.LocalEvidenceTarget, anchor Anchor) bool {

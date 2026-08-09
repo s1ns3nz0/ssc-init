@@ -32,8 +32,15 @@ func TestPackageObservationsIssueVisibleUnsupportedEvidence(t *testing.T) {
 		}
 		packages++
 		target, ok := byObservation[observation.ID]
-		if !ok || target.PresetStatus != model.EvidenceUnsupported || target.RootPath != "" || target.RelativePath != "" {
+		wantStatus := model.EvidenceUnsupported
+		if observation.Source == dockerProbeTargetID {
+			wantStatus = model.EvidenceComplete
+		}
+		if !ok || target.PresetStatus != wantStatus || target.RootPath != "" || target.RelativePath != "" {
 			t.Fatalf("observation=%+v target=%+v present=%v", observation, target, ok)
+		}
+		if wantStatus == model.EvidenceComplete && (target.PresetAlgorithm != "sha256" || target.PresetDigest != assets[observation.AssetID].SHA256) {
+			t.Fatalf("docker asset=%+v target=%+v", assets[observation.AssetID], target)
 		}
 	}
 	if packages == 0 {
@@ -41,6 +48,23 @@ func TestPackageObservationsIssueVisibleUnsupportedEvidence(t *testing.T) {
 	}
 	if len(byObservation) != len(got.LocalEvidenceTargets) || len(got.LocalEvidenceTargets) != packages {
 		t.Fatalf("targets=%d observations=%d packages=%d", len(got.LocalEvidenceTargets), len(byObservation), packages)
+	}
+}
+
+func TestDockerEvidenceWithoutAFullSHA256RemainsUnsupported(t *testing.T) {
+	result := model.CollectorResult{Collector: "packages"}
+	probe := commandProbe{targetID: dockerProbeTargetID, ecosystem: "docker"}
+	observation := model.Observation{ID: "observation:test", AssetID: "pkg:docker/alpine@3.20"}
+
+	if err := issuePackageArtifactEvidence(context.Background(), &result, probe, observation, model.Asset{ID: observation.AssetID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.LocalEvidenceTargets) != 1 {
+		t.Fatalf("targets=%+v", result.LocalEvidenceTargets)
+	}
+	target := result.LocalEvidenceTargets[0]
+	if target.PresetStatus != model.EvidenceUnsupported || target.PresetAlgorithm != "" || target.PresetDigest != "" {
+		t.Fatalf("target=%+v", target)
 	}
 }
 
@@ -82,6 +106,37 @@ func TestPackageEvidenceTargetsUseDockerAndPackageIdentitiesOnly(t *testing.T) {
 	}
 	if containers != 1 || contents == 0 {
 		t.Fatalf("containers=%d contents=%d targets=%+v", containers, contents, got.LocalEvidenceTargets)
+	}
+}
+
+func TestPackageAssetsAreConnectedToTheirVerifiedProbeExecutable(t *testing.T) {
+	got := collectWithFakeProbes(t)
+	assets := make(map[string]model.Asset, len(got.Assets))
+	observations := make(map[string]model.Observation, len(got.Observations))
+	for _, asset := range got.Assets {
+		assets[asset.ID] = asset
+	}
+	for _, observation := range got.Observations {
+		observations[observation.ID] = observation
+	}
+	want := make(map[model.Relationship]struct{})
+	for _, observation := range got.Observations {
+		if assets[observation.AssetID].Type != model.AssetPackage {
+			continue
+		}
+		executable := observations[observation.Metadata["executable_observation_id"]]
+		if assets[executable.AssetID].Type != model.AssetTool {
+			t.Fatalf("package observation has no verified executable endpoint: %+v", observation)
+		}
+		want[model.Relationship{From: observation.AssetID, Kind: model.RelationshipProbedBy, To: executable.AssetID}] = struct{}{}
+	}
+	if len(got.Relationships) != len(want) {
+		t.Fatalf("relationships=%+v want=%+v", got.Relationships, want)
+	}
+	for _, relationship := range got.Relationships {
+		if _, ok := want[relationship]; !ok {
+			t.Fatalf("unexpected relationship=%+v want=%+v", relationship, want)
+		}
 	}
 }
 
@@ -128,7 +183,15 @@ func TestPackageEvidenceCollectsAsTerminalUnsupportedWithoutHostAccess(t *testin
 	if len(collection.Evidence) != wantTargets || len(collection.Coverage.Targets) != wantTargets {
 		t.Fatalf("records=%d coverage=%d want=%d", len(collection.Evidence), len(collection.Coverage.Targets), wantTargets)
 	}
+	complete := 0
 	for _, record := range collection.Evidence {
+		if record.Kind == model.EvidenceContainerIdentity {
+			complete++
+			if record.Status != model.EvidenceComplete || record.Algorithm != "sha256" || record.Digest != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+				t.Fatalf("container record=%+v", record)
+			}
+			continue
+		}
 		if record.Status != model.EvidenceUnsupported || record.ID == "" || record.Algorithm != "" || record.Digest != "" ||
 			record.Size != 0 || record.Files != 0 || record.Directories != 0 || record.Symlinks != 0 ||
 			len(record.Metadata) != 0 || len(record.Errors) != 0 {
@@ -138,8 +201,11 @@ func TestPackageEvidenceCollectsAsTerminalUnsupportedWithoutHostAccess(t *testin
 			t.Fatalf("record=%+v", record)
 		}
 	}
+	if complete != 1 {
+		t.Fatalf("complete container identities=%d evidence=%+v", complete, collection.Evidence)
+	}
 	for _, result := range collection.Coverage.Targets {
-		if result.Status != model.EvidenceUnsupported || len(result.Errors) != 0 {
+		if result.Status != model.EvidenceUnsupported && result.Status != model.EvidenceComplete || len(result.Errors) != 0 {
 			t.Fatalf("coverage target=%+v", result)
 		}
 	}
@@ -166,14 +232,14 @@ func collectWithFakeProbes(t *testing.T) model.CollectorResult {
 	writeFile(t, filepath.Join(goPath, "bin", "gopls"), "binary")
 
 	runner := &testutil.FakeRunner{Results: map[string]platform.CommandResult{
-		commandKey("npm", "root", "-g"):                               {Stdout: npmRoot + "\n"},
-		commandKey("python3", "-m", "pip", "list", "--format=json"):   {Stdout: `[{"name":"requests","version":"2.32.3"}]`},
-		commandKey("pipx", "list", "--json"):                          {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"}}}}}`},
-		commandKey("uv", "tool", "list"):                              {Stdout: "ruff v0.5.0\n"},
-		commandKey("cargo", "install", "--list"):                      {Stdout: "ripgrep v14.1.0:\n    rg\n"},
-		commandKey("go", "env", "GOPATH"):                             {Stdout: goPath + "\n"},
-		commandKey("brew", "list", "--versions"):                      {Stdout: "jq 1.7.1\n"},
-		commandKey("docker", "image", "ls", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:abc"}` + "\n"},
+		commandKey("npm", "root", "-g"):                                             {Stdout: npmRoot + "\n"},
+		commandKey("python3", "-m", "pip", "list", "--format=json"):                 {Stdout: `[{"name":"requests","version":"2.32.3"}]`},
+		commandKey("pipx", "list", "--json"):                                        {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"}}}}}`},
+		commandKey("uv", "tool", "list"):                                            {Stdout: "ruff v0.5.0\n"},
+		commandKey("cargo", "install", "--list"):                                    {Stdout: "ripgrep v14.1.0:\n    rg\n"},
+		commandKey("go", "env", "GOPATH"):                                           {Stdout: goPath + "\n"},
+		commandKey("brew", "list", "--versions"):                                    {Stdout: "jq 1.7.1\n"},
+		commandKey("docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"},
 	}}
 	got, err := New().Collect(context.Background(), optInEnvironment(t, home, runner))
 	if err != nil {

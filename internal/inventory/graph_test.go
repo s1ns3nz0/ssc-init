@@ -49,6 +49,8 @@ func TestBuildNormalizesDeterministicallyWithoutMutatingInput(t *testing.T) {
 			Relationships: []model.Relationship{
 				{From: "b", Kind: "uses", To: "a"},
 				{From: "missing", Kind: "uses", To: "a"},
+				{From: "a", Kind: "unknown", To: "b"},
+				{From: "a", Kind: "uses", To: "a"},
 			},
 		},
 		{

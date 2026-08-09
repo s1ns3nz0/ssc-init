@@ -133,7 +133,7 @@ func TestCIWorkflowTakesItsGoVersionFromGoMod(t *testing.T) {
 	}
 }
 
-func TestCIWorkflowIsLeastPrivilegeAndSecretFree(t *testing.T) {
+func TestCIWorkflowIsLeastPrivilegeAndUsesOnlyTheBundlePublicationSecret(t *testing.T) {
 	workflow := readCIWorkflow(t)
 	if !strings.Contains("\n"+workflow, "\npermissions:\n  contents: read\n") {
 		t.Error("ci workflow has no read-only top-level permissions block")
@@ -141,7 +141,18 @@ func TestCIWorkflowIsLeastPrivilegeAndSecretFree(t *testing.T) {
 	if regexp.MustCompile(`(?m)^\s*[a-z-]+: write`).MatchString(workflow) {
 		t.Error("ci workflow grants a write permission")
 	}
-	if strings.Contains(workflow, "secrets.") {
-		t.Error("ci workflow references a secret; signing and notarization are out of scope")
+	allowed := []string{"secrets.SSC_INIT_TI_BUNDLE_SIGNING_SEED_BASE64", "secrets.SSC_INIT_POLICY_BUNDLE_SIGNING_SEED_BASE64"}
+	if strings.Count(workflow, "secrets.") != len(allowed) {
+		t.Error("ci workflow uses an unexpected number of secret inputs")
+	}
+	for _, name := range allowed {
+		if !strings.Contains(workflow, name) {
+			t.Errorf("ci workflow is missing family-scoped secret %q", name)
+		}
+	}
+	for _, forbidden := range []string{"APPLE_ID", "NOTARY", "SIGNING_IDENTITY", "DEVELOPER_ID"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("ci workflow unexpectedly wires deferred Apple credential %q", forbidden)
+		}
 	}
 }

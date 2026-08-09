@@ -16,7 +16,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write fa
 
 func TestWriteJSONUsesStableTopLevelShapeWithoutHTMLEscaping(t *testing.T) {
 	scan := model.ScanResult{
-		SchemaVersion: "ssc-init.scan.v3",
+		SchemaVersion: "ssc-init.scan.v7",
 		ScanID:        "00000000-0000-4000-8000-000000000001",
 		Status:        "complete",
 		StartedAt:     time.Unix(1_700_000_000, 0).UTC(),
@@ -35,7 +35,7 @@ func TestWriteJSONUsesStableTopLevelShapeWithoutHTMLEscaping(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.String()
-	if !strings.HasSuffix(got, "\n") || !strings.Contains(got, `"schemaVersion":"ssc-init.scan.v3"`) {
+	if !strings.HasSuffix(got, "\n") || !strings.Contains(got, `"schemaVersion":"ssc-init.scan.v7"`) {
 		t.Fatalf("json=%q", got)
 	}
 	if strings.Index(got, `"coverage"`) > strings.Index(got, `"evidenceCoverage"`) {
@@ -54,7 +54,7 @@ func TestWriteJSONUsesStableTopLevelShapeWithoutHTMLEscaping(t *testing.T) {
 
 func TestWriteJSONMatchesV3BaselineGolden(t *testing.T) {
 	scan := model.ScanResult{
-		SchemaVersion: "ssc-init.scan.v3",
+		SchemaVersion: "ssc-init.scan.v7",
 		ScanID:        "00000000-0000-4000-8000-000000000001",
 		Status:        "complete",
 		StartedAt:     time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC),
@@ -73,14 +73,14 @@ func TestWriteJSONMatchesV3BaselineGolden(t *testing.T) {
 		Relationships: []model.Relationship{},
 	}
 	delta := model.Delta{Changes: []model.Change{}}
-	want := `{"schemaVersion":"ssc-init.scan.v3",` +
+	want := `{"schemaVersion":"ssc-init.scan.v7",` +
 		`"scanId":"00000000-0000-4000-8000-000000000001",` +
 		`"status":"complete",` +
 		`"startedAt":"2026-08-07T00:00:00Z",` +
 		`"finishedAt":"2026-08-07T00:00:01Z",` +
 		`"scope":{"platform":"darwin","catalogVersion":"ssc-init.catalog.v1","projectRoots":[],"externalProbes":false},` +
 		`"coverage":[],` +
-		`"evidenceCoverage":{"status":"complete","targets":[]},` +
+		`"evidenceCoverage":{"status":"complete","targets":[]},"analyzerCoverage":null,` +
 		`"inventory":{"assets":[],"observations":[],"evidence":[],"relationships":[]},` +
 		`"delta":{"changes":[]}}` + "\n"
 	var out bytes.Buffer

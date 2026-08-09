@@ -120,6 +120,8 @@ func canonicalIssuedTarget(target model.LocalEvidenceTarget, anchor Anchor) [sha
 		string(target.Kind),
 		target.Subject,
 		string(target.PresetStatus),
+		target.PresetAlgorithm,
+		target.PresetDigest,
 		target.RootPath,
 		target.RelativePath,
 	} {

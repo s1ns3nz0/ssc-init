@@ -50,6 +50,113 @@ func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T)
 	}
 }
 
+func TestProjectCollectorDiscoversOnlyClosedGitHooksAndVSCodeLaunchConfig(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	project := filepath.Join(root, "app")
+	for relative, contents := range map[string]string{
+		filepath.Join(".git", "hooks", "pre-commit"):        "#!/bin/sh\nexit 0\n",
+		filepath.Join(".git", "hooks", "pre-commit.sample"): "sample",
+		filepath.Join(".git", "hooks", "private-hook"):      "private",
+		filepath.Join(".vscode", "launch.json"):             `{"version":"0.2.0","configurations":[]}`,
+		"launch.json":                                       `{"must":"not be collected"}`,
+	} {
+		writeProjectFile(t, filepath.Join(project, relative), contents)
+	}
+	result := collectProjectsAt(t, home, root)
+	subjects := make(map[string]int)
+	for _, target := range result.LocalEvidenceTargets {
+		subjects[target.Subject]++
+	}
+	if subjects[model.EvidenceSubjectGitHook] != 1 || subjects[model.EvidenceSubjectLaunchConfig] != 1 || len(result.LocalEvidenceTargets) != 2 {
+		t.Fatalf("subjects=%v targets=%+v", subjects, result.LocalEvidenceTargets)
+	}
+	assetTypes := make(map[model.AssetType]int)
+	for _, asset := range result.Assets {
+		assetTypes[asset.Type]++
+	}
+	if assetTypes[model.AssetGitHook] != 1 || assetTypes[model.AssetLaunchConfig] != 1 || len(result.Relationships) != 2 {
+		t.Fatalf("assetTypes=%v relationships=%+v", assetTypes, result.Relationships)
+	}
+	assetIDs := make(map[string]struct{}, len(result.Assets))
+	for _, asset := range result.Assets {
+		assetIDs[asset.ID] = struct{}{}
+	}
+	for _, target := range result.LocalEvidenceTargets {
+		if strings.HasSuffix(target.RelativePath, ".sample") || strings.HasSuffix(target.RelativePath, "private-hook") || target.RelativePath == "app/launch.json" {
+			t.Fatalf("unexpected target=%+v", target)
+		}
+		if _, ok := assetIDs[target.AssetID]; !ok {
+			t.Fatalf("target has no asset endpoint: %+v", target)
+		}
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 2 || collection.Coverage.Status != model.CoverageComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestMalformedLaunchConfigKeepsHashEvidenceAndMarksOnlyProjectPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeProjectFile(t, filepath.Join(root, "app", ".vscode", "launch.json"), `{"configurations":[`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "launch_malformed" {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete || collection.Evidence[0].Subject != model.EvidenceSubjectLaunchConfig {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "package-lock.json"), `{"packages":{"node_modules/demo":{"name":"demo","version":"1.2.3","integrity":"sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo="}}}`)
+	result := collectProjectsAt(t, home, root)
+
+	var packageAsset model.Asset
+	var lockfileID string
+	for _, asset := range result.Assets {
+		switch {
+		case asset.ID == "pkg:npm/demo@1.2.3":
+			packageAsset = asset
+		case asset.Source == "project-lockfile":
+			lockfileID = asset.ID
+		}
+	}
+	if packageAsset.Provenance == nil || packageAsset.Provenance.Status != model.ProvenanceImmutable || packageAsset.Provenance.Integrity != "sha256:"+strings.Repeat("aa", 32) || lockfileID == "" {
+		t.Fatalf("package=%+v lockfileID=%q assets=%+v", packageAsset, lockfileID, result.Assets)
+	}
+	want := model.Relationship{From: packageAsset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID}
+	found := false
+	for _, relationship := range result.Relationships {
+		found = found || relationship == want
+	}
+	if !found {
+		t.Fatalf("missing relationship=%+v in %+v", want, result.Relationships)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("manifest evidence was not preserved: %+v", collection)
+	}
+}
+
+func TestMalformedLockfileKeepsEvidenceAndMarksProvenancePartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "Cargo.lock"), "not valid cargo lock syntax = [")
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "provenance_malformed" {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("evidence=%+v", collection)
+	}
+}
+
 func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
@@ -59,7 +166,14 @@ func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 		"Cargo.toml", "Cargo.lock", "Brewfile",
 	}
 	for _, name := range names {
-		writeProjectFile(t, filepath.Join(root, name), name+" contents")
+		contents := name + " contents"
+		switch name {
+		case "package-lock.json", "npm-shrinkwrap.json":
+			contents = `{"packages":{}}`
+		case "go.sum", "Cargo.lock":
+			contents = ""
+		}
+		writeProjectFile(t, filepath.Join(root, name), contents)
 	}
 	for _, name := range []string{"requirements-dev.txt", "Package.json", "package.json.bak", "xCargo.toml"} {
 		writeProjectFile(t, filepath.Join(root, name), "must not be evidence")

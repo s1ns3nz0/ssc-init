@@ -14,6 +14,8 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
@@ -40,7 +42,9 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 			agents.New(),
 			ide.New(),
 			projects.New(roots),
+			surfaces.New(),
 			packages.New(),
+			runtimecollector.New(),
 		},
 	}
 	snapshots := newMemorySnapshots()
@@ -71,7 +75,7 @@ func TestBaselineFixtureNeverReadsRealHome(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, output.String())
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v3" {
+	if document["schemaVersion"] != "ssc-init.scan.v7" {
 		t.Fatalf("schemaVersion=%v", document["schemaVersion"])
 	}
 	if _, ok := document["evidenceCoverage"].(map[string]any); !ok {

@@ -89,6 +89,14 @@ type rootWalker struct {
 	errors     []model.CoverageError
 }
 
+var gitHookCatalog = map[string]struct{}{
+	"applypatch-msg": {}, "commit-msg": {}, "fsmonitor-watchman": {}, "post-applypatch": {},
+	"post-checkout": {}, "post-commit": {}, "post-merge": {}, "post-receive": {}, "post-rewrite": {},
+	"post-update": {}, "pre-applypatch": {}, "pre-auto-gc": {}, "pre-commit": {}, "pre-merge-commit": {},
+	"pre-push": {}, "pre-rebase": {}, "pre-receive": {}, "prepare-commit-msg": {}, "push-to-checkout": {},
+	"reference-transaction": {}, "update": {},
+}
+
 func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, configured Root, limits walkLimits, beforeOpen func(string)) (rootWalk, error) {
 	if err := ctx.Err(); err != nil {
 		return rootWalk{}, err
@@ -191,6 +199,25 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 			continue
 		}
 		if expected.IsDir() {
+			if name == ".git" {
+				projectInfo, projectErr := directory.Stat()
+				projectFingerprint, projectOK := platform.Fingerprint(projectInfo)
+				if projectErr != nil || !projectOK {
+					walker.addError("identity_changed", "project directory identity changed")
+					continue
+				}
+				gitRoot, openErr := platform.OpenVerifiedRoot(walker.ctx, root, name)
+				if openErr != nil {
+					walker.addError(identityErrorCode(openErr), "Git hook directory identity changed")
+					continue
+				}
+				stop, hookErr := walker.walkGitHooks(gitRoot, relative, projectFingerprint)
+				_ = gitRoot.Close()
+				if hookErr != nil || stop {
+					return stop, hookErr
+				}
+				continue
+			}
 			if excludedDirectory(entryRelative) {
 				continue
 			}
@@ -219,6 +246,9 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 		}
 		definition, projectRelative, recognized := recognizeConfig(filepath.ToSlash(entryRelative))
 		evidenceDefinition, evidenceRecognized := evidenceCatalog[name]
+		if name == "launch.json" && filepath.Base(relative) != ".vscode" {
+			evidenceRecognized = false
+		}
 		if !recognized && !evidenceRecognized {
 			continue
 		}
@@ -285,6 +315,74 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 			relativePath: filepath.Clean(entryRelative), projectRelative: projectRelative, definition: evidenceDefinition,
 			fileFingerprint: fileFingerprint, projectFingerprint: enumeratedProject,
 			oversize: opened.Size() > evidenceDefinition.maxBytes,
+		})
+	}
+	return false, nil
+}
+
+func (walker *rootWalker) walkGitHooks(gitRoot platform.RootedDirectory, projectRelative string, projectFingerprint platform.FileFingerprint) (bool, error) {
+	if err := walker.ctx.Err(); err != nil {
+		return true, err
+	}
+	hooksRoot, err := platform.OpenVerifiedRoot(walker.ctx, gitRoot, "hooks")
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		walker.addError(identityErrorCode(err), "Git hook directory identity changed")
+		return false, nil
+	}
+	defer hooksRoot.Close()
+	directory, err := platform.OpenVerifiedDirectory(hooksRoot)
+	if err != nil {
+		walker.addError(identityErrorCode(err), "Git hook directory identity changed")
+		return false, nil
+	}
+	defer directory.Close()
+	remaining := walker.limits.maxEntries - walker.entries
+	entries, overflow, err := readBoundedDirectory(directory, remaining)
+	if err != nil {
+		walker.addError("path_unavailable", "Git hook directory is unavailable")
+		return false, nil
+	}
+	if overflow {
+		walker.addError("entry_limit", "project root entry limit reached")
+		return true, nil
+	}
+	walker.entries += len(entries)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if err := walker.ctx.Err(); err != nil {
+			return true, err
+		}
+		name := entry.Name()
+		if _, recognized := gitHookCatalog[name]; !recognized || strings.HasSuffix(name, ".sample") {
+			continue
+		}
+		if len(walker.configs)+len(walker.evidence) >= walker.limits.maxConfigs {
+			walker.addError("config_limit", "project configuration limit reached")
+			return true, nil
+		}
+		expected, err := hooksRoot.Lstat(name)
+		if err != nil || expected == nil || !expected.Mode().IsRegular() || expected.Mode()&fs.ModeSymlink != 0 {
+			walker.addError("path_unavailable", "Git hook file is unavailable")
+			continue
+		}
+		file, opened, err := openVerifiedFile(hooksRoot, name, expected)
+		if err != nil {
+			walker.addError(identityErrorCode(err), "Git hook identity changed")
+			continue
+		}
+		_ = file.Close()
+		fingerprint, ok := platform.Fingerprint(opened)
+		if !ok {
+			walker.addError("identity_changed", "Git hook identity changed")
+			continue
+		}
+		walker.evidence = append(walker.evidence, discoveredProjectEvidence{
+			relativePath: filepath.Join(projectRelative, ".git", "hooks", name), projectRelative: filepath.Clean(projectRelative),
+			definition:      projectEvidenceDefinition{basename: name, subject: model.EvidenceSubjectGitHook, maxBytes: maxProjectEvidenceBytes},
+			fileFingerprint: fingerprint, projectFingerprint: projectFingerprint, oversize: opened.Size() > maxProjectEvidenceBytes,
 		})
 	}
 	return false, nil

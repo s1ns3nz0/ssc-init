@@ -48,6 +48,8 @@ type Inventory struct {
 	Evidence      []ContentEvidence `json:"evidence"`
 	Relationships []Relationship    `json:"relationships"`
 	Errors        []CoverageError   `json:"errors,omitempty"`
+	Findings      []Finding         `json:"findings,omitempty"`
+	AnalyzerFacts []AnalyzerFact    `json:"analyzerFacts,omitempty"`
 }
 
 // ChangeKind identifies how an asset changed from the previous inventory.
@@ -118,6 +120,7 @@ type ScanResult struct {
 	Coverage         []CollectorResult `json:"coverage"`
 	EvidenceCoverage EvidenceCoverage  `json:"evidenceCoverage"`
 	Scope            ScanScope         `json:"scope,omitempty,omitzero"`
+	AnalyzerCoverage *AnalyzerCoverage `json:"analyzerCoverage,omitempty"`
 }
 
 // Snapshot combines a persisted scan result with its immutable inventory.

@@ -108,7 +108,10 @@ func (c *packageCollector) Collect(ctx context.Context, env collector.Environmen
 			result.Targets = append(result.Targets, target)
 			continue
 		}
-		executableObservation, ok := appendExecutableEvidence(&result, &target, probe, evidence)
+		executableObservation, ok := appendExecutableEvidence(ctx, env, &result, &target, probe, evidence)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return abortPackageCollection(&result, ctxErr)
+		}
 		if !ok {
 			result.Targets = append(result.Targets, target)
 			continue
@@ -193,7 +196,7 @@ func dockerDaemonUnavailable(result platform.CommandResult, runErr error) bool {
 	return false
 }
 
-func appendExecutableEvidence(result *model.CollectorResult, target *model.TargetCoverage, probe commandProbe, evidence platform.ExecutableEvidence) (model.Observation, bool) {
+func appendExecutableEvidence(ctx context.Context, env collector.Environment, result *model.CollectorResult, target *model.TargetCoverage, probe commandProbe, evidence platform.ExecutableEvidence) (model.Observation, bool) {
 	asset := model.Asset{
 		ID: "tool-executable:sha256:" + evidence.SHA256, Type: model.AssetTool,
 		Name: "executable", SHA256: evidence.SHA256,
@@ -214,6 +217,13 @@ func appendExecutableEvidence(result *model.CollectorResult, target *model.Targe
 	if err != nil || !validExecutableEvidence(probe, evidence) {
 		appendPackageIssue(result, target, model.TargetPartial, "executable_evidence_invalid", "package probe executable evidence is invalid")
 		return model.Observation{}, false
+	}
+	if env.SignatureInspector != nil {
+		signature, signatureErr := env.SignatureInspector.Inspect(ctx, evidence, env.Inspector)
+		asset.Signature = &signature
+		if signatureErr != nil && ctx.Err() == nil {
+			appendPackageIssue(result, target, model.TargetPartial, "signature_unavailable", "package probe signature is unavailable")
+		}
 	}
 	result.Assets = append(result.Assets, asset)
 	result.Observations = append(result.Observations, observation)
@@ -259,7 +269,19 @@ func appendPackageEvidence(ctx context.Context, result *model.CollectorResult, t
 	if candidate.Type != model.AssetPackage {
 		return nil
 	}
-	return issuePackageArtifactEvidence(ctx, result, probe, observation)
+	appendPackageRelationship(result, model.Relationship{
+		From: candidate.ID, Kind: model.RelationshipProbedBy, To: executableObservation.AssetID,
+	})
+	return issuePackageArtifactEvidence(ctx, result, probe, observation, candidate)
+}
+
+func appendPackageRelationship(result *model.CollectorResult, relationship model.Relationship) {
+	for _, existing := range result.Relationships {
+		if existing == relationship {
+			return
+		}
+	}
+	result.Relationships = append(result.Relationships, relationship)
 }
 
 func validExecutableEvidence(probe commandProbe, evidence platform.ExecutableEvidence) bool {
@@ -333,7 +355,7 @@ func probes() []commandProbe {
 		{targetID: "packages.cargo", ecosystem: "cargo", command: "cargo", args: []string{"install", "--list"}, parse: parseCargo},
 		{targetID: "packages.go", ecosystem: "go", command: "go", args: []string{"env", "GOPATH"}, parse: parseGoPath},
 		{targetID: "packages.homebrew", ecosystem: "homebrew", command: "brew", args: []string{"list", "--versions"}, parse: parseBrew},
-		{targetID: "packages.docker", ecosystem: "docker", command: "docker", args: []string{"image", "ls", "--format", "{{json .}}"}, parse: parseDocker},
+		{targetID: "packages.docker", ecosystem: "docker", command: "docker", args: []string{"image", "ls", "--no-trunc", "--format", "{{json .}}"}, parse: parseDocker},
 	}
 }
 
@@ -859,12 +881,28 @@ func parseDocker(ctx context.Context, _ collector.Environment, stdout string) ([
 			loss = true
 			continue
 		}
-		assets = append(assets, purlAsset("docker", image.Repository, version, "docker"))
+		asset := purlAsset("docker", image.Repository, version, "docker")
+		asset.Provenance = &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "docker", Source: "local-daemon"}
+		if digest, ok := fullDockerImageID(image.ID); ok {
+			asset.SHA256 = digest
+			asset.Provenance.Status = model.ProvenanceImmutable
+			asset.Provenance.Integrity = "sha256:" + digest
+		}
+		assets = append(assets, asset)
 	}
 	if loss {
 		return assets, errParserLoss
 	}
 	return assets, nil
+}
+
+func fullDockerImageID(value string) (string, bool) {
+	digest, ok := strings.CutPrefix(value, "sha256:")
+	if !ok || len(digest) != sha256.Size*2 || digest != strings.ToLower(digest) {
+		return "", false
+	}
+	decoded, err := hex.DecodeString(digest)
+	return digest, err == nil && len(decoded) == sha256.Size
 }
 
 type packageEntryBudget struct {

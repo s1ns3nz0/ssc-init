@@ -19,6 +19,7 @@ type StatusData struct {
 	Scope                  *model.ScanScope
 	Coverage               []model.CollectorResult
 	EvidenceCoverage       *model.EvidenceCoverage
+	AnalyzerCoverage       *model.AnalyzerCoverage
 	Inventory              *model.Inventory
 }
 
@@ -43,6 +44,9 @@ func WritePretty(writer io.Writer, scan model.ScanResult, inventory model.Invent
 	printer.field("status", string(scan.Status))
 	printer.field("started", scan.StartedAt.UTC().Format(time.RFC3339))
 	printer.field("finished", scan.FinishedAt.UTC().Format(time.RFC3339))
+	if scan.AnalyzerCoverage != nil {
+		printer.field("analyzer", string(scan.AnalyzerCoverage.Status))
+	}
 	if scan.Scope.Platform != "" {
 		probes := "off"
 		if scan.Scope.ExternalProbes {
@@ -72,7 +76,7 @@ func WriteStatusPretty(writer io.Writer, status StatusData) error {
 			len(status.Inventory.Assets), len(status.Inventory.Observations), len(status.Inventory.Evidence)))
 	}
 	if status.LegacyInventory {
-		printer.field("note", "legacy inventory (pre-v3): content evidence was not collected")
+		printer.field("note", "legacy inventory: current-version coverage is not claimed")
 		return printer.err
 	}
 	if status.Scope != nil {
@@ -82,6 +86,9 @@ func WriteStatusPretty(writer io.Writer, status StatusData) error {
 		}
 		printer.field("scope", fmt.Sprintf("%s catalog=%s probes=%s roots=%d",
 			status.Scope.Platform, status.Scope.CatalogVersion, probes, len(status.Scope.ProjectRoots)))
+	}
+	if status.AnalyzerCoverage != nil {
+		printer.field("analyzer", fmt.Sprintf("%s files=%d bytes=%d", status.AnalyzerCoverage.Status, status.AnalyzerCoverage.FilesRead, status.AnalyzerCoverage.BytesRead))
 	}
 	printer.collectorTable(status.Coverage)
 	inventory := model.Inventory{}

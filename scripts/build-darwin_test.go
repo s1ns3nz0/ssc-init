@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
@@ -78,7 +79,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 			digests[name] = sha256.Sum256(content)
 		}
 		assertNativeVersion(t, repositoryRoot, wantVersion)
-		assertNativeIsolatedStatusV3(t, repositoryRoot)
+		assertNativeIsolatedStatusV7(t, repositoryRoot)
 		return digests
 	}
 
@@ -95,17 +96,59 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(checksums)), "\n")
-	if len(lines) != 4 ||
-		!strings.HasSuffix(lines[0], "  dist/sbom.cdx.json") ||
-		!strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-amd64") ||
-		!strings.HasSuffix(lines[2], "  dist/ssc-init-darwin-arm64") ||
-		!strings.HasSuffix(lines[3], "  dist/ssc-init-darwin-universal") {
+	wantChecksumFiles := []string{
+		"dist/sbom.cdx.json",
+		"dist/ssc-init-adapter-claude.zip",
+		"dist/ssc-init-adapter-codex.zip",
+		"dist/ssc-init-adapter-cursor.zip",
+		"dist/ssc-init-darwin-amd64",
+		"dist/ssc-init-darwin-arm64",
+		"dist/ssc-init-darwin-universal",
+	}
+	if len(lines) != len(wantChecksumFiles) {
 		t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+	}
+	for index, name := range wantChecksumFiles {
+		if !strings.HasSuffix(lines[index], "  "+name) {
+			t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+		}
+	}
+}
+
+func TestAdapterPackagerEmitsNativePackagesWithoutExecutables(t *testing.T) {
+	repositoryRoot := repositoryRoot(t)
+	distribution := t.TempDir()
+	command := exec.Command("go", "run", filepath.Join(repositoryRoot, "scripts", "package-adapters.go"), filepath.Join(repositoryRoot, "adapters"), distribution)
+	command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("package failed: %v\n%s", err, output)
+	}
+	for _, host := range []string{"claude", "codex", "cursor"} {
+		archive, err := zip.OpenReader(filepath.Join(distribution, "ssc-init-adapter-"+host+".zip"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundManifest, foundCapabilities := false, false
+		for _, entry := range archive.File {
+			if filepath.IsAbs(entry.Name) || strings.Contains(entry.Name, "..") || entry.Mode()&0o111 != 0 {
+				archive.Close()
+				t.Fatalf("unsafe %s entry %q mode=%v", host, entry.Name, entry.Mode())
+			}
+			foundManifest = foundManifest || strings.HasSuffix(entry.Name, "-plugin/plugin.json")
+			foundCapabilities = foundCapabilities || strings.HasSuffix(entry.Name, "/ssc-init-capabilities.json")
+		}
+		archive.Close()
+		if !foundManifest || !foundCapabilities {
+			t.Fatalf("host=%s manifest=%v capabilities=%v", host, foundManifest, foundCapabilities)
+		}
 	}
 }
 
 // releaseArtifactNames is every file a release build writes into dist/.
 var releaseArtifactNames = []string{
+	"ssc-init-adapter-claude.zip",
+	"ssc-init-adapter-codex.zip",
+	"ssc-init-adapter-cursor.zip",
 	"ssc-init-darwin-amd64",
 	"ssc-init-darwin-arm64",
 	"ssc-init-darwin-universal",
@@ -445,7 +488,7 @@ func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []strin
 	root, script, _ := newIsolatedReleaseRepository(t)
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := fakeGoVersionBranch + "output=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
+	fakeGoSource := fakeGoRunBranch(t) + fakeGoVersionBranch + "output=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -493,6 +536,16 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	if err := os.WriteFile(script, source, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	packager, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "package-adapters.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "package-adapters.go"), packager, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(root, "adapters"), os.DirFS(filepath.Join(repositoryRoot(t), "adapters"))); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/dist/\n/.superpowers/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -502,17 +555,26 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	runGit(t, root, "init", "-q")
 	runGit(t, root, "config", "user.email", "ssc-init-tests@example.invalid")
 	runGit(t, root, "config", "user.name", "SSC Init Tests")
-	runGit(t, root, "add", ".gitignore", "scripts/build-darwin.sh", "tracked.txt")
+	runGit(t, root, "add", ".gitignore", "scripts", "adapters", "tracked.txt")
 	runGit(t, root, "commit", "-q", "-m", "fixture")
 
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := fakeGoVersionBranch + "output=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
+	fakeGoSource := fakeGoRunBranch(t) + fakeGoVersionBranch + "output=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFakeLipo(t, binDirectory)
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
+}
+
+func fakeGoRunBranch(t *testing.T) string {
+	t.Helper()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = run ]; then exec %q \"$@\"; fi\n", realGo)
 }
 
 func runGit(t *testing.T, root string, arguments ...string) {
@@ -600,10 +662,10 @@ func assertNativeVersion(t *testing.T, repositoryRoot, want string) {
 	}
 }
 
-// assertNativeIsolatedStatusV3 smokes the release binary's status contract
-// against an isolated HOME: the v3 schema version must be reported, no
+// assertNativeIsolatedStatusV7 smokes the release binary's status contract
+// against an isolated HOME: the v7 schema version must be reported, no
 // baseline may be claimed, and state must be created only inside that home.
-func assertNativeIsolatedStatusV3(t *testing.T, repositoryRoot string) {
+func assertNativeIsolatedStatusV7(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	if runtime.GOOS != "darwin" || (runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64") {
 		t.Skip("native Darwin status smoke test")
@@ -629,7 +691,7 @@ func assertNativeIsolatedStatusV3(t *testing.T, repositoryRoot string) {
 	if err := json.Unmarshal(output, &result); err != nil {
 		t.Fatalf("decode native status output: %v\n%s", err, output)
 	}
-	if result.SchemaVersion != "ssc-init.status.v3" || result.Initialized {
+	if result.SchemaVersion != "ssc-init.status.v7" || result.Initialized {
 		t.Fatalf("native isolated status=%+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(isolatedHome, "Library", "Application Support", "SSC Init", "state.db")); err != nil {

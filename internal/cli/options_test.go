@@ -29,6 +29,45 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsPolicyInitAndOverride(t *testing.T) {
+	got, err := ParseOptions([]string{"policy", "init", "--policy", "$HOME/team/policy.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Command != "policy" || got.PolicyCommand != "init" || got.PolicyPath != "$HOME/team/policy.json" {
+		t.Fatalf("options=%+v", got)
+	}
+	for _, args := range [][]string{{"policy"}, {"policy", "init", "--policy", "../escape"}, {"policy", "init", "--policy", "/tmp/a", "--policy", "/tmp/b"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid policy options: %v", args)
+		}
+	}
+}
+
+func TestParseOptionsAcceptsPolicyPinForms(t *testing.T) {
+	for _, args := range [][]string{{"policy", "pin"}, {"policy", "pin", "--update", "agent-plugin:claude:x@1.0.0"}} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"policy", "pin", "--update"}, {"policy", "pin", "--update", "x", "--update", "y"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
+
+func TestParseOptionsAcceptsPolicyCheckForms(t *testing.T) {
+	for _, args := range [][]string{{"policy", "check"}, {"policy", "check", "--json"}, {"policy", "check", "--pretty"}, {"policy", "check", "--policy", "/tmp/policy.json", "--json"}} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	if _, err := ParseOptions([]string{"policy", "check", "--json", "--pretty"}); err == nil {
+		t.Fatal("accepted two output formats")
+	}
+}
+
 func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 	tests := []struct {
 		args []string
@@ -86,6 +125,34 @@ func TestParseOptionsAcceptsInstallAndRollback(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rollback, Options{Command: "rollback", JSON: true}) {
 		t.Fatalf("rollback=%+v", rollback)
+	}
+}
+
+func TestParseOptionsAcceptsOnlyExplicitLocalBundleCommands(t *testing.T) {
+	got, err := ParseOptions([]string{"bundle", "install", "--family", "ti", "--from", "/tmp/bundle.json", "--signature", "/tmp/bundle.sig", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Options{Command: "bundle", BundleCommand: "install", BundleFamily: "ti", BundleSource: "/tmp/bundle.json", BundleSignature: "/tmp/bundle.sig", JSON: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("options=%+v want=%+v", got, want)
+	}
+	for _, args := range [][]string{
+		{"bundle", "status", "--family", "policy", "--json"},
+		{"bundle", "rollback", "--family", "ti", "--json"},
+	} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"bundle", "install", "--family", "ti", "--from", "https://example.invalid/bundle", "--signature", "/tmp/sig", "--json"},
+		{"bundle", "install", "--family", "other", "--from", "/tmp/b", "--signature", "/tmp/s", "--json"},
+		{"bundle", "status", "--family", "ti", "--from", "/tmp/b", "--json"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid bundle command: %v", args)
+		}
 	}
 }
 
@@ -161,6 +228,60 @@ func TestParseOptionsRejectsAmbiguousForms(t *testing.T) {
 		{"hook", "extra"},
 	}
 	for _, args := range tests {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}
+
+func TestParseAdapterEvaluateOptions(t *testing.T) {
+	got, err := ParseOptions([]string{"adapter", "evaluate"})
+	if err != nil || got.Command != "adapter" || got.AdapterCommand != "evaluate" {
+		t.Fatalf("options=%+v err=%v", got, err)
+	}
+	for _, args := range [][]string{{"adapter"}, {"adapter", "evaluate", "--json"}, {"adapter", "unknown"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}
+
+func TestParseQuarantinePreviewApplyAndRestoreOptions(t *testing.T) {
+	valid := [][]string{
+		{"quarantine", "preview", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--json"},
+		{"quarantine", "apply", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--approval-id", "approval:a", "--json"},
+		{"quarantine", "restore-preview", "--record-id", "quarantine:a", "--json"},
+		{"quarantine", "restore-apply", "--record-id", "quarantine:a", "--approval-id", "approval:a", "--json"},
+	}
+	for _, args := range valid {
+		if got, err := ParseOptions(args); err != nil || got.Command != "quarantine" {
+			t.Fatalf("args=%q options=%+v err=%v", args, got, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"quarantine", "preview", "--asset-id", "tool:a", "--json"},
+		{"quarantine", "apply", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--json"},
+		{"quarantine", "restore-preview", "--record-id", "quarantine:a", "--approval-id", "approval:a", "--json"},
+		{"quarantine", "restore-apply", "--record-id", "quarantine:a", "--approval-id", "approval:a"},
+		{"quarantine", "unknown", "--json"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}
+
+func TestParseSchedulePreviewOptions(t *testing.T) {
+	got, err := ParseOptions([]string{"schedule", "preview", "--json"})
+	if err != nil || got.ScheduleCommand != "preview" || !got.JSON {
+		t.Fatalf("options=%+v err=%v", got, err)
+	}
+	for _, command := range []string{"install", "remove"} {
+		if got, err := ParseOptions([]string{"schedule", command, "--json"}); err != nil || got.ScheduleCommand != command {
+			t.Fatalf("command=%s options=%+v err=%v", command, got, err)
+		}
+	}
+	for _, args := range [][]string{{"schedule"}, {"schedule", "preview"}, {"schedule", "preview", "--pretty"}, {"schedule", "unknown", "--json"}} {
 		if _, err := ParseOptions(args); err == nil {
 			t.Fatalf("accepted %q", args)
 		}

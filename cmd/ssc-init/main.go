@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,18 +16,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/agents"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/install"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
+	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
+	"github.com/s1ns3nz0/ssc-init/internal/webhook"
 )
 
 var version = "dev"
@@ -40,7 +50,12 @@ var (
 	parseOptionsForRun = cli.ParseOptions
 	hostPathsForRun    = hostPaths
 	resolveRootsForRun = projects.ResolveRoots
-	openStoreForRun    = func(path string) (applicationStore, error) { return store.Open(path) }
+	// The local-policy build always opens the store with documented retention
+	// defaults. Only a future verified, signed organization bundle may wire
+	// store.Options here; local policy is deliberately outside this seam.
+	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
+	bundleKeysForRun             = bundle.KeyRegistry{}
+	adapterInputForRun io.Reader = os.Stdin
 )
 
 func main() {
@@ -66,7 +81,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	case "version":
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "doctor":
-		_, paths, ok := hostPathsForRun()
+		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
@@ -79,6 +94,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			DatabasePath:     filepath.Join(paths.DataDir, "state.db"),
 			Ecosystems:       ecosystems,
 			OptionalCommands: commands,
+			InstallReporter:  func() (doctor.Install, error) { return doctor.InstallReport(home) },
 		})
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "status":
@@ -94,6 +110,84 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		defer snapshots.Close()
 		app.StatusReader = snapshots
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "findings", "adapter":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		defer snapshots.Close()
+		statusReader, ok := snapshots.(cli.StatusReader)
+		if !ok {
+			return 1
+		}
+		managers := make(map[bundle.Family]*bundle.Manager, 2)
+		for _, family := range []bundle.Family{bundle.FamilyTI, bundle.FamilyPolicy} {
+			layout, layoutErr := bundle.LayoutFor(home, family)
+			if layoutErr != nil {
+				return 1
+			}
+			managers[family] = &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
+		}
+		app.StatusReader = statusReader
+		app.FindingService = finding.Service{TI: managers[bundle.FamilyTI], Policy: managers[bundle.FamilyPolicy], Now: time.Now}
+		if options.Command == "adapter" {
+			app.AdapterInput = adapterInputForRun
+			return app.RunOptions(ctx, options, stdout, stderr)
+		}
+		app.DeviceID, err = loadDeviceID(paths.DataDir)
+		if err != nil {
+			return 1
+		}
+		app.Webhook = webhook.Deliverer{}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "quarantine":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		defer snapshots.Close()
+		statusReader, statusOK := snapshots.(cli.StatusReader)
+		recordReader, recordOK := snapshots.(cli.QuarantineReader)
+		recorder, recorderOK := snapshots.(quarantine.Recorder)
+		if !statusOK || !recordOK || !recorderOK {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.StatusReader = statusReader
+		app.QuarantineReader = recordReader
+		app.Quarantine = &quarantine.Manager{Home: home, Recorder: recorder}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "schedule":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		installManager := install.New(home)
+		current, installed, err := installManager.Current()
+		if err != nil || !installed {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		versionDir, err := paths.Install().VersionDir(current)
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.Schedule = schedule.Manager{Home: home, Executable: filepath.Join(versionDir, platform.CoreExecutableName), UID: os.Getuid(), Runner: platform.ExecRunner{Timeout: 10 * time.Second, MaxOutputBytes: 4 << 10}}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()
@@ -119,6 +213,20 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		policyContents, policyErr := os.ReadFile(paths.Install().PolicyFile)
+		if policyErr == nil {
+			app.PolicyDocument, app.PolicyLoadError = policy.Load(policyContents)
+			if app.PolicyLoadError == nil {
+				if policyStore, ok := snapshots.(cli.PolicyStore); ok {
+					app.PolicyStore = policyStore
+					app.Now = environment.Now
+				} else {
+					app.PolicyLoadError = errors.New("policy state is unavailable")
+				}
+			}
+		} else if !errors.Is(policyErr, os.ErrNotExist) {
+			app.PolicyLoadError = errors.New("policy document is unavailable")
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "install", "rollback":
 		home, _, ok := hostPathsForRun()
@@ -129,6 +237,73 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		manager := install.New(home)
 		manager.Health = coreHealthCheck
 		app.Installer = coreInstaller{manager: manager}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "policy":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.Home = home
+		app.PolicyPath = paths.Install().PolicyFile
+		if options.PolicyCommand == "check" {
+			policyPath := app.PolicyPath
+			if options.PolicyPath != "" {
+				policyPath = options.PolicyPath
+				if strings.HasPrefix(policyPath, "$HOME/") {
+					policyPath = filepath.Join(home, strings.TrimPrefix(policyPath, "$HOME/"))
+				}
+			}
+			contents, err := os.ReadFile(policyPath)
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to load policy document")
+				return 1
+			}
+			app.PolicyDocument, app.PolicyLoadError = policy.Load(contents)
+			if app.PolicyLoadError != nil {
+				return app.RunOptions(ctx, options, stdout, stderr)
+			}
+		}
+		if options.PolicyCommand == "pin" || options.PolicyCommand == "check" {
+			snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			defer snapshots.Close()
+			policyStore, ok := snapshots.(cli.PolicyStore)
+			if !ok {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			app.StatusReader = snapshots
+			app.PolicyStore = policyStore
+			app.Now = time.Now
+			if options.PolicyCommand == "check" {
+				tiManager, policyManager, managerErr := findingManagers(home)
+				if managerErr != nil {
+					return 1
+				}
+				app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: time.Now}
+			}
+		}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "bundle":
+		home, _, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.BundleManagers = make(map[bundle.Family]cli.BundleManager, 2)
+		for _, family := range []bundle.Family{bundle.FamilyTI, bundle.FamilyPolicy} {
+			layout, err := bundle.LayoutFor(home, family)
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			manager := &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
+			app.BundleManagers[family] = manager
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
 		home, paths, ok := hostPathsForRun()
@@ -154,6 +329,11 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		app.StatusReader = snapshots
+		tiManager, policyManager, managerErr := findingManagers(home)
+		if managerErr == nil {
+			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "invalid command arguments")
@@ -292,11 +472,69 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "doctor", "hook", "install", "rollback", "scan", "status":
+	case "adapter", "bundle", "doctor", "findings", "hook", "install", "policy", "quarantine", "rollback", "scan", "schedule", "status":
 		return true
 	default:
 		return false
 	}
+}
+
+func loadDeviceID(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, "device-id")
+	read := func() (string, error) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		value := strings.TrimSpace(string(raw))
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != 32 || len(value) != 64 {
+			return "", errors.New("invalid device identity")
+		}
+		return "device:sha256:" + value, nil
+	}
+	if value, err := read(); err == nil {
+		return value, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return read()
+	}
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := fmt.Fprintln(file, hex.EncodeToString(random[:]))
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(path)
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return "device:sha256:" + hex.EncodeToString(random[:]), nil
+}
+
+func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
+	makeManager := func(family bundle.Family) (*bundle.Manager, error) {
+		layout, err := bundle.LayoutFor(home, family)
+		if err != nil {
+			return nil, err
+		}
+		return &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}, nil
+	}
+	ti, err := makeManager(bundle.FamilyTI)
+	if err != nil {
+		return nil, nil, err
+	}
+	organization, err := makeManager(bundle.FamilyPolicy)
+	return ti, organization, err
 }
 
 func scanConfiguration(home string, options cli.Options) (collector.Environment, []collector.Collector, error) {
@@ -320,12 +558,15 @@ func scanConfiguration(home string, options cli.Options) (collector.Environment,
 	}
 	if options.ExternalProbes {
 		environment.Inspector = platform.NewExecutableInspector(16, 64<<20)
+		environment.SignatureInspector = platform.NewSignatureInspector(environment.Runner)
 	}
 	configuredCollectors := []collector.Collector{
 		agents.New(),
 		ide.New(),
 		projects.New(roots),
+		surfaces.New(),
 		packages.New(),
+		runtimecollector.New(),
 	}
 	return environment, configuredCollectors, nil
 }

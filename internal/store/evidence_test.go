@@ -72,7 +72,7 @@ func validV3Snapshot(t *testing.T, scanID string) (model.ScanResult, model.Inven
 	})
 
 	scan := testScan(scanID, time.Unix(40, 0).UTC())
-	scan.SchemaVersion = "ssc-init.scan.v3"
+	scan.SchemaVersion = "ssc-init.scan.v4"
 	scan.EvidenceCoverage = model.EvidenceCoverage{
 		Status: model.CoveragePartial,
 		Targets: []model.EvidenceTargetResult{
@@ -203,7 +203,7 @@ func TestSnapshotV3RequiresEvidenceCoverageAndEvidenceInventory(t *testing.T) {
 	t.Run("nil evidence inventory is rejected without rows", func(t *testing.T) {
 		s := openTestStore(t)
 		scan := testScan("v3-nil-evidence", time.Unix(2, 0).UTC())
-		scan.SchemaVersion = "ssc-init.scan.v3"
+		scan.SchemaVersion = "ssc-init.scan.v4"
 		scan.EvidenceCoverage = model.EvidenceCoverage{Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{}}
 		if err := s.SaveScan(context.Background(), scan, model.Inventory{}); err == nil {
 			t.Fatal("SaveScan error=nil")
@@ -213,7 +213,7 @@ func TestSnapshotV3RequiresEvidenceCoverageAndEvidenceInventory(t *testing.T) {
 	t.Run("v3 with empty evidence and complete empty coverage saves", func(t *testing.T) {
 		s := openTestStore(t)
 		scan := testScan("v3-empty-evidence", time.Unix(2, 0).UTC())
-		scan.SchemaVersion = "ssc-init.scan.v3"
+		scan.SchemaVersion = "ssc-init.scan.v4"
 		scan.EvidenceCoverage = model.EvidenceCoverage{Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{}}
 		if err := s.SaveScan(context.Background(), scan, model.Inventory{Evidence: []model.ContentEvidence{}}); err != nil {
 			t.Fatal(err)

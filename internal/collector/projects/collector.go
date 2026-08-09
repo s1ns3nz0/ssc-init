@@ -5,9 +5,13 @@ package projects
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +21,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/identity"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/provenance"
 )
 
 const (
@@ -414,14 +419,56 @@ func buildEvidence(ctx context.Context, owner *projectCollector, env collector.E
 		if !exists || !observed {
 			continue
 		}
-		if err := issueProjectEvidence(ctx, owner, env, root, walked.rootFingerprint, item, projectID, observation, result); err != nil {
+		evidenceAssetID := projectID
+		evidenceObservation := observation
+		if developerProjectSubject(item.definition.subject) {
+			var appended bool
+			evidenceAssetID, evidenceObservation, appended = appendProjectDeveloperAsset(env, root, item, projectID, result)
+			if !appended {
+				errorsOut = append(errorsOut, model.CoverageError{Code: "identity_rejected", Message: "project developer surface identity was rejected"})
+				continue
+			}
+		}
+		issueStart := len(result.Errors)
+		if err := issueProjectEvidence(ctx, owner, env, root, walked.rootFingerprint, item, evidenceAssetID, evidenceObservation, result); err != nil {
 			return errorsOut, err
 		}
+		errorsOut = append(errorsOut, result.Errors[issueStart:]...)
 	}
 	if err := ctx.Err(); err != nil {
 		return errorsOut, err
 	}
 	return errorsOut, nil
+}
+
+func developerProjectSubject(subject string) bool {
+	return subject == model.EvidenceSubjectGitHook || subject == model.EvidenceSubjectLaunchConfig
+}
+
+func appendProjectDeveloperAsset(env collector.Environment, root Root, item discoveredProjectEvidence, projectID string, result *model.CollectorResult) (string, model.Observation, bool) {
+	absolute := filepath.Join(root.Path, item.relativePath)
+	locationRef := identity.SafeLocationRef(env.Home, absolute, root.Ref)
+	assetType := model.AssetGitHook
+	prefix := "git-hook"
+	source := "project-git-hook"
+	if item.definition.subject == model.EvidenceSubjectLaunchConfig {
+		assetType = model.AssetLaunchConfig
+		prefix = "launch-config"
+		source = "project-launch-config"
+	}
+	assetID := digestID(prefix, "ssc-init.project-developer-surface.v1", locationRef)
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: assetID, Collector: "projects", Scope: model.ScopeProject,
+		LocationRef: locationRef, ProjectID: projectID, Source: item.definition.targetID(),
+		Metadata: map[string]string{"root_ref": root.Ref},
+	})
+	if err != nil {
+		return "", model.Observation{}, false
+	}
+	result.Assets = append(result.Assets, model.Asset{ID: assetID, Type: assetType, Name: item.definition.basename, Source: source})
+	result.Observations = append(result.Observations, observation)
+	result.Relationships = append(result.Relationships, model.Relationship{From: projectID, Kind: model.RelationshipContains, To: assetID})
+	return assetID, observation, true
 }
 
 func issueProjectEvidence(ctx context.Context, owner *projectCollector, env collector.Environment, configured Root, rootFingerprint platform.FileFingerprint, item discoveredProjectEvidence, projectID string, observation model.Observation, result *model.CollectorResult) error {
@@ -491,6 +538,17 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 			return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
 		}
 	}
+	if item.definition.subject == model.EvidenceSubjectLaunchConfig {
+		valid, available := validLaunchConfig(ctx, asset, item)
+		if !available {
+			appendProjectProvenanceError(result, "launch_unavailable", "launch configuration is unavailable")
+		} else if !valid {
+			appendProjectProvenanceError(result, "launch_malformed", "launch configuration is malformed")
+		}
+	}
+	if format, supported := provenanceFormat(item.definition.basename); supported {
+		appendProjectLockfileProvenance(ctx, asset, item, configured, projectID, format, result)
+	}
 	base.RootPath = configured.Path
 	base.RelativePath = filepath.Clean(item.relativePath)
 	anchor := evidence.Anchor{
@@ -506,6 +564,144 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, anchor))
 	}
 	return ctx.Err()
+}
+
+func validLaunchConfig(ctx context.Context, projectRoot platform.RootedDirectory, item discoveredProjectEvidence) (bool, bool) {
+	relative, err := filepath.Rel(filepath.Clean(item.projectRelative), filepath.Clean(item.relativePath))
+	if err != nil || relative == "." || filepath.IsAbs(relative) {
+		return false, false
+	}
+	components := strings.Split(relative, string(filepath.Separator))
+	parent := projectRoot
+	if len(components) > 1 {
+		parent, err = platform.OpenVerifiedRoot(ctx, projectRoot, components[:len(components)-1]...)
+		if err != nil {
+			return false, false
+		}
+		defer parent.Close()
+	}
+	file, expected, opened, err := platform.OpenVerifiedFile(parent, components[len(components)-1])
+	if err != nil {
+		return false, false
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(&projectContextReader{ctx: ctx, reader: file}, item.definition.maxBytes+1))
+	if err != nil || int64(len(contents)) > item.definition.maxBytes {
+		clear(contents)
+		return false, false
+	}
+	after, statErr := file.Stat()
+	postName, nameErr := parent.Lstat(components[len(components)-1])
+	available := statErr == nil && nameErr == nil && after != nil && postName != nil && os.SameFile(expected, postName) && os.SameFile(opened, after)
+	valid := available && json.Valid(contents)
+	clear(contents)
+	return valid, available
+}
+
+type projectContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *projectContextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func provenanceFormat(basename string) (provenance.Format, bool) {
+	switch basename {
+	case "package-lock.json", "npm-shrinkwrap.json":
+		return provenance.FormatNPM, true
+	case "Cargo.lock":
+		return provenance.FormatCargo, true
+	case "go.sum":
+		return provenance.FormatGoSum, true
+	default:
+		return "", false
+	}
+}
+
+func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
+	basename := filepath.Base(item.relativePath)
+	locationRef := identity.SafeLocationRef(configured.home, filepath.Join(configured.Path, item.relativePath), configured.Ref)
+	lockfileID := digestID("project-lockfile", "ssc-init.project-lockfile.v1", locationRef)
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: lockfileID, Collector: "projects", Scope: model.ScopeProject, LocationRef: locationRef,
+		ProjectID: projectID, Source: item.definition.targetID(), Metadata: map[string]string{"root_ref": configured.Ref, "format": string(format)},
+	})
+	if err != nil {
+		appendProjectProvenanceError(result, "provenance_identity_rejected", "lockfile provenance identity was rejected")
+		return
+	}
+	file, _, opened, err := platform.OpenVerifiedFile(projectRoot, basename)
+	if err != nil {
+		appendProjectProvenanceError(result, "provenance_unavailable", "lockfile provenance is unavailable")
+		return
+	}
+	defer file.Close()
+	openedFingerprint, ok := platform.Fingerprint(opened)
+	if !ok || openedFingerprint != item.fileFingerprint {
+		appendProjectProvenanceError(result, "provenance_identity_changed", "lockfile provenance identity changed")
+		return
+	}
+	records, err := provenance.Parse(ctx, format, file, item.definition.maxBytes)
+	if err != nil {
+		if ctx.Err() == nil {
+			appendProjectProvenanceError(result, "provenance_malformed", "lockfile provenance is malformed")
+		}
+		return
+	}
+	after, err := file.Stat()
+	afterFingerprint, afterOK := platform.Fingerprint(after)
+	if err != nil || !afterOK || afterFingerprint != item.fileFingerprint {
+		appendProjectProvenanceError(result, "provenance_identity_changed", "lockfile provenance identity changed")
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	result.Assets = append(result.Assets, model.Asset{ID: lockfileID, Type: model.AssetProject, Name: basename, Source: "project-lockfile"})
+	result.Observations = append(result.Observations, observation)
+	result.Relationships = append(result.Relationships, model.Relationship{From: projectID, Kind: model.RelationshipContains, To: lockfileID})
+	for _, record := range records {
+		asset := provenancePackageAsset(record)
+		metadata := map[string]string{"lockfile_asset_id": lockfileID}
+		if record.SourceIntegrity != "" {
+			metadata["source_integrity"] = record.SourceIntegrity
+		}
+		packageObservation, finalizeErr := identity.FinalizeObservation(model.Observation{
+			AssetID: asset.ID, Collector: "projects", Host: record.Ecosystem, Consumers: []string{record.Ecosystem},
+			Scope: model.ScopeProject, LocationRef: locationRef, ProjectID: projectID, Source: item.definition.targetID(), Metadata: metadata,
+		})
+		if finalizeErr != nil {
+			appendProjectProvenanceError(result, "provenance_identity_rejected", "package provenance identity was rejected")
+			continue
+		}
+		result.Assets = append(result.Assets, asset)
+		result.Observations = append(result.Observations, packageObservation)
+		result.Relationships = append(result.Relationships, model.Relationship{From: asset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID})
+	}
+}
+
+func provenancePackageAsset(record provenance.Record) model.Asset {
+	parts := strings.Split(record.Name, "/")
+	for index := range parts {
+		parts[index] = strings.ReplaceAll(url.PathEscape(parts[index]), "@", "%40")
+	}
+	version := strings.ReplaceAll(url.PathEscape(record.Version), "@", "%40")
+	provenanceFact := record.Provenance
+	return model.Asset{
+		ID:   "pkg:" + record.Ecosystem + "/" + strings.Join(parts, "/") + "@" + version,
+		Type: model.AssetPackage, Name: record.Name, Version: record.Version, Provenance: &provenanceFact,
+	}
+}
+
+func appendProjectProvenanceError(result *model.CollectorResult, code, message string) {
+	if len(result.Errors) < maxWalkErrors {
+		result.Errors = append(result.Errors, model.CoverageError{Code: code, Message: message})
+	}
 }
 
 func issueProjectPreset(ctx context.Context, result *model.CollectorResult, target model.LocalEvidenceTarget, status model.EvidenceStatus) error {

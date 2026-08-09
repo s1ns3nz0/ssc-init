@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented decisions (2026-08-09):** The controller decisions in
+> `.superpowers/sdd/2026-08-09-program-c/progress.md` supersede the unresolved
+> alternatives retained at the end of this original plan. In particular, a
+> local document cannot configure retention, policy tables live in `state.db`,
+> the ladder classifier lives in `internal/inventory`, and policy violation
+> exit code is 3.
+
 **Goal:** Ship the `[NOW]` half of the policy layer: a pure `internal/policy` engine with the five-level precedence structure (levels 1–3 present and inert), three rule families (shape, change, pin), user exceptions with structural refusal of the four prohibited forms, trust-on-first-use pins, `policy init` / `policy pin` / `policy check`, a `POLICY` section in the hook, and an audit store that rides the existing `internal/store` discipline. Nothing about policy enters `ssc-init.scan.v3`, the snapshot payload, or the scan JSON.
 
 **Architecture:** `internal/policy` is a pure package: it parses an `ssc-init.policy.v1` JSON document, takes `(model.Inventory, model.Delta)` plus pins and exceptions as values, and returns a `policy.Result`. It performs no filesystem access, executes no process, and opens no socket during evaluation. The ladder classifier moves out of `internal/report` into `internal/inventory` so both the renderer and the engine read one classification — `internal/report` imports `internal/policy` to render, so `internal/policy` must never import `internal/report`. Pins, exceptions, and decisions live in three new tables in the existing `state.db`, keyed by asset ID with no `scan_id` and no foreign key, exactly as `asset_history` already is (migration 6). `internal/cli` gains `policy init|pin|check`; `cmd/ssc-init` wires the store and the policy document path.
@@ -174,7 +181,6 @@ type Document struct {
 	SchemaVersion string      `json:"schemaVersion"`
 	Rules         []Rule      `json:"rules"`
 	Exceptions    []Exception `json:"exceptions,omitempty"`
-	Retention     *Retention  `json:"retention,omitempty"`
 }
 
 // Rule is one policy rule. A disabled rule is still parsed and still reported
@@ -211,10 +217,10 @@ type Match struct {
 
 - `json.NewDecoder(bytes.NewReader(source))` with `DisallowUnknownFields()`, decoded into `Document`, then `decoder.More()` must be false (trailing content is an error).
 - A separate `assertNoDuplicateKeys` pass over `json.NewDecoder(...).Token()` walks the token stream, tracking a `map[string]struct{}` per object depth, and returns `fmt.Errorf("%s: duplicate object key", location)` where `location` is the dotted/indexed path built during the walk. Never include the key itself.
-- Validate: `SchemaVersion == SchemaVersion` else `errors.New("schemaVersion: unsupported policy schema version")`; each rule's `ID` matches `\A[a-z][a-z0-9-]{0,31}\z`; each `Family` is one of the three; `Description` non-empty; `Match` required for `shape` and `change`, and **forbidden** for `pin` (a pin rule matches by the presence or absence of a pin, not by facts); `Rungs` only on `change`; every other `Match` field only on `shape`; `Rungs` values ∈ `{NEW, CHANGED, UPGRADED, REMOVED, UNVERIFIED}`; `EvidenceStatus` values ∈ the `model.EvidenceStatus` vocabulary; `AssetType` values ∈ the `model.AssetType` vocabulary; rule IDs unique.
+- Validate: `SchemaVersion == SchemaVersion` else `errors.New("schemaVersion: unsupported policy schema version")`; each rule's `ID` matches `\A[a-z][a-z0-9-]{0,31}\z`; each `Family` is one of the three; `Description` non-empty; `Match` required for `shape` and `change`, and **forbidden** for `pin` (a pin rule matches by the presence or absence of a pin, not by facts); `Rungs` only on `change`; change rules may use the other shape fields to narrow matching rows; `Rungs` values ∈ `{NEW, CHANGED, UPGRADED, REMOVED, UNVERIFIED}`; `EvidenceStatus` values ∈ the `model.EvidenceStatus` vocabulary; `AssetType` values ∈ the `model.AssetType` vocabulary; rule IDs unique.
 - Every error is `fmt.Errorf("rules[%d].%s: %s", index, field, reason)`.
 
-Keep `Exception` and `Retention` as declared-but-unvalidated types for now — Tasks 7 and 12 own them. Declaring them here keeps the document shape stable so a starter file written by Task 9 never needs a schema bump.
+Keep `Exception` as a declared-but-unvalidated type for now — Task 7 owns it. Local level-5 documents deliberately have no retention field: foundation §10 reserves retention configuration for signed organization policy `[BUNDLE]`.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -1410,74 +1416,39 @@ git commit -m "feat: report policy violations in the hook"
 
 ---
 
-### Task 13: Wire policy into the `store.Options` retention seam
+### Task 13: Preserve the signed-policy retention seam
 
 **Files:**
 - Modify: `internal/policy/document.go`, `internal/policy/parse.go`, `internal/policy/parse_test.go`
 - Modify: `cmd/ssc-init/main.go`, `cmd/ssc-init/main_test.go`
 - Modify: `internal/doctor/doctor.go` (comment only), `internal/store/snapshots.go` (comment only)
 
-Program B added `store.Options` explicitly as the in-process seam policy would later wire into: "Design §10 makes organization retention configurable through signed policy, which does not exist yet, so this is the in-process seam policy will be wired into: no configuration file, environment variable, or flag reads it today." This task makes the document read it.
-
-Under an organization bundle, retention is org-controlled `[BUNDLE]`. Locally it is user configuration in the level-5 document, which is honest: the user owns their own disk.
+Program B added `store.Options` as the in-process seam a future verified organization bundle will use. Foundation §10 explicitly scopes retention configuration to signed policy, so a local level-5 document must not read this seam. This task documents and tests that boundary without adding local configuration.
 
 - [ ] **Step 1: Write the failing test**
 
 ```go
-func TestRetentionFromTheDocumentReachesTheStore(t *testing.T) {
-	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[],
-		"retention":{"snapshotDays":7,"assetHistoryDays":45}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := policy.StoreOptions(document)
-	if options.SnapshotRetention != 7*24*time.Hour || options.AssetHistoryRetention != 45*24*time.Hour {
-		t.Fatalf("unexpected options: %+v", options)
-	}
-	if zero := policy.StoreOptions(policy.Document{}); zero != (store.Options{}) {
-		t.Fatalf("an absent retention block must select the documented defaults, got %+v", zero)
-	}
-}
-
-func TestRetentionRejectsNonPositiveAndAbsurdWindows(t *testing.T) {
-	for _, source := range []string{
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":0}}`,
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":-1}}`,
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"assetHistoryDays":100000}}`,
-	} {
-		if _, err := policy.Load([]byte(source)); err == nil {
-			t.Fatalf("Load accepted an invalid retention window")
-		}
+func TestLocalPolicyCannotConfigureRetention(t *testing.T) {
+	_, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":7}}`))
+	if err == nil {
+		t.Fatal("local policy accepted signed-policy-only retention configuration")
 	}
 }
 ```
 
-Note the direction: `internal/policy` may import `internal/store` for the `Options` type only. If that import offends the layering, move `StoreOptions` into `cmd/ssc-init` instead — state which you chose in the task report.
+`internal/policy` does not import `internal/store`. `store.Options` remains the
+in-process signed-bundle seam, while the binary opens the store with defaults
+until a verified organization-bundle loader exists.
 
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `go test ./internal/policy -run Retention -count=1`
 
-Expected: FAIL — `undefined: policy.StoreOptions`.
+Expected: FAIL until `retention` is removed from the local document shape.
 
 - [ ] **Step 3: Implement**
 
-```go
-// Retention configures the design §10 windows. Zero and negative values are
-// refused at load rather than silently defaulted: "retain nothing" is never
-// what a caller meant, and a document that says 0 must be corrected, not
-// quietly reinterpreted.
-type Retention struct {
-	SnapshotDays     int `json:"snapshotDays,omitempty"`
-	AssetHistoryDays int `json:"assetHistoryDays,omitempty"`
-}
-```
-
-Validate `1 ≤ days ≤ 3650`. `StoreOptions` maps a nil `Retention` to the zero `store.Options`, which already selects the documented 30/90-day defaults.
-
-`cmd/ssc-init` loads the document before opening the store for `scan`, `hook`, `status`, and `policy`, and calls `store.OpenWithOptions(path, policy.StoreOptions(document))`. A document that fails to load must not silently fall back to defaults for `scan` — it exits 2 the same way an invalid argument does; for `hook` it warns and uses defaults, because the hook never fails a session.
-
-Update the two stale comments in `internal/store/snapshots.go` and `internal/doctor/doctor.go` that say policy does not read this seam yet.
+Remove `Retention` from `policy.Document` and reject `retention` as an unknown top-level field. Keep `store.Options` unchanged as the in-process seam for the future verified-bundle loader. Update comments in `internal/store/snapshots.go` and `internal/doctor/doctor.go` to say the seam is reserved for signed organization policy.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -1487,7 +1458,7 @@ Run: `go test ./internal/policy ./internal/store ./internal/doctor ./cmd/ssc-ini
 
 ```bash
 git add internal/policy internal/store internal/doctor cmd/ssc-init
-git commit -m "feat: let the policy document set retention windows"
+git commit -m "docs: reserve retention controls for signed policy"
 ```
 
 ---
@@ -1584,5 +1555,7 @@ These are places the design does not settle, and the implementer should not sett
 2. **Audit store location.** The policy design says "separate from the inventory snapshot"; foundation §5.3 says "a single state database" and §5.2 module 7 puts decisions, exceptions, and audit history in that store. This plan reads them together as *separate tables in `state.db`*, following the `asset_history` precedent (no `scan_id`, no foreign key, not pruned with snapshots). If "separate" was meant as a separate file, Task 8 changes shape substantially and duplicates the hardened open path.
 3. **Where the ladder classifier lives.** Task 4 moves it to `internal/inventory` because `internal/report` must import `internal/policy` to render. The alternative — `internal/policy` imports `internal/report` and the POLICY section is rendered from a report-local type the CLI translates into — avoids the move but makes the policy engine depend on the renderer. Task 4 is the largest no-behaviour-change diff in the program; confirm before it runs.
 4. **`policy check` and "no filesystem access".** The design says it "reads the latest snapshot and does not scan — no filesystem access". It must still open the policy document and the SQLite store. This plan reads the sentence as *no scanning access*: no collector root is opened, no process runs, no socket opens. Confirm that reading is right before Task 11's test is written against it.
-5. **Whether the local document may set retention (Task 13).** §10 makes retention configurable "through signed policy", which is `[BUNDLE]`. This plan lets the local level-5 document set it because the user owns their own disk and Program B built the seam for exactly this. If retention must wait for a signed bundle, Task 13 becomes a comment change only.
+5. **Whether the local document may set retention (Task 13). RESOLVED.** It may
+   not. Foundation §10 reserves retention configuration for signed policy
+   `[BUNDLE]`; the parser rejects the field and the store seam remains unwired.
 6. **`unpinned` default noise.** With `unpinned` enabled, every install and upgrade fires. It ships disabled, so nothing fires by default — but a user who enables it after `policy pin` will see a burst after each update batch. That is the design's stated intent (keeping the noisy rule separate from the sharp one); confirm no throttle is wanted, because a throttle would need its own state and its own justification.

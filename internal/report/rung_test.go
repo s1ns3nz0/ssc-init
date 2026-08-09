@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/s1ns3nz0/ssc-init/internal/inventory"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
@@ -274,7 +275,7 @@ func TestRemovedRowsUseTheSameTypeVocabularyAsAddedRows(t *testing.T) {
 // TestRungTypesFitTheScannableColumn guards the alignment the design document
 // calls a scannable column: every printed type must fit the %-13s field.
 func TestRungTypesFitTheScannableColumn(t *testing.T) {
-	for prefix, assetType := range assetTypeByIDPrefix {
+	for prefix, assetType := range inventory.LadderAssetTypes() {
 		if len(assetType) > 13 {
 			t.Errorf("prefix %q maps to %q (%d chars), overflowing the type column", prefix, assetType, len(assetType))
 		}

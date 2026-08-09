@@ -28,6 +28,8 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/collector/mcp"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/identity"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
@@ -141,6 +143,18 @@ var approvedHostileCoverage = [...]approvedTargetCoverage{
 	{Collector: "packages", Target: model.TargetCoverage{TargetID: "packages.uv", Status: model.TargetSkipped}},
 
 	{Collector: "projects", Target: model.TargetCoverage{TargetID: "projects.root", InstanceRef: "$HOME/Projects", Status: model.TargetNotPresent}},
+
+	{Collector: "runtime", Target: model.TargetCoverage{TargetID: "runtime.processes", Status: model.TargetSkipped}},
+	{Collector: "runtime", Target: model.TargetCoverage{TargetID: "runtime.tcp-listeners", Status: model.TargetSkipped}},
+
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.git.user-config", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.git.xdg-config", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.bash-profile", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.bashrc", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.fish-config", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.profile", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.zprofile", Status: model.TargetNotPresent}},
+	{Collector: "surfaces", Target: model.TargetCoverage{TargetID: "surfaces.shell.zshrc", Status: model.TargetNotPresent}},
 }
 
 var approvedHappyCatalog = [...]approvedCatalogTarget{
@@ -200,11 +214,23 @@ var approvedHappyCatalog = [...]approvedCatalogTarget{
 	{Spec: model.TargetSpec{ID: "packages.uv", Collector: "packages", Host: "uv", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "text", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
 
 	{Spec: model.TargetSpec{ID: "projects.root", Collector: "projects", Scope: model.ScopeProject, Platform: "darwin", Method: model.TargetDirectory}, Implemented: true, InstanceRef: "$HOME/Projects", Status: model.TargetComplete},
+
+	{Spec: model.TargetSpec{ID: "runtime.processes", Collector: "runtime", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "ps-fields", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+	{Spec: model.TargetSpec{ID: "runtime.tcp-listeners", Collector: "runtime", Scope: model.ScopeToolEnvironment, Platform: "darwin", Format: "lsof-fields", Method: model.TargetCommand}, Implemented: true, Status: model.TargetSkipped},
+
+	{Spec: model.TargetSpec{ID: "surfaces.git.user-config", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "git-config", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.git.xdg-config", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "git-config", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.bash-profile", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.bashrc", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.fish-config", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.profile", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.zprofile", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
+	{Spec: model.TargetSpec{ID: "surfaces.shell.zshrc", Collector: "surfaces", Scope: model.ScopeUser, Platform: "darwin", Format: "shell", Method: model.TargetFile}, Implemented: true, Status: model.TargetNotPresent},
 }
 
 func TestApprovedCatalogOracleIsExact(t *testing.T) {
-	if len(approvedHappyCatalog) != 52 {
-		t.Fatalf("approved happy catalog instances=%d want=52", len(approvedHappyCatalog))
+	if len(approvedHappyCatalog) != 62 {
+		t.Fatalf("approved happy catalog instances=%d want=62", len(approvedHappyCatalog))
 	}
 	statusCounts := map[model.TargetStatus]int{}
 	seenSpecs := map[string]struct{}{}
@@ -226,8 +252,8 @@ func TestApprovedCatalogOracleIsExact(t *testing.T) {
 		seenInstances[instanceKey] = struct{}{}
 	}
 	wantCounts := map[model.TargetStatus]int{
-		model.TargetComplete: 18, model.TargetNotPresent: 8,
-		model.TargetUnsupported: 18, model.TargetSkipped: 8,
+		model.TargetComplete: 18, model.TargetNotPresent: 16,
+		model.TargetUnsupported: 18, model.TargetSkipped: 10,
 	}
 	if !reflect.DeepEqual(statusCounts, wantCounts) {
 		t.Fatalf("approved status counts=%v want=%v", statusCounts, wantCounts)
@@ -235,8 +261,8 @@ func TestApprovedCatalogOracleIsExact(t *testing.T) {
 }
 
 func TestApprovedHostileCoverageOracleIsExact(t *testing.T) {
-	if len(approvedHostileCoverage) != 52 {
-		t.Fatalf("approved hostile coverage instances=%d want=52", len(approvedHostileCoverage))
+	if len(approvedHostileCoverage) != 62 {
+		t.Fatalf("approved hostile coverage instances=%d want=62", len(approvedHostileCoverage))
 	}
 	seen := map[string]struct{}{}
 	partial := 0
@@ -276,6 +302,7 @@ func TestScopedCollectorsUseOnlyTheInjectedFilesystemForHostReads(t *testing.T) 
 		"internal/collector/mcp",
 		"internal/collector/packages",
 		"internal/collector/projects",
+		"internal/policy",
 	} {
 		directory := filepath.Join(repositoryRoot, relativeDirectory)
 		entries, err := os.ReadDir(directory)
@@ -649,8 +676,8 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 			t.Fatalf("enabled package target %q=%+v", targetID, target)
 		}
 	}
-	if calls := runner.callCount(); calls != 2 {
-		t.Fatalf("enabled package runner calls=%d want=2", calls)
+	if calls := runner.callCount(); calls != 4 {
+		t.Fatalf("enabled package and runtime runner calls=%d want=4", calls)
 	}
 	if inspect, verify := inspector.callCounts(); inspect != len(packages.Capabilities()) || verify != 2 {
 		t.Fatalf("enabled package inspector calls inspect=%d verify=%d", inspect, verify)
@@ -662,8 +689,27 @@ func TestSamePackageThroughTwoEnabledManagersRetainsBothObservations(t *testing.
 		"inspect:uv", "run:" + matrixCommandKey(uvPath, "tool", "list"), "verify:uv",
 		"inspect:cargo", "inspect:go", "inspect:brew", "inspect:docker",
 	}
-	if got := events.snapshot(); !reflect.DeepEqual(got, wantEvents) {
-		t.Fatalf("package probe event order=\n%q\nwant=\n%q", got, wantEvents)
+	gotEvents := events.snapshot()
+	runtimeEvents := map[string]int{
+		"run:" + matrixCommandKey("/bin/ps", "-axo", "pid=,comm="):                           0,
+		"run:" + matrixCommandKey("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"): 0,
+	}
+	packageEvents := make([]string, 0, len(wantEvents))
+	for _, event := range gotEvents {
+		if _, runtimeEvent := runtimeEvents[event]; runtimeEvent {
+			runtimeEvents[event]++
+			continue
+		}
+		packageEvents = append(packageEvents, event)
+	}
+	if !reflect.DeepEqual(runtimeEvents, map[string]int{
+		"run:" + matrixCommandKey("/bin/ps", "-axo", "pid=,comm="):                           1,
+		"run:" + matrixCommandKey("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"): 1,
+	}) {
+		t.Fatalf("runtime probe events=%v", runtimeEvents)
+	}
+	if !reflect.DeepEqual(packageEvents, wantEvents) {
+		t.Fatalf("package probe event order=\n%q\nwant=\n%q", packageEvents, wantEvents)
 	}
 	assertPrivacyBoundary(t, result)
 }
@@ -738,7 +784,7 @@ func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV3AsLegacyInventory(t 
 	if err := json.Unmarshal(raw, &status); err != nil {
 		t.Fatalf("decode status: %v\n%s", err, raw)
 	}
-	if status.SchemaVersion != "ssc-init.status.v3" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
+	if status.SchemaVersion != "ssc-init.status.v7" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
 		t.Fatalf("legacy status=%+v", status)
 	}
 	if status.Scope != nil || status.Coverage != nil || status.EvidenceCoverage != nil || status.Inventory == nil {
@@ -782,7 +828,7 @@ func TestV3BaselineReopenStatusQuiescentRescanAndObservedLocationDelta(t *testin
 		scanID: "00000000-0000-4000-8000-000000000013",
 	})
 	status := readMatrixStatusFromPath(t, databasePath)
-	if status.SchemaVersion != "ssc-init.status.v3" || status.InventorySchemaVersion != "ssc-init.scan.v3" || status.LegacyInventory || !status.Initialized {
+	if status.SchemaVersion != "ssc-init.status.v7" || status.InventorySchemaVersion != "ssc-init.scan.v7" || status.LegacyInventory || !status.Initialized {
 		t.Fatalf("v3 status provenance=%+v", status)
 	}
 	if status.Scope == nil || !reflect.DeepEqual(*status.Scope, first.Scan.Scope) || !reflect.DeepEqual(status.Coverage, first.Scan.Coverage) || status.Inventory == nil || !reflect.DeepEqual(*status.Inventory, first.Inventory) {
@@ -941,7 +987,9 @@ func runIsolatedBaseline(t *testing.T, options baselineOptions) isolatedBaseline
 		agents.New(),
 		ide.New(),
 		projects.New(roots),
+		surfaces.New(),
 		packages.New(),
+		runtimecollector.New(),
 	}
 	catalog := make(map[string][]model.TargetSpec, len(configured)+1)
 	for _, configuredCollector := range configured {

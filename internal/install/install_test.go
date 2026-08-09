@@ -1102,6 +1102,36 @@ func TestConcurrentActivationsLeaveAUsableInstall(t *testing.T) {
 	}
 }
 
+// TestActivateRefusesWhileAnotherProcessHoldsTheInstallLock catches removal
+// or weakening of the advisory flock. The broader concurrency test exercises
+// resulting state, but scheduling can serialize its goroutines by chance; this
+// test deterministically establishes the competing writer first.
+func TestActivateRefusesWhileAnotherProcessHoldsTheInstallLock(t *testing.T) {
+	home := isolatedHome(t)
+	manager := stagedManager(t, home)
+	activate(t, manager, "v0.1.0")
+	stage(t, manager, "v0.2.0")
+
+	layout := platform.PathsForHome(home).Install()
+	lockPath := filepath.Join(layout.Root, ".lock")
+	guard, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN) //nolint:errcheck
+
+	if err := manager.Activate(context.Background(), "v0.2.0"); err == nil {
+		t.Fatal("Activate ignored a competing installer holding the install lock")
+	}
+	if got := readPointerFile(t, layout.CurrentFile); got != "v0.1.0" {
+		t.Fatalf("current = %q after refused competing activation, want v0.1.0", got)
+	}
+}
+
 const crashHomeEnv = "SSC_INSTALL_CRASH_HOME"
 
 // TestActivateCrashChild is the child half of TestActivateSurvivesRealProcessDeath.

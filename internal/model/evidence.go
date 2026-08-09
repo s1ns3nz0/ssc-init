@@ -30,6 +30,10 @@ const (
 	EvidenceSubjectMCPDeclaration    = "mcp-declaration"
 	EvidenceSubjectPackageContent    = "package-content"
 	EvidenceSubjectContainerImage    = "container-image"
+	EvidenceSubjectShellStartup      = "shell-startup"
+	EvidenceSubjectGitHook           = "git-hook"
+	EvidenceSubjectLaunchConfig      = "launch-config"
+	EvidenceSubjectCredentialConfig  = "credential-config"
 )
 
 // ProjectEvidenceSubject reports whether subject is one of the closed project
@@ -104,13 +108,15 @@ type EvidenceTargetResult struct {
 
 // LocalEvidenceTarget contains runtime-only filesystem evidence inputs.
 type LocalEvidenceTarget struct {
-	TargetID      string         `json:"-"`
-	AssetID       string         `json:"-"`
-	ObservationID string         `json:"-"`
-	Kind          EvidenceKind   `json:"-"`
-	Subject       string         `json:"-"`
-	PresetStatus  EvidenceStatus `json:"-"`
-	RootPath      string         `json:"-"`
-	RelativePath  string         `json:"-"`
-	Provenance    any            `json:"-"`
+	TargetID        string         `json:"-"`
+	AssetID         string         `json:"-"`
+	ObservationID   string         `json:"-"`
+	Kind            EvidenceKind   `json:"-"`
+	Subject         string         `json:"-"`
+	PresetStatus    EvidenceStatus `json:"-"`
+	PresetAlgorithm string         `json:"-"`
+	PresetDigest    string         `json:"-"`
+	RootPath        string         `json:"-"`
+	RelativePath    string         `json:"-"`
+	Provenance      any            `json:"-"`
 }

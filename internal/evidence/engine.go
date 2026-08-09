@@ -31,15 +31,18 @@ type Engine struct {
 	Cache                 LeafCache
 	SemanticHasher        SemanticHasher
 	ContextSemanticHasher ContextSemanticHasher
+	Analyzer              ContentAnalyzer
 	TargetTimeout         time.Duration
 	callbackLimiter       *callbackLimiter
 }
 
 // Collection is the result of one bounded local evidence pass.
 type Collection struct {
-	Coverage    model.EvidenceCoverage
-	Evidence    []model.ContentEvidence
-	CacheWrites []CacheWrite
+	Coverage         model.EvidenceCoverage
+	Evidence         []model.ContentEvidence
+	CacheWrites      []CacheWrite
+	AnalyzerFacts    []model.AnalyzerFact
+	AnalyzerCoverage *model.AnalyzerCoverage
 }
 
 type issuedCandidate struct {
@@ -71,6 +74,8 @@ type collectedCandidate struct {
 	evidence model.ContentEvidence
 	coverage model.EvidenceTargetResult
 	writes   []CacheWrite
+	facts    []model.AnalyzerFact
+	analyzer model.AnalyzerCoverage
 }
 
 // Collect validates every target against its independently expected issuer
@@ -186,6 +191,10 @@ func (engine Engine) Collect(ctx context.Context, env collector.Environment, inv
 	sortCoverageErrors(collection.Coverage.Errors)
 	if len(candidates) == 0 {
 		collection.Coverage.Status = evidenceCoverageStatus(collection.Coverage.Errors, nil)
+		if engine.Analyzer != nil {
+			collection.AnalyzerFacts = []model.AnalyzerFact{}
+			collection.AnalyzerCoverage = &model.AnalyzerCoverage{Status: model.CoverageSkipped, SkippedRules: []string{"no-analyzable-content"}}
+		}
 		return collection
 	}
 
@@ -214,6 +223,22 @@ func (engine Engine) Collect(ctx context.Context, env collector.Environment, inv
 		if result.evidence.Status == model.EvidenceComplete {
 			collection.CacheWrites = append(collection.CacheWrites, result.writes...)
 		}
+		collection.AnalyzerFacts = append(collection.AnalyzerFacts, result.facts...)
+		if engine.Analyzer != nil {
+			if collection.AnalyzerCoverage == nil {
+				collection.AnalyzerCoverage = &model.AnalyzerCoverage{Status: model.CoverageComplete}
+			}
+			collection.AnalyzerCoverage.FilesRead += result.analyzer.FilesRead
+			collection.AnalyzerCoverage.BytesRead += result.analyzer.BytesRead
+			collection.AnalyzerCoverage.SkippedRules = append(collection.AnalyzerCoverage.SkippedRules, result.analyzer.SkippedRules...)
+			if result.analyzer.Status != "" && result.analyzer.Status != model.CoverageComplete {
+				collection.AnalyzerCoverage.Status = model.CoveragePartial
+			}
+		}
+	}
+	if collection.AnalyzerCoverage != nil {
+		collection.AnalyzerCoverage.SkippedRules = uniqueSortedStrings(collection.AnalyzerCoverage.SkippedRules)
+		sort.Slice(collection.AnalyzerFacts, func(i, j int) bool { return collection.AnalyzerFacts[i].ID < collection.AnalyzerFacts[j].ID })
 	}
 	collection.Coverage.Status = evidenceCoverageStatus(collection.Coverage.Errors, collection.Evidence)
 	return collection
@@ -241,6 +266,8 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 	defer cancel()
 	var value model.ContentEvidence
 	var writes []CacheWrite
+	var facts []model.AnalyzerFact
+	var analyzerCoverage model.AnalyzerCoverage
 	switch {
 	case candidate.target.PresetStatus != "":
 		value = presetRecord(candidate.target)
@@ -249,14 +276,14 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 	case candidate.target.Kind == model.EvidenceSemanticSHA256:
 		value = engine.collectSemantic(ctx, candidate.observation)
 	default:
-		value, writes = engine.collectFilesystem(ctx, env, candidate)
+		value, writes, facts, analyzerCoverage = engine.collectFilesystem(ctx, env, candidate)
 	}
 	final, err := finalizeRecord(candidate.target, value)
 	if err != nil {
 		final, _ = finalizeRecord(candidate.target, unavailableRecord("read_unavailable", "evidence collection is unavailable"))
 		writes = nil
 	}
-	result := collectedCandidate{evidence: final, writes: writes, coverage: model.EvidenceTargetResult{
+	result := collectedCandidate{evidence: final, writes: writes, facts: facts, analyzer: analyzerCoverage, coverage: model.EvidenceTargetResult{
 		TargetID: candidate.target.TargetID, AssetID: candidate.target.AssetID, ObservationID: candidate.target.ObservationID,
 		EvidenceID: candidate.evidenceID, Status: final.Status, Errors: append([]model.EvidenceError(nil), final.Errors...),
 	}}
@@ -266,8 +293,25 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 	return result
 }
 
+func uniqueSortedStrings(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	values = values[:0]
+	for value := range set {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
 func presetRecord(target model.LocalEvidenceTarget) model.ContentEvidence {
 	switch target.PresetStatus {
+	case model.EvidenceComplete:
+		return model.ContentEvidence{Status: model.EvidenceComplete, Algorithm: target.PresetAlgorithm, Digest: target.PresetDigest}
 	case model.EvidenceOversize:
 		return model.ContentEvidence{Status: model.EvidenceOversize, Errors: []model.EvidenceError{fixedFileErrors["oversize"]}}
 	case model.EvidenceUnavailable:

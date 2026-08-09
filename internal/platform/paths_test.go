@@ -65,6 +65,7 @@ func TestInstallLayoutIsRootedInTheDataDirectory(t *testing.T) {
 		"bundles":    layout.BundlesDir,
 		"reports":    layout.ReportsDir,
 		"quarantine": layout.QuarantineDir,
+		"policy":     layout.PolicyFile,
 	}
 	seen := map[string]string{}
 	for name, got := range members {

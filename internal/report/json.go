@@ -18,11 +18,12 @@ type baselinePayload struct {
 	Scope            model.ScanScope         `json:"scope"`
 	Coverage         []model.CollectorResult `json:"coverage"`
 	EvidenceCoverage model.EvidenceCoverage  `json:"evidenceCoverage"`
+	AnalyzerCoverage *model.AnalyzerCoverage `json:"analyzerCoverage"`
 	Inventory        inventoryPayload        `json:"inventory"`
 	Delta            model.Delta             `json:"delta"`
 }
 
-// inventoryPayload keeps the v3 baseline inventory contract explicit: every
+// inventoryPayload keeps the v4 baseline inventory contract explicit: every
 // graph slice is always present, including empty observation and evidence
 // slices that model.Inventory would otherwise omit.
 type inventoryPayload struct {
@@ -31,6 +32,7 @@ type inventoryPayload struct {
 	Evidence      []model.ContentEvidence `json:"evidence"`
 	Relationships []model.Relationship    `json:"relationships"`
 	Errors        []model.CoverageError   `json:"errors,omitempty"`
+	AnalyzerFacts []model.AnalyzerFact    `json:"analyzerFacts,omitempty"`
 }
 
 // WriteJSON writes one complete baseline result followed by a newline.
@@ -46,12 +48,14 @@ func WriteJSON(writer io.Writer, scan model.ScanResult, inventory model.Inventor
 		Scope:            scan.Scope,
 		Coverage:         scan.Coverage,
 		EvidenceCoverage: scan.EvidenceCoverage,
+		AnalyzerCoverage: scan.AnalyzerCoverage,
 		Inventory: inventoryPayload{
 			Assets:        inventory.Assets,
 			Observations:  inventory.Observations,
 			Evidence:      inventory.Evidence,
 			Relationships: inventory.Relationships,
 			Errors:        inventory.Errors,
+			AnalyzerFacts: inventory.AnalyzerFacts,
 		},
 		Delta: delta,
 	})

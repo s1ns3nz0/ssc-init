@@ -5,20 +5,150 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/adapter"
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 )
 
 type failingWriter struct {
 	err error
 }
+
+type fakeFindingService struct{ result finding.Result }
+
+func (f fakeFindingService) Evaluate(context.Context, model.Inventory) (finding.Result, error) {
+	return f.result, nil
+}
+
+type fakeWebhook struct {
+	destination string
+	body        []byte
+}
+
+type fakeSchedule struct {
+	preview schedule.Preview
+	err     error
+}
+
+func (f fakeSchedule) Preview() (schedule.Preview, error) { return f.preview, f.err }
+func (f fakeSchedule) Install(context.Context) (schedule.Result, error) {
+	return schedule.Result{SchemaVersion: schedule.ResultSchemaV1, Label: schedule.Label, Status: schedule.StatusInstalled, Preview: f.preview}, f.err
+}
+func (f fakeSchedule) Remove(context.Context) (schedule.Result, error) {
+	return schedule.Result{SchemaVersion: schedule.ResultSchemaV1, Label: schedule.Label, Status: schedule.StatusRemoved, Preview: f.preview}, f.err
+}
+
+func TestRunSchedulePreviewWritesExactContract(t *testing.T) {
+	preview := schedule.Preview{SchemaVersion: schedule.SchemaV1, Label: schedule.Label, Command: []string{"$HOME/a/ssc-init", "scan", "--baseline", "--json"}, Hour: 9, Minute: 0, StandardOut: "$HOME/a/daily.stdout.log", StandardError: "$HOME/a/daily.stderr.log", RemovalCommand: "ssc-init schedule remove --json", Capability: "scheduled"}
+	var out, errOut bytes.Buffer
+	if code := (App{Schedule: fakeSchedule{preview: preview}}).Run(context.Background(), []string{"schedule", "preview", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.schedule-preview.v1"`) || strings.Contains(out.String(), "/Users/") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunScheduleInstallAndRemoveWriteClosedResults(t *testing.T) {
+	preview := schedule.Preview{SchemaVersion: schedule.SchemaV1, Label: schedule.Label, Command: []string{"$HOME/a/ssc-init", "scan", "--baseline", "--json"}, Hour: 9, StandardOut: "$HOME/a/daily.stdout.log", StandardError: "$HOME/a/daily.stderr.log", RemovalCommand: "ssc-init schedule remove --json", Capability: "scheduled"}
+	for _, command := range []string{"install", "remove"} {
+		var out, errOut bytes.Buffer
+		if code := (App{Schedule: fakeSchedule{preview: preview}}).Run(context.Background(), []string{"schedule", command, "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.schedule-result.v1"`) {
+			t.Fatalf("command=%s code=%d out=%q err=%q", command, code, out.String(), errOut.String())
+		}
+	}
+}
+
+func (f *fakeWebhook) Deliver(_ context.Context, destination string, body []byte) error {
+	f.destination = destination
+	f.body = append([]byte(nil), body...)
+	return nil
+}
+
+func TestRunFindingsUsesLatestSnapshotAndClosedExitCodes(t *testing.T) {
+	asset := model.Asset{ID: "tool:bad", Type: model.AssetTool, Name: "bad"}
+	item := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"ti:test"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory, Bundles: []model.BundleReference{{Family: "ti", Sequence: 1, Digest: strings.Repeat("a", 64)}}}
+	app := App{DeviceID: "device:sha256:" + strings.Repeat("b", 64), StatusReader: &cliMemorySnapshots{latest: model.Snapshot{Inventory: model.Inventory{Assets: []model.Asset{asset}}}, hasLatest: true}, FindingService: fakeFindingService{result: finding.Result{Intelligence: "fresh", Policy: "inactive", Findings: []model.Finding{item}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"findings", "--json"}, &out, &errOut); code != 4 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.findings.v1"`) {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunAdapterEvaluateReadsBoundedInvocationAndWritesSharedVerdict(t *testing.T) {
+	asset := model.Asset{ID: "tool:bad", Type: model.AssetTool, Name: "bad"}
+	item := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictSuspicious, Severity: model.SeverityHigh, Confidence: model.ConfidenceHigh, Level: 4, RuleIDs: []string{"ssc-init/test"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	input := `{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory","assetIds":["tool:bad"]}`
+	app := App{AdapterInput: strings.NewReader(input), StatusReader: &cliMemorySnapshots{latest: model.Snapshot{Inventory: model.Inventory{Assets: []model.Asset{asset}}}, hasLatest: true}, FindingService: fakeFindingService{result: finding.Result{Intelligence: "fresh", Policy: "inactive", Findings: []model.Finding{item}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"adapter", "evaluate"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	var got adapter.Evaluation
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || !got.Valid() || got.Host != adapter.HostCodex || len(got.Findings) != 1 || got.Findings[0].Verdict != item.Verdict {
+		t.Fatalf("evaluation=%+v err=%v", got, err)
+	}
+}
+
+func TestRunAdapterEvaluateRejectsUnknownTrailingAndOversizeInputWithoutEcho(t *testing.T) {
+	for _, input := range []string{
+		`{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory","secret":"private-value"}`,
+		`{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory"}{}`,
+		strings.Repeat("x", 64<<10+1),
+	} {
+		var out, errOut bytes.Buffer
+		app := App{AdapterInput: strings.NewReader(input)}
+		if code := app.Run(context.Background(), []string{"adapter", "evaluate"}, &out, &errOut); code != 1 || out.Len() != 0 || errOut.String() != "adapter evaluation failed\n" || strings.Contains(errOut.String(), "private-value") {
+			t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestRunFindingsWebhookIsExplicitAndReceivesCanonicalPayload(t *testing.T) {
+	delivery := &fakeWebhook{}
+	app := App{DeviceID: "device:sha256:" + strings.Repeat("b", 64), StatusReader: &cliMemorySnapshots{latest: model.Snapshot{}, hasLatest: true}, FindingService: fakeFindingService{result: finding.Result{Intelligence: "unavailable", Policy: "inactive", Findings: []model.Finding{}}}, Webhook: delivery}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"findings", "--json", "--webhook", "https://example.com/hook"}, &out, &errOut); code != 0 || delivery.destination == "" || !bytes.Equal(delivery.body, out.Bytes()) {
+		t.Fatalf("code=%d destination=%q body=%q out=%q err=%q", code, delivery.destination, delivery.body, out.Bytes(), errOut.String())
+	}
+}
+
+func TestRunBundleCommandsUseLocalManagerAndEmitPathFreeStatus(t *testing.T) {
+	manager := &fakeBundleManager{status: bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 9, Version: "2026.08.10"}}
+	app := App{BundleManagers: map[bundle.Family]BundleManager{bundle.FamilyTI: manager}}
+	privateBundle, privateSignature := "/Users/private/bundle.json", "/Users/private/bundle.sig"
+	var out, errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{"bundle", "install", "--family", "ti", "--from", privateBundle, "--signature", privateSignature, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || manager.source != privateBundle || manager.signature != privateSignature {
+		t.Fatalf("code=%d stdout=%q stderr=%q manager=%+v", code, out.String(), errOut.String(), manager)
+	}
+	if strings.Contains(out.String(), "/Users/private") || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.bundle-status.v1"`) || !strings.Contains(out.String(), `"freshness":"fresh"`) {
+		t.Fatalf("bundle output=%q", out.String())
+	}
+}
+
+type fakeBundleManager struct {
+	status            bundle.Status
+	source, signature string
+}
+
+func (m *fakeBundleManager) Install(_ context.Context, source, signature string) (bundle.Verified, error) {
+	m.source, m.signature = source, signature
+	return bundle.Verified{}, nil
+}
+
+func (m *fakeBundleManager) Status(context.Context) (bundle.Status, error) { return m.status, nil }
+func (m *fakeBundleManager) Rollback(context.Context) error                { return nil }
 
 func (w failingWriter) Write([]byte) (int, error) {
 	return 0, w.err
@@ -40,6 +170,237 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestPolicyInitWritesStarterOnceWithPrivatePermissions(t *testing.T) {
+	home := t.TempDir()
+	policyPath := filepath.Join(home, "Library", "Application Support", "SSC Init", "policy.json")
+	app := App{PolicyPath: policyPath, Home: home}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "init"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	info, err := os.Stat(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o", info.Mode().Perm())
+	}
+	if strings.Contains(out.String(), home) || !strings.Contains(out.String(), "$HOME") {
+		t.Fatalf("location was not redacted: %q", out.String())
+	}
+	before, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"policy", "init"}, &out, &errOut); code != 1 {
+		t.Fatalf("overwrite code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	after, err := os.ReadFile(policyPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("existing policy changed: %v", err)
+	}
+}
+
+type memoryPolicyStore struct {
+	pins      []policy.Pin
+	saved     []policy.Pin
+	decisions []policy.Decision
+	recorded  []policy.Violation
+}
+
+func (store *memoryPolicyStore) Pins(context.Context) ([]policy.Pin, error) {
+	return append([]policy.Pin(nil), store.pins...), nil
+}
+
+func (store *memoryPolicyStore) SavePins(_ context.Context, pins []policy.Pin, _ time.Time) error {
+	store.saved = append([]policy.Pin(nil), pins...)
+	return nil
+}
+
+func (store *memoryPolicyStore) Exceptions(context.Context) ([]policy.Exception, error) {
+	return nil, nil
+}
+
+func (store *memoryPolicyStore) RecordDecisions(_ context.Context, violations []policy.Violation, _ time.Time) error {
+	store.recorded = append([]policy.Violation(nil), violations...)
+	return nil
+}
+func (store *memoryPolicyStore) Decisions(context.Context) ([]policy.Decision, error) {
+	return append([]policy.Decision(nil), store.decisions...), nil
+}
+
+func policySnapshot() *cliMemorySnapshots {
+	return &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{Inventory: model.Inventory{
+		Assets:   []model.Asset{{ID: "agent-plugin:claude:x@1.0.0", Type: model.AssetAgentPlugin, Name: "x"}},
+		Evidence: []model.ContentEvidence{{AssetID: "agent-plugin:claude:x@1.0.0", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidenceComplete, Digest: strings.Repeat("a", 64)}},
+	}}}
+}
+
+func TestPolicyPinEchoesTheTrustOnFirstUseCaveat(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store, Now: func() time.Time { return time.Unix(1, 0) }}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	for _, phrase := range []string{"records what is on this machine now", "pinning a compromised machine approves the compromise"} {
+		if !strings.Contains(out.String(), phrase) {
+			t.Fatalf("missing caveat %q: %s", phrase, out.String())
+		}
+	}
+	if len(store.saved) != 1 || store.saved[0].Digest != strings.Repeat("a", 64) {
+		t.Fatalf("saved pins=%+v", store.saved)
+	}
+}
+
+func TestPolicyPinUpdateRejectsAnUnknownAsset(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin", "--update", "unknown-secret-asset"}, &out, &errOut); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if len(store.saved) != 0 || strings.Contains(errOut.String(), "unknown-secret-asset") {
+		t.Fatalf("unknown asset was saved or echoed: %q %+v", errOut.String(), store.saved)
+	}
+}
+
+func TestPolicyPinRefusesUnderAnOrganizationBundle(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store, PolicySources: policy.Sources{Bundle: &policy.Bundle{}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "pins are authored in the organization bundle") {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestPolicyCheckExitsThreeOnViolationAndNamesInertLevels(t *testing.T) {
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[{"id":"unpinned","family":"pin","enabled":true,"description":"d"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	snapshots.latest.Scan.ScanID = "scan-1"
+	snapshots.latest.Scan.FinishedAt = time.Date(2026, 8, 9, 1, 2, 3, 0, time.UTC)
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: snapshots, PolicyStore: store, PolicyDocument: document, Now: func() time.Time { return time.Date(2026, 8, 9, 2, 0, 0, 0, time.UTC) }}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check", "--json"}, &out, &errOut); code != 3 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	var payload struct {
+		SchemaVersion string             `json:"schemaVersion"`
+		Capability    string             `json:"capability"`
+		Levels        []policy.Level     `json:"levels"`
+		Violations    []policy.Violation `json:"violations"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SchemaVersion != "ssc-init.policy-check.v1" || payload.Capability != "advisory" || len(payload.Levels) != 5 || payload.Levels[0].Active || payload.Levels[0].Reason != "no evidence available" {
+		t.Fatalf("payload header=%+v", payload)
+	}
+	if len(payload.Violations) != 1 || payload.Violations[0].RuleID != "unpinned" || len(store.recorded) != 1 {
+		t.Fatalf("violations=%+v recorded=%+v", payload.Violations, store.recorded)
+	}
+}
+
+func TestPolicyCheckConsumesVerifiedLevelOneFinding(t *testing.T) {
+	document, err := policy.Load(policy.Starter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	snapshots.latest.Scan.ScanID = "scan-verified"
+	store := &memoryPolicyStore{}
+	asset := snapshots.latest.Inventory.Assets[0]
+	verified := model.Finding{ID: "finding:verified", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"ti:verified"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	app := App{StatusReader: snapshots, PolicyStore: store, PolicyDocument: document, FindingService: fakeFindingService{result: finding.Result{Findings: []model.Finding{verified}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check", "--json"}, &out, &errOut); code != 4 || len(store.recorded) != 1 || store.recorded[0].Level != 1 {
+		t.Fatalf("code=%d recorded=%+v err=%q", code, store.recorded, errOut.String())
+	}
+}
+
+func TestPolicyCheckExitsTwoOnAnUnloadableDocument(t *testing.T) {
+	app := App{PolicyLoadError: errors.New("rules[0].family: unknown rule family")}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "rules[0].family") {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestPolicyCheckTouchesNoCollectorRoot(t *testing.T) {
+	root := t.TempDir()
+	plugin := filepath.Join(root, "plugin.json")
+	if err := os.WriteFile(plugin, []byte(`{"secret":"must-not-be-read"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(plugin, wantTime, wantTime); err != nil {
+		t.Fatal(err)
+	}
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	app := App{Home: root, StatusReader: snapshots, PolicyStore: &memoryPolicyStore{}, PolicyDocument: document}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	info, err := os.Stat(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshots.latestCalls != 1 || !info.ModTime().Equal(wantTime) {
+		t.Fatalf("latest calls=%d plugin mtime=%s", snapshots.latestCalls, info.ModTime())
+	}
+}
+
+func TestHookEvaluatesPolicyAndAlwaysExitsZero(t *testing.T) {
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[{"id":"unpinned","family":"pin","enabled":true,"description":"d"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := policySnapshot().latest.Inventory
+	store := &memoryPolicyStore{}
+	app := App{
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			return model.ScanResult{}, inventory, model.Delta{}, false, nil
+		}),
+		PolicyStore: store, PolicyDocument: document, Now: func() time.Time { return time.Unix(1, 0) },
+	}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "POLICY (1 violations)") || len(store.recorded) != 1 {
+		t.Fatalf("stdout=%q recorded=%+v", out.String(), store.recorded)
+	}
+}
+
+func TestHookPolicyLoadFailureKeepsTheLadderAdvisory(t *testing.T) {
+	inventory := model.Inventory{Assets: []model.Asset{{ID: "agent-skill:claude:x", Type: model.AssetSkill, Name: "x", Source: "claude"}}}
+	delta := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:x"}}}
+	app := App{
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			return model.ScanResult{}, inventory, delta, false, nil
+		}),
+		PolicyLoadError: errors.New("invalid"),
+	}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if !strings.Contains(out.String(), "NEW") || errOut.String() != "ssc-init hook: policy document could not be loaded\n" {
+		t.Fatalf("stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+}
+
 func TestRunVersionReturnsErrorWhenOutputFails(t *testing.T) {
 	var errOut bytes.Buffer
 	code := Run(context.Background(), []string{"version", "--json"}, failingWriter{err: errors.New("disk full")}, &errOut)
@@ -48,6 +409,17 @@ func TestRunVersionReturnsErrorWhenOutputFails(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "failed to write version output") {
 		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestCurrentStatusContractIsV4(t *testing.T) {
+	app := App{StatusReader: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v7"}, Inventory: model.Inventory{Assets: []model.Asset{}, Evidence: []model.ContentEvidence{}, Relationships: []model.Relationship{}}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"status", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.status.v7"`) || strings.Contains(out.String(), `"legacyInventory":true`) {
+		t.Fatalf("status=%s", out.String())
 	}
 }
 
@@ -90,11 +462,12 @@ func TestRunOptionsUsesAlreadyParsedCommand(t *testing.T) {
 }
 
 type cliMemorySnapshots struct {
-	latest    model.Snapshot
-	hasLatest bool
-	loadErr   error
-	saved     []model.ScanResult
-	inventory []model.Inventory
+	latest      model.Snapshot
+	hasLatest   bool
+	loadErr     error
+	saved       []model.ScanResult
+	inventory   []model.Inventory
+	latestCalls int
 }
 
 func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult, inventory model.Inventory) error {
@@ -106,6 +479,7 @@ func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult
 }
 
 func (m *cliMemorySnapshots) LatestSnapshot(context.Context) (model.Snapshot, bool, error) {
+	m.latestCalls++
 	return m.latest, m.hasLatest, m.loadErr
 }
 
@@ -133,7 +507,7 @@ func (d fakeDoctor) Check(context.Context) doctor.Result { return d.result }
 
 func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
 	scanResult := model.ScanResult{
-		SchemaVersion: "ssc-init.scan.v3",
+		SchemaVersion: "ssc-init.scan.v7",
 		ScanID:        "00000000-0000-4000-8000-000000000009",
 		Status:        "partial",
 		Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoveragePartial}},
@@ -172,7 +546,7 @@ func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
 	statusOutput := out.String()
-	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v3", "COLLECTOR COVERAGE", "symlink_rejected"} {
+	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v7", "COLLECTOR COVERAGE", "symlink_rejected"} {
 		if !strings.Contains(statusOutput, want) {
 			t.Fatalf("status pretty missing %q:\n%s", want, statusOutput)
 		}
@@ -226,7 +600,7 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
-	wantOutput := `{"schemaVersion":"ssc-init.scan.v3",` +
+	wantOutput := `{"schemaVersion":"ssc-init.scan.v7",` +
 		`"scanId":"00000000-0000-4000-8000-000000000001",` +
 		`"status":"partial",` +
 		`"startedAt":"2023-11-14T22:13:20Z",` +
@@ -238,6 +612,7 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 		`{"collector":"docker","status":"failed","errors":[{"code":"collector_error","message":"collector failed"}]}` +
 		`],` +
 		`"evidenceCoverage":{"status":"complete","targets":[]},` +
+		`"analyzerCoverage":{"status":"skipped","filesRead":0,"bytesRead":0,"skippedRules":["no-analyzable-content"]},` +
 		`"inventory":{"assets":[{"id":"tool:new","type":"tool","name":"new"}],"observations":[],"evidence":[],"relationships":[]},` +
 		`"delta":{"changes":[{"kind":"added","entity":"asset","entityId":"tool:new"}]}}` + "\n"
 	if out.String() != wantOutput {
@@ -249,18 +624,18 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if len(snapshots.saved) != 1 {
 		t.Fatal("scan not persisted")
 	}
-	if snapshots.latest.Scan.SchemaVersion != "ssc-init.scan.v3" || len(snapshots.latest.Inventory.Assets) != 1 {
+	if snapshots.latest.Scan.SchemaVersion != "ssc-init.scan.v7" || len(snapshots.latest.Inventory.Assets) != 1 {
 		t.Fatalf("snapshot=%+v", snapshots.latest)
 	}
 }
 
-func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
+func TestStatusJSONHasStableEmptyV1V2V3AndV4Shapes(t *testing.T) {
 	legacyInventory := model.Inventory{
 		Assets:        []model.Asset{{ID: "tool:legacy", Type: model.AssetTool, Name: "legacy"}},
 		Relationships: []model.Relationship{},
 	}
 	emptyInventory := model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}
-	v3Inventory := model.Inventory{
+	v4Inventory := model.Inventory{
 		Assets: []model.Asset{}, Evidence: []model.ContentEvidence{}, Relationships: []model.Relationship{},
 	}
 	scanScope := model.ScanScope{
@@ -275,7 +650,7 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 		{
 			name:      "empty",
 			snapshots: &cliMemorySnapshots{},
-			want:      "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":false}\n",
+			want:      "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":false}\n",
 		},
 		{
 			name: "v1 legacy inventory",
@@ -287,7 +662,7 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 				},
 				Inventory: legacyInventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v1\",\"legacyInventory\":true,\"inventory\":{\"assets\":[{\"id\":\"tool:legacy\",\"type\":\"tool\",\"name\":\"legacy\"}],\"evidence\":null,\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v1\",\"legacyInventory\":true,\"inventory\":{\"assets\":[{\"id\":\"tool:legacy\",\"type\":\"tool\",\"name\":\"legacy\"}],\"evidence\":null,\"relationships\":[]}}\n",
 		},
 		{
 			name: "v2 legacy inventory",
@@ -302,22 +677,38 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 				},
 				Inventory: emptyInventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v2\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":null,\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v2\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":null,\"relationships\":[]}}\n",
 		},
 		{
-			name: "v3 provenance",
+			name: "v3 legacy evidence inventory",
+			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
+				Scan:      model.ScanResult{SchemaVersion: "ssc-init.scan.v3"},
+				Inventory: v4Inventory,
+			}},
+			want: "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v3\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
+		},
+		{
+			name: "v4 legacy provenance",
+			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
+				Scan:      model.ScanResult{SchemaVersion: "ssc-init.scan.v4"},
+				Inventory: v4Inventory,
+			}},
+			want: "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v4\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
+		},
+		{
+			name: "v5 developer surfaces",
 			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
 				Scan: model.ScanResult{
-					SchemaVersion: "ssc-init.scan.v3",
+					SchemaVersion: "ssc-init.scan.v7",
 					Scope:         scanScope,
 					Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoverageComplete}},
 					EvidenceCoverage: model.EvidenceCoverage{
 						Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{},
 					},
 				},
-				Inventory: v3Inventory,
+				Inventory: v4Inventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v3\",\"scope\":{\"platform\":\"darwin\",\"catalogVersion\":\"ssc-init.catalog.v1\",\"projectRoots\":[\"$HOME/Projects\"],\"externalProbes\":false},\"coverage\":[{\"collector\":\"agents\",\"status\":\"complete\"}],\"evidenceCoverage\":{\"status\":\"complete\",\"targets\":[]},\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v7\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v7\",\"scope\":{\"platform\":\"darwin\",\"catalogVersion\":\"ssc-init.catalog.v1\",\"projectRoots\":[\"$HOME/Projects\"],\"externalProbes\":false},\"coverage\":[{\"collector\":\"agents\",\"status\":\"complete\"}],\"evidenceCoverage\":{\"status\":\"complete\",\"targets\":[]},\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -334,12 +725,12 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 }
 
 func TestDoctorJSONUsesInjectedReadOnlyChecker(t *testing.T) {
-	app := App{Doctor: fakeDoctor{result: doctor.Result{SchemaVersion: "ssc-init.doctor.v1", Status: "ready"}}}
+	app := App{Doctor: fakeDoctor{result: doctor.Result{SchemaVersion: "ssc-init.doctor.v2", Status: "ready"}}}
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"doctor", "--json"}, &out, &errOut); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.doctor.v1"`) {
+	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.doctor.v2"`) {
 		t.Fatalf("stdout=%q", out.String())
 	}
 }
@@ -557,7 +948,7 @@ func TestHookPassesFirstRunToTheRenderer(t *testing.T) {
 
 func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	drift := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:alpha@1.0.0"}}}
-	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}
+	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v7"}
 	// A scan diffs the snapshot it just wrote, so the added asset is in the
 	// inventory it hands the renderer. A second asset keeps the delta from
 	// looking like an initial baseline.

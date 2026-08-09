@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 )
 
@@ -33,6 +34,37 @@ func hookFixture() (model.Inventory, model.Delta) {
 		{Kind: model.ChangeRemoved, Entity: model.ChangeEntityEvidence, EntityID: "evidence:sha256:gone"},
 	}}
 	return inventory, delta
+}
+
+func TestQuietMachineWithStandingViolationsPrintsExactlyOneLine(t *testing.T) {
+	var buffer bytes.Buffer
+	result := policy.Result{Violations: []policy.Violation{
+		{RuleID: "unpinned", AssetID: "a", Standing: true},
+		{RuleID: "unpinned", AssetID: "b", Standing: true},
+	}}
+	if err := report.WriteHookSummary(&buffer, model.Inventory{}, model.Delta{}, false, result); err != nil {
+		t.Fatal(err)
+	}
+	want := "ssc-init: 2 policy violations standing (run: ssc-init policy check)\n"
+	if buffer.String() != want {
+		t.Fatalf("got %q want %q", buffer.String(), want)
+	}
+}
+
+func TestHookListsOnlyNewPolicyViolations(t *testing.T) {
+	var buffer bytes.Buffer
+	result := policy.Result{Violations: []policy.Violation{
+		{RuleID: "unpinned", AssetType: "agent-plugin", AssetName: "new", Host: "claude"},
+		{RuleID: "unpinned", AssetType: "agent-plugin", AssetName: "old", Host: "claude", Standing: true},
+	}}
+	if err := report.WriteHookSummary(&buffer, model.Inventory{}, model.Delta{}, false, result); err != nil {
+		t.Fatal(err)
+	}
+	want := "POLICY (1 violations)\n  unpinned            agent-plugin  new (claude)\n" +
+		"ssc-init: 1 policy violation standing (run: ssc-init policy check)\n"
+	if buffer.String() != want {
+		t.Fatalf("got %q want %q", buffer.String(), want)
+	}
 }
 
 func TestWriteHookSummaryRendersLadder(t *testing.T) {
@@ -143,6 +175,17 @@ func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
 		if buffer.Len() != 0 {
 			t.Fatalf("expected silence (firstRun=%v), got:\n%s", firstRun, buffer.String())
 		}
+	}
+}
+
+func TestWriteHookSummaryFindingsUsesSeparateAdvisorySection(t *testing.T) {
+	var output bytes.Buffer
+	finding := model.Finding{ID: "finding:new"}
+	if err := report.WriteHookSummaryFindings(&output, model.Inventory{}, model.Delta{}, false, []model.Finding{finding}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "1 new verified findings") || !strings.Contains(got, "advisory") {
+		t.Fatalf("output=%q", got)
 	}
 }
 

@@ -57,6 +57,8 @@ LINKER_FLAGS="-s -w -buildid= -X main.version=$VERSION"
 
 mkdir -p "$DIST_DIR"
 
+go run ./scripts/package-adapters.go "$REPOSITORY_ROOT/adapters" "$DIST_DIR"
+
 GOARCH=arm64 go build -mod=readonly -trimpath -buildvcs=false -ldflags="$LINKER_FLAGS" -o "$DIST_DIR/ssc-init-darwin-arm64" ./cmd/ssc-init
 GOARCH=amd64 go build -mod=readonly -trimpath -buildvcs=false -ldflags="$LINKER_FLAGS" -o "$DIST_DIR/ssc-init-darwin-amd64" ./cmd/ssc-init
 
@@ -111,6 +113,9 @@ printf '%s\n' "$EMBEDDED_MODULES" |
 		}' > "$DIST_DIR/sbom.cdx.json"
 
 shasum -a 256 \
+	dist/ssc-init-adapter-claude.zip \
+	dist/ssc-init-adapter-codex.zip \
+	dist/ssc-init-adapter-cursor.zip \
 	dist/sbom.cdx.json \
 	dist/ssc-init-darwin-amd64 \
 	dist/ssc-init-darwin-arm64 \

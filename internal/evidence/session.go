@@ -9,62 +9,74 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
-func (engine Engine) collectFilesystem(ctx context.Context, env collector.Environment, candidate *issuedCandidate) (model.ContentEvidence, []CacheWrite) {
+func (engine Engine) collectFilesystem(ctx context.Context, env collector.Environment, candidate *issuedCandidate) (model.ContentEvidence, []CacheWrite, []model.AnalyzerFact, model.AnalyzerCoverage) {
 	if ctx.Err() != nil {
-		return unavailableRecord("time_limit", "evidence target deadline exceeded"), nil
+		return unavailableRecord("time_limit", "evidence target deadline exceeded"), nil, nil, model.AnalyzerCoverage{}
 	}
 	rooted, ok := env.FS.(platform.RootedFileSystem)
 	if !ok || rooted == nil {
-		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil
+		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil, nil, model.AnalyzerCoverage{}
 	}
 	root, err := rooted.OpenRoot(candidate.target.RootPath)
 	if err != nil {
-		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil
+		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil, nil, model.AnalyzerCoverage{}
 	}
 	defer root.Close()
 	if !descriptorMatches(root, candidate.anchor.Root) {
-		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+		return unavailableRecord("identity_changed", "evidence target identity changed"), nil, nil, model.AnalyzerCoverage{}
 	}
 	asset := root
 	if candidate.anchor.AssetRelativePath != "" {
 		assetComponents, _ := filePathComponents(candidate.anchor.AssetRelativePath)
 		asset, err = platform.OpenVerifiedRoot(ctx, root, assetComponents...)
 		if err != nil {
-			return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+			return unavailableRecord("identity_changed", "evidence target identity changed"), nil, nil, model.AnalyzerCoverage{}
 		}
 		defer asset.Close()
 	}
 	if !descriptorMatches(asset, candidate.anchor.AssetRoot) || !verifyContentAnchor(ctx, asset, candidate) {
-		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+		return unavailableRecord("identity_changed", "evidence target identity changed"), nil, nil, model.AnalyzerCoverage{}
 	}
 
 	var value model.ContentEvidence
 	var writes []CacheWrite
+	var facts []model.AnalyzerFact
+	var analyzerCoverage model.AnalyzerCoverage
 	switch candidate.target.Kind {
 	case model.EvidenceFileSHA256:
-		digest, status, evidenceErrors := HashVerifiedFile(ctx, asset, candidate.targetAssetRelative, candidate.anchor.MaxBytes)
+		captureLimit := int64(0)
+		if engine.Analyzer != nil {
+			captureLimit = maxAnalyzerFileBytes
+		}
+		digest, raw, status, evidenceErrors := hashVerifiedFileContent(ctx, asset, candidate.targetAssetRelative, candidate.anchor.MaxBytes, captureLimit)
 		value = model.ContentEvidence{Status: status, Digest: digest.SHA256, Size: digest.Size, Errors: evidenceErrors}
 		if digest.SHA256 != "" {
 			value.Algorithm = "sha256"
+		}
+		if status == model.EvidenceComplete {
+			facts, analyzerCoverage = runContentAnalyzer(ctx, engine.Analyzer, candidate, raw)
 		}
 	case model.EvidenceTreeSHA256:
 		target := model.LocalEvidenceTarget{ObservationID: candidate.target.ObservationID, Kind: candidate.target.Kind, Subject: candidate.target.Subject}
 		digest, status, evidenceErrors, treeWrites := HashTreeForTarget(ctx, target, asset, candidate.targetAssetRelative, engine.treeLimits(), engine.boundedCache())
 		value = model.ContentEvidence{Status: status, Algorithm: "sha256", Digest: digest.Digest, Size: digest.Size, Files: digest.Files, Directories: digest.Directories, Symlinks: digest.Symlinks, Errors: evidenceErrors, Metadata: map[string]string{metadataCache: digest.Cache}}
 		writes = treeWrites
+		if engine.Analyzer != nil {
+			analyzerCoverage = model.AnalyzerCoverage{Status: model.CoverageSkipped, SkippedRules: []string{"tree-analysis-deferred"}}
+		}
 	default:
-		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil
+		return unavailableRecord("read_unavailable", "evidence collection is unavailable"), nil, nil, model.AnalyzerCoverage{}
 	}
 	if ctx.Err() != nil {
-		return unavailableRecord("time_limit", "evidence target deadline exceeded"), nil
+		return unavailableRecord("time_limit", "evidence target deadline exceeded"), nil, nil, model.AnalyzerCoverage{}
 	}
 	if !descriptorMatches(root, candidate.anchor.Root) || !descriptorMatches(asset, candidate.anchor.AssetRoot) || !verifyContentAnchor(ctx, asset, candidate) || !freshPathBindingMatches(ctx, rooted, candidate) {
-		return unavailableRecord("identity_changed", "evidence target identity changed"), nil
+		return unavailableRecord("identity_changed", "evidence target identity changed"), nil, nil, model.AnalyzerCoverage{}
 	}
 	if value.Status != model.EvidenceComplete {
 		writes = nil
 	}
-	return value, writes
+	return value, writes, facts, analyzerCoverage
 }
 
 func freshPathBindingMatches(ctx context.Context, rooted platform.RootedFileSystem, candidate *issuedCandidate) bool {

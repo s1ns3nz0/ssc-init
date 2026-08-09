@@ -245,9 +245,9 @@ func contentMutationCases() []contentMutationCase {
 			probes:         pipProbeFixture,
 		},
 		contentMutationCase{
-			name: "docker identity stays unsupported", assetType: "package", subject: model.EvidenceSubjectContainerImage,
+			name: "docker full identity is complete", assetType: "package", subject: model.EvidenceSubjectContainerImage,
 			fixture:        func(*testing.T, string) {},
-			wantStatus:     model.EvidenceUnsupported,
+			wantStatus:     model.EvidenceComplete,
 			externalProbes: true,
 			probes:         dockerProbeFixture,
 		},
@@ -277,12 +277,14 @@ func TestContentEvidenceMutationMatrix(t *testing.T) {
 			}
 
 			if testCase.mutate == nil {
-				// Terminal-status subjects: the record must stay a visible
-				// unsupported terminal result and must not carry any digest.
-				if before.Digest != "" || before.Algorithm != "" || before.Size != 0 || before.Files != 0 {
-					t.Fatalf("unsupported evidence carries content claims: %+v", before)
+				if testCase.wantStatus == model.EvidenceUnsupported {
+					if before.Digest != "" || before.Algorithm != "" || before.Size != 0 || before.Files != 0 {
+						t.Fatalf("unsupported evidence carries content claims: %+v", before)
+					}
+				} else if before.Algorithm != "sha256" || len(before.Digest) != 64 || before.Digest != strings.ToLower(before.Digest) {
+					t.Fatalf("complete terminal evidence lacks a trusted digest: %+v", before)
 				}
-				assertEvidenceTargetStatus(t, first.Scan.EvidenceCoverage, before.ID, model.EvidenceUnsupported)
+				assertEvidenceTargetStatus(t, first.Scan.EvidenceCoverage, before.ID, testCase.wantStatus)
 				assertPrivacyBoundary(t, first)
 				return
 			}
@@ -344,7 +346,7 @@ func TestContentEvidenceMutationMatrix(t *testing.T) {
 	}
 }
 
-// TestContentEvidenceGoldenBaselineReport locks the exact v3 report bytes for
+// TestContentEvidenceGoldenBaselineReport locks the exact v4 report bytes for
 // the official fixture home. Fixture modes are normalized so tree manifests
 // are independent of the checkout umask.
 func TestContentEvidenceGoldenBaselineReport(t *testing.T) {
@@ -376,7 +378,7 @@ func TestContentEvidenceGoldenBaselineReport(t *testing.T) {
 	if err := json.Unmarshal(golden, &document); err != nil {
 		t.Fatal(err)
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v3" {
+	if document["schemaVersion"] != "ssc-init.scan.v7" {
 		t.Fatalf("golden schemaVersion=%v", document["schemaVersion"])
 	}
 	if _, ok := document["evidenceCoverage"].(map[string]any); !ok {
@@ -444,7 +446,7 @@ func TestContentEvidenceCLIBaselineAndStatusEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(scanStdout.Bytes(), &baselineReport); err != nil {
 		t.Fatalf("decode baseline report: %v\n%s", err, scanStdout.String())
 	}
-	if baselineReport.SchemaVersion != "ssc-init.scan.v3" || baselineReport.EvidenceCoverage == nil || baselineReport.Inventory == nil {
+	if baselineReport.SchemaVersion != "ssc-init.scan.v7" || baselineReport.EvidenceCoverage == nil || baselineReport.Inventory == nil {
 		t.Fatalf("CLI baseline contract=%+v", baselineReport)
 	}
 	if baselineReport.EvidenceCoverage.Status != model.CoverageComplete || len(baselineReport.Inventory.Evidence) == 0 {
@@ -471,14 +473,14 @@ func TestContentEvidenceCLIBaselineAndStatusEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
 		t.Fatalf("decode status: %v\n%s", err, stdout.String())
 	}
-	if status.SchemaVersion != "ssc-init.status.v3" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v3" || status.LegacyInventory {
+	if status.SchemaVersion != "ssc-init.status.v7" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v7" || status.LegacyInventory {
 		t.Fatalf("CLI status provenance=%+v", status)
 	}
 	if status.EvidenceCoverage == nil || !reflect.DeepEqual(*status.EvidenceCoverage, *baselineReport.EvidenceCoverage) {
 		t.Fatalf("CLI status evidence coverage=%+v want=%+v", status.EvidenceCoverage, baselineReport.EvidenceCoverage)
 	}
 	if status.Inventory == nil || !reflect.DeepEqual(*status.Inventory, *baselineReport.Inventory) {
-		t.Fatal("CLI status did not surface the persisted v3 inventory")
+		t.Fatal("CLI status did not surface the persisted v7 inventory")
 	}
 	for _, output := range []string{scanStdout.String(), stdout.String()} {
 		for _, forbidden := range []string{home, fixtureSecretSentinel} {
@@ -639,8 +641,8 @@ func dockerProbeFixture(t *testing.T, home string) (platform.Runner, platform.Ex
 		}
 	}
 	runner := &matrixRunner{results: map[string]platform.CommandResult{
-		matrixCommandKey(dockerPath, "image", "ls", "--format", "{{json .}}"): {
-			Stdout: `{"Repository":"demo-image","Tag":"1.0.0","ID":"sha256:` + strings.Repeat("c", 12) + `"}` + "\n",
+		matrixCommandKey(dockerPath, "image", "ls", "--no-trunc", "--format", "{{json .}}"): {
+			Stdout: `{"Repository":"demo-image","Tag":"1.0.0","ID":"sha256:` + strings.Repeat("c", 64) + `"}` + "\n",
 		},
 	}, errors: map[string]error{}}
 	return runner, inspector

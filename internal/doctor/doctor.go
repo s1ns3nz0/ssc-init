@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const schemaVersion = "ssc-init.doctor.v1"
+const schemaVersion = "ssc-init.doctor.v2"
 
 // Path describes one redacted SSC Init-owned path.
 type Path struct {
@@ -38,6 +38,17 @@ type StoreUsage struct {
 	AssetHistoryRetentionSeconds int64 `json:"assetHistoryRetentionSeconds"`
 }
 
+// Install summarises the shared managed installation. It carries version
+// strings and booleans only—never a filesystem path or manifest content.
+type Install struct {
+	Managed           bool   `json:"managed"`
+	CurrentVersion    string `json:"currentVersion"`
+	PreviousVersion   string `json:"previousVersion"`
+	RollbackAvailable bool   `json:"rollbackAvailable"`
+	VersionsInstalled int    `json:"versionsInstalled"`
+	IntegrityVerified bool   `json:"integrityVerified"`
+}
+
 // Result is the stable doctor JSON contract. Fatal is an internal signal and is
 // never serialized.
 type Result struct {
@@ -49,6 +60,7 @@ type Result struct {
 	GOARCH                    string     `json:"goarch"`
 	DatabaseDirectoryWritable bool       `json:"databaseDirectoryWritable"`
 	Store                     StoreUsage `json:"store"`
+	Install                   Install    `json:"install"`
 	CorePaths                 []Path     `json:"corePaths"`
 	Ecosystems                []string   `json:"ecosystems"`
 	MissingOptionalCommands   []string   `json:"missingOptionalCommands"`
@@ -65,6 +77,7 @@ type Config struct {
 	OptionalCommands  []string
 	LookPath          func(string) (string, error)
 	DirectoryWritable func(string) bool
+	InstallReporter   func() (Install, error)
 }
 
 // Checker evaluates Config without creating files or reading asset contents.
@@ -120,6 +133,13 @@ func (c *Checker) Check(ctx context.Context) Result {
 	if usageErr != nil {
 		result.Status = "degraded"
 	}
+	if c.config.InstallReporter != nil {
+		install, err := c.config.InstallReporter()
+		result.Install = install
+		if err != nil || install.Managed && !install.IntegrityVerified {
+			result.Status = "degraded"
+		}
+	}
 	for _, command := range uniqueSorted(c.config.OptionalCommands) {
 		if err := ctx.Err(); err != nil {
 			result.Status = "degraded"
@@ -137,8 +157,8 @@ func (c *Checker) Check(ctx context.Context) Result {
 // the windows the given options select. The windows come back populated even
 // when measurement fails, because they are construction-time settings rather
 // than something read off disk. Check passes the documented defaults: the binary
-// opens the store with store.Open, and policy-configurable retention does not
-// exist yet.
+// opens the store with store.Open. Only a future verified, signed organization
+// policy may select different windows; a local policy document cannot.
 func storeUsage(ctx context.Context, databasePath string, options store.Options) (StoreUsage, error) {
 	usage, err := store.UsageAt(ctx, databasePath, options)
 	return StoreUsage{
