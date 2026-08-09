@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -26,6 +27,14 @@ type BaselineScanner interface {
 // StatusReader loads the latest persisted scan and inventory, if one exists.
 type StatusReader interface {
 	LatestSnapshot(context.Context) (model.Snapshot, bool, error)
+}
+
+type PolicyStore interface {
+	Pins(context.Context) ([]policy.Pin, error)
+	SavePins(context.Context, []policy.Pin, time.Time) error
+	Exceptions(context.Context) ([]policy.Exception, error)
+	RecordDecisions(context.Context, []policy.Violation, time.Time) error
+	Decisions(context.Context) ([]policy.Decision, error)
 }
 
 // Doctor performs read-only runtime diagnostics.
@@ -86,6 +95,9 @@ type App struct {
 	Installer       Installer
 	Home            string
 	PolicyPath      string
+	PolicyStore     PolicyStore
+	PolicySources   policy.Sources
+	Now             func() time.Time
 }
 
 // Run executes the CLI with the development version.
@@ -240,6 +252,9 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		}
 		return 0
 	case "policy":
+		if options.PolicyCommand == "pin" {
+			return a.runPolicyPin(ctx, options, stdout, stderr)
+		}
 		if options.PolicyCommand != "init" {
 			fmt.Fprintln(stderr, "invalid command arguments")
 			return 2
@@ -291,6 +306,61 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func (a App) runPolicyPin(ctx context.Context, options Options, stdout, stderr io.Writer) int {
+	if a.PolicySources.Bundle != nil {
+		fmt.Fprintln(stderr, "pins are authored in the organization bundle")
+		return 1
+	}
+	if a.StatusReader == nil || a.PolicyStore == nil {
+		fmt.Fprintln(stderr, "policy state is unavailable")
+		return 1
+	}
+	snapshot, initialized, err := a.StatusReader.LatestSnapshot(ctx)
+	if err != nil || !initialized {
+		fmt.Fprintln(stderr, "latest snapshot is unavailable")
+		return 1
+	}
+	assetExists := map[string]bool{}
+	for _, asset := range snapshot.Inventory.Assets {
+		assetExists[asset.ID] = true
+	}
+	if options.PolicyAssetID != "" && !assetExists[options.PolicyAssetID] {
+		fmt.Fprintln(stderr, "requested asset is not present in the latest snapshot")
+		return 1
+	}
+	observationAssets := map[string]string{}
+	for _, observation := range snapshot.Inventory.Observations {
+		observationAssets[observation.ID] = observation.AssetID
+	}
+	pins := []policy.Pin{}
+	for _, evidence := range snapshot.Inventory.Evidence {
+		if evidence.Status != model.EvidenceComplete || evidence.Digest == "" {
+			continue
+		}
+		assetID := evidence.AssetID
+		if assetID == "" {
+			assetID = observationAssets[evidence.ObservationID]
+		}
+		if options.PolicyAssetID != "" && assetID != options.PolicyAssetID {
+			continue
+		}
+		pins = append(pins, policy.Pin{AssetID: assetID, Kind: string(evidence.Kind), Subject: evidence.Subject, Digest: evidence.Digest})
+	}
+	now := time.Now()
+	if a.Now != nil {
+		now = a.Now()
+	}
+	if err := a.PolicyStore.SavePins(ctx, pins, now); err != nil {
+		fmt.Fprintln(stderr, "failed to save policy pins")
+		return 1
+	}
+	fmt.Fprintln(stdout, "ssc-init: pinning records what is on this machine now.")
+	fmt.Fprintln(stdout, "  A pin protects against future change, not against what is already there —")
+	fmt.Fprintln(stdout, "  pinning a compromised machine approves the compromise.")
+	fmt.Fprintf(stdout, "  pinned %d evidence subjects\n", len(pins))
+	return 0
 }
 
 // installPayload is the ssc-init.install.v1 contract. Its shape is fixed —

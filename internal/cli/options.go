@@ -88,18 +88,29 @@ func parsePolicyOptions(args []string, options *Options) error {
 		return ErrInvalidOptions
 	}
 	options.PolicyCommand = args[0]
-	if options.PolicyCommand != "init" {
+	if options.PolicyCommand != "init" && options.PolicyCommand != "pin" {
 		return ErrInvalidOptions
 	}
 	for index := 1; index < len(args); index++ {
-		if args[index] != "--policy" || options.PolicyPath != "" || index+1 == len(args) {
+		flag := args[index]
+		if index+1 == len(args) {
 			return ErrInvalidOptions
 		}
 		index++
-		if !validPolicyPath(args[index]) {
+		switch flag {
+		case "--policy":
+			if options.PolicyPath != "" || !validPolicyPath(args[index]) {
+				return ErrInvalidOptions
+			}
+			options.PolicyPath = args[index]
+		case "--update":
+			if options.PolicyCommand != "pin" || options.PolicyAssetID != "" || args[index] == "" || strings.ContainsRune(args[index], '\x00') {
+				return ErrInvalidOptions
+			}
+			options.PolicyAssetID = args[index]
+		default:
 			return ErrInvalidOptions
 		}
-		options.PolicyPath = args[index]
 	}
 	return nil
 }

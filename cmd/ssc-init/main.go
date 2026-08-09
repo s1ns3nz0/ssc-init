@@ -139,6 +139,22 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.Home = home
 		app.PolicyPath = paths.Install().PolicyFile
+		if options.PolicyCommand == "pin" {
+			snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			defer snapshots.Close()
+			policyStore, ok := snapshots.(cli.PolicyStore)
+			if !ok {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			app.StatusReader = snapshots
+			app.PolicyStore = policyStore
+			app.Now = time.Now
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
 		home, paths, ok := hostPathsForRun()

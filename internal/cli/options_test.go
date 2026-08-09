@@ -44,6 +44,19 @@ func TestParseOptionsAcceptsPolicyInitAndOverride(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsPolicyPinForms(t *testing.T) {
+	for _, args := range [][]string{{"policy", "pin"}, {"policy", "pin", "--update", "agent-plugin:claude:x@1.0.0"}} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"policy", "pin", "--update"}, {"policy", "pin", "--update", "x", "--update", "y"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
+
 func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 	tests := []struct {
 		args []string

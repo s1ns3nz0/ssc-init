@@ -11,14 +11,7 @@ import (
 
 // PolicyDecision is one bounded audit record. Outcome is a closed local value
 // written by this package, never author-controlled text.
-type PolicyDecision struct {
-	RuleID      string
-	AssetID     string
-	Level       int
-	Outcome     string
-	FirstSeenAt time.Time
-	LastSeenAt  time.Time
-}
+type PolicyDecision = policy.Decision
 
 func (s *Store) SavePins(ctx context.Context, pins []policy.Pin, pinnedAt time.Time) error {
 	if pinnedAt.IsZero() {
@@ -160,7 +153,7 @@ ON CONFLICT(rule_id,asset_id) DO UPDATE SET level=excluded.level,outcome=exclude
 	return nil
 }
 
-func (s *Store) Decisions(ctx context.Context) ([]PolicyDecision, error) {
+func (s *Store) Decisions(ctx context.Context) ([]policy.Decision, error) {
 	db, _, done, err := s.beginOperation()
 	if err != nil {
 		return nil, err
@@ -171,9 +164,9 @@ func (s *Store) Decisions(ctx context.Context) ([]PolicyDecision, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	result := []PolicyDecision{}
+	result := []policy.Decision{}
 	for rows.Next() {
-		var decision PolicyDecision
+		var decision policy.Decision
 		var first, last string
 		if err := rows.Scan(&decision.RuleID, &decision.AssetID, &decision.Level, &decision.Outcome, &first, &last); err != nil {
 			return nil, err

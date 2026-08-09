@@ -24,6 +24,15 @@ type Applied struct {
 	AssetID string `json:"assetId"`
 }
 
+type Decision struct {
+	RuleID      string
+	AssetID     string
+	Level       int
+	Outcome     string
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+}
+
 // Input is everything Evaluate reads. Evaluation is pure: it opens no file,
 // starts no process, opens no socket, and consults no clock beyond Now.
 type Input struct {

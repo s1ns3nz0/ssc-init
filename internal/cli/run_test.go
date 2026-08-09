@@ -15,6 +15,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 )
 
@@ -72,6 +73,75 @@ func TestPolicyInitWritesStarterOnceWithPrivatePermissions(t *testing.T) {
 	after, err := os.ReadFile(policyPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("existing policy changed: %v", err)
+	}
+}
+
+type memoryPolicyStore struct {
+	pins  []policy.Pin
+	saved []policy.Pin
+}
+
+func (store *memoryPolicyStore) Pins(context.Context) ([]policy.Pin, error) {
+	return append([]policy.Pin(nil), store.pins...), nil
+}
+
+func (store *memoryPolicyStore) SavePins(_ context.Context, pins []policy.Pin, _ time.Time) error {
+	store.saved = append([]policy.Pin(nil), pins...)
+	return nil
+}
+
+func (store *memoryPolicyStore) Exceptions(context.Context) ([]policy.Exception, error) {
+	return nil, nil
+}
+func (store *memoryPolicyStore) RecordDecisions(context.Context, []policy.Violation, time.Time) error {
+	return nil
+}
+func (store *memoryPolicyStore) Decisions(context.Context) ([]policy.Decision, error) {
+	return nil, nil
+}
+
+func policySnapshot() *cliMemorySnapshots {
+	return &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{Inventory: model.Inventory{
+		Assets:   []model.Asset{{ID: "agent-plugin:claude:x@1.0.0", Type: model.AssetAgentPlugin, Name: "x"}},
+		Evidence: []model.ContentEvidence{{AssetID: "agent-plugin:claude:x@1.0.0", Kind: model.EvidenceTreeSHA256, Subject: model.EvidenceSubjectPayloadTree, Status: model.EvidenceComplete, Digest: strings.Repeat("a", 64)}},
+	}}}
+}
+
+func TestPolicyPinEchoesTheTrustOnFirstUseCaveat(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store, Now: func() time.Time { return time.Unix(1, 0) }}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	for _, phrase := range []string{"records what is on this machine now", "pinning a compromised machine approves the compromise"} {
+		if !strings.Contains(out.String(), phrase) {
+			t.Fatalf("missing caveat %q: %s", phrase, out.String())
+		}
+	}
+	if len(store.saved) != 1 || store.saved[0].Digest != strings.Repeat("a", 64) {
+		t.Fatalf("saved pins=%+v", store.saved)
+	}
+}
+
+func TestPolicyPinUpdateRejectsAnUnknownAsset(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin", "--update", "unknown-secret-asset"}, &out, &errOut); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if len(store.saved) != 0 || strings.Contains(errOut.String(), "unknown-secret-asset") {
+		t.Fatalf("unknown asset was saved or echoed: %q %+v", errOut.String(), store.saved)
+	}
+}
+
+func TestPolicyPinRefusesUnderAnOrganizationBundle(t *testing.T) {
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: policySnapshot(), PolicyStore: store, PolicySources: policy.Sources{Bundle: &policy.Bundle{}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "pin"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "pins are authored in the organization bundle") {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
 }
 
