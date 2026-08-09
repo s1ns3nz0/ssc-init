@@ -182,19 +182,22 @@ func validKindSubject(kind model.EvidenceKind, subject string) bool {
 }
 
 func validPresetShape(collectorName string, target model.LocalEvidenceTarget, anchor Anchor) bool {
+	if target.Kind == model.EvidenceContainerIdentity && target.PresetStatus == model.EvidenceComplete {
+		return target.PresetAlgorithm == "sha256" && lowercaseSHA256(target.PresetDigest) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	}
 	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
-		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.Kind == model.EvidenceFileSHA256 && collectorName == "projects" && model.ProjectEvidenceSubject(target.Subject) && (target.PresetStatus == model.EvidenceOversize || target.PresetStatus == model.EvidenceUnavailable) {
-		return target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.PresetStatus != "" {
-		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
 	if target.Kind == model.EvidenceSemanticSHA256 {
-		return target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+		return target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
-	return true
+	return target.PresetAlgorithm == "" && target.PresetDigest == ""
 }
 
 func validFilesystemShape(target model.LocalEvidenceTarget, anchor Anchor) bool {

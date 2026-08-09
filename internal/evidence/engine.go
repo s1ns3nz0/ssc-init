@@ -268,6 +268,8 @@ func (engine Engine) collectOne(parent context.Context, env collector.Environmen
 
 func presetRecord(target model.LocalEvidenceTarget) model.ContentEvidence {
 	switch target.PresetStatus {
+	case model.EvidenceComplete:
+		return model.ContentEvidence{Status: model.EvidenceComplete, Algorithm: target.PresetAlgorithm, Digest: target.PresetDigest}
 	case model.EvidenceOversize:
 		return model.ContentEvidence{Status: model.EvidenceOversize, Errors: []model.EvidenceError{fixedFileErrors["oversize"]}}
 	case model.EvidenceUnavailable:

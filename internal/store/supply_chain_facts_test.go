@@ -71,3 +71,26 @@ func TestValidateAssetAcceptsClosedSupplyChainFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStoreAcceptsOnlyCompleteSHA256ContainerIdentity(t *testing.T) {
+	valid := model.ContentEvidence{
+		ID: "evidence:sha256:" + strings.Repeat("b", 64), AssetID: "container", ObservationID: "observation:sha256:" + strings.Repeat("c", 64),
+		Kind: model.EvidenceContainerIdentity, Subject: model.EvidenceSubjectContainerImage,
+		Status: model.EvidenceComplete, Algorithm: "sha256", Digest: strings.Repeat("a", 64),
+		Metadata: map[string]string{"completeness": "complete"},
+	}
+	if !validEvidenceKindStatus(valid.Kind, valid.Status) || validateEvidenceShape(valid) != nil {
+		t.Fatalf("complete container identity rejected: %+v", valid)
+	}
+	for _, mutate := range []func(*model.ContentEvidence){
+		func(value *model.ContentEvidence) { value.Digest = "short" },
+		func(value *model.ContentEvidence) { value.Algorithm = "sha512" },
+		func(value *model.ContentEvidence) { value.Kind = model.EvidencePackageContent },
+	} {
+		candidate := valid
+		mutate(&candidate)
+		if validEvidenceKindStatus(candidate.Kind, candidate.Status) && validateEvidenceShape(candidate) == nil {
+			t.Fatalf("malformed container identity accepted: %+v", candidate)
+		}
+	}
+}

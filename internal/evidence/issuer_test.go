@@ -136,6 +136,8 @@ func TestIssuerRejectsEveryMutatedTargetField(t *testing.T) {
 		func(v *model.LocalEvidenceTarget) { v.Kind = model.EvidenceTreeSHA256 },
 		func(v *model.LocalEvidenceTarget) { v.Subject = model.EvidenceSubjectPayloadTree },
 		func(v *model.LocalEvidenceTarget) { v.PresetStatus = model.EvidenceSkipped },
+		func(v *model.LocalEvidenceTarget) { v.PresetAlgorithm = "sha256" },
+		func(v *model.LocalEvidenceTarget) { v.PresetDigest = strings.Repeat("a", 64) },
 		func(v *model.LocalEvidenceTarget) { v.RootPath = "/other/root" },
 		func(v *model.LocalEvidenceTarget) { v.RelativePath = "asset/other.json" },
 	}

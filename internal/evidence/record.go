@@ -66,8 +66,11 @@ func finalizeRecord(target model.LocalEvidenceTarget, value model.ContentEvidenc
 }
 
 func validKindStatus(kind model.EvidenceKind, status model.EvidenceStatus) bool {
-	if kind == model.EvidencePackageContent || kind == model.EvidenceContainerIdentity {
+	if kind == model.EvidencePackageContent {
 		return status == model.EvidenceUnsupported || status == model.EvidenceSkipped
+	}
+	if kind == model.EvidenceContainerIdentity {
+		return status == model.EvidenceComplete || status == model.EvidenceUnsupported || status == model.EvidenceSkipped
 	}
 	if status == model.EvidencePartial || status == model.EvidenceOversize {
 		return kind == model.EvidenceFileSHA256 || kind == model.EvidenceTreeSHA256

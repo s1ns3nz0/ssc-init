@@ -655,6 +655,48 @@ func TestEngineAllowsPackageAndContainerSkippedPresets(t *testing.T) {
 	}
 }
 
+func TestEngineAcceptsSealedCompleteContainerIdentity(t *testing.T) {
+	fixture := newEngineFixture(t)
+	issuer := NewIssuer()
+	digest := strings.Repeat("a", 64)
+	target := issuer.Issue(model.LocalEvidenceTarget{
+		TargetID: "fixture.container", AssetID: fixture.assetID, ObservationID: fixture.observation.ID,
+		Kind: model.EvidenceContainerIdentity, Subject: model.EvidenceSubjectContainerImage,
+		PresetStatus: model.EvidenceComplete, PresetAlgorithm: "sha256", PresetDigest: digest,
+	}, Anchor{})
+	got := (Engine{}).Collect(context.Background(), collector.Environment{}, fixture.inventory(), []model.CollectorResult{{
+		Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+	}})
+	if len(got.Evidence) != 1 || got.Evidence[0].Status != model.EvidenceComplete || got.Evidence[0].Algorithm != "sha256" || got.Evidence[0].Digest != digest {
+		t.Fatalf("collection=%+v", got)
+	}
+}
+
+func TestEngineRejectsMalformedCompleteContainerIdentity(t *testing.T) {
+	for _, mutation := range []func(*model.LocalEvidenceTarget){
+		func(target *model.LocalEvidenceTarget) { target.PresetAlgorithm = "sha512" },
+		func(target *model.LocalEvidenceTarget) { target.PresetDigest = "short" },
+		func(target *model.LocalEvidenceTarget) { target.PresetDigest = strings.Repeat("A", 64) },
+		func(target *model.LocalEvidenceTarget) { target.RootPath = "/private/forbidden" },
+	} {
+		fixture := newEngineFixture(t)
+		issuer := NewIssuer()
+		target := model.LocalEvidenceTarget{
+			TargetID: "fixture.container", AssetID: fixture.assetID, ObservationID: fixture.observation.ID,
+			Kind: model.EvidenceContainerIdentity, Subject: model.EvidenceSubjectContainerImage,
+			PresetStatus: model.EvidenceComplete, PresetAlgorithm: "sha256", PresetDigest: strings.Repeat("a", 64),
+		}
+		mutation(&target)
+		target = issuer.Issue(target, Anchor{})
+		got := (Engine{}).Collect(context.Background(), collector.Environment{}, fixture.inventory(), []model.CollectorResult{{
+			Collector: "fixture", LocalEvidenceIssuer: issuer, LocalEvidenceTargets: []model.LocalEvidenceTarget{target},
+		}})
+		if len(got.Evidence) != 0 || got.Coverage.Status != model.CoveragePartial {
+			t.Fatalf("malformed target accepted: %+v", got)
+		}
+	}
+}
+
 func TestEngineAllowsProjectsOnlyTerminalFilePresets(t *testing.T) {
 	for _, status := range []model.EvidenceStatus{model.EvidenceOversize, model.EvidenceUnavailable} {
 		t.Run(string(status), func(t *testing.T) {
