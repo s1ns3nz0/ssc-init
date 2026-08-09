@@ -41,7 +41,10 @@ var (
 	parseOptionsForRun = cli.ParseOptions
 	hostPathsForRun    = hostPaths
 	resolveRootsForRun = projects.ResolveRoots
-	openStoreForRun    = func(path string) (applicationStore, error) { return store.Open(path) }
+	// The local-policy build always opens the store with documented retention
+	// defaults. Only a future verified, signed organization bundle may wire
+	// store.Options here; local policy is deliberately outside this seam.
+	openStoreForRun = func(path string) (applicationStore, error) { return store.Open(path) }
 )
 
 func main() {

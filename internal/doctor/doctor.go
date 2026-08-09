@@ -157,8 +157,8 @@ func (c *Checker) Check(ctx context.Context) Result {
 // the windows the given options select. The windows come back populated even
 // when measurement fails, because they are construction-time settings rather
 // than something read off disk. Check passes the documented defaults: the binary
-// opens the store with store.Open, and policy-configurable retention does not
-// exist yet.
+// opens the store with store.Open. Only a future verified, signed organization
+// policy may select different windows; a local policy document cannot.
 func storeUsage(ctx context.Context, databasePath string, options store.Options) (StoreUsage, error) {
 	usage, err := store.UsageAt(ctx, databasePath, options)
 	return StoreUsage{
