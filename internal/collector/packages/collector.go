@@ -259,7 +259,19 @@ func appendPackageEvidence(ctx context.Context, result *model.CollectorResult, t
 	if candidate.Type != model.AssetPackage {
 		return nil
 	}
+	appendPackageRelationship(result, model.Relationship{
+		From: candidate.ID, Kind: model.RelationshipProbedBy, To: executableObservation.AssetID,
+	})
 	return issuePackageArtifactEvidence(ctx, result, probe, observation, candidate)
+}
+
+func appendPackageRelationship(result *model.CollectorResult, relationship model.Relationship) {
+	for _, existing := range result.Relationships {
+		if existing == relationship {
+			return
+		}
+	}
+	result.Relationships = append(result.Relationships, relationship)
 }
 
 func validExecutableEvidence(probe commandProbe, evidence platform.ExecutableEvidence) bool {

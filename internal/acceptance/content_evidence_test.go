@@ -245,9 +245,9 @@ func contentMutationCases() []contentMutationCase {
 			probes:         pipProbeFixture,
 		},
 		contentMutationCase{
-			name: "docker identity stays unsupported", assetType: "package", subject: model.EvidenceSubjectContainerImage,
+			name: "docker full identity is complete", assetType: "package", subject: model.EvidenceSubjectContainerImage,
 			fixture:        func(*testing.T, string) {},
-			wantStatus:     model.EvidenceUnsupported,
+			wantStatus:     model.EvidenceComplete,
 			externalProbes: true,
 			probes:         dockerProbeFixture,
 		},
@@ -277,12 +277,14 @@ func TestContentEvidenceMutationMatrix(t *testing.T) {
 			}
 
 			if testCase.mutate == nil {
-				// Terminal-status subjects: the record must stay a visible
-				// unsupported terminal result and must not carry any digest.
-				if before.Digest != "" || before.Algorithm != "" || before.Size != 0 || before.Files != 0 {
-					t.Fatalf("unsupported evidence carries content claims: %+v", before)
+				if testCase.wantStatus == model.EvidenceUnsupported {
+					if before.Digest != "" || before.Algorithm != "" || before.Size != 0 || before.Files != 0 {
+						t.Fatalf("unsupported evidence carries content claims: %+v", before)
+					}
+				} else if before.Algorithm != "sha256" || len(before.Digest) != 64 || before.Digest != strings.ToLower(before.Digest) {
+					t.Fatalf("complete terminal evidence lacks a trusted digest: %+v", before)
 				}
-				assertEvidenceTargetStatus(t, first.Scan.EvidenceCoverage, before.ID, model.EvidenceUnsupported)
+				assertEvidenceTargetStatus(t, first.Scan.EvidenceCoverage, before.ID, testCase.wantStatus)
 				assertPrivacyBoundary(t, first)
 				return
 			}
@@ -639,8 +641,8 @@ func dockerProbeFixture(t *testing.T, home string) (platform.Runner, platform.Ex
 		}
 	}
 	runner := &matrixRunner{results: map[string]platform.CommandResult{
-		matrixCommandKey(dockerPath, "image", "ls", "--format", "{{json .}}"): {
-			Stdout: `{"Repository":"demo-image","Tag":"1.0.0","ID":"sha256:` + strings.Repeat("c", 12) + `"}` + "\n",
+		matrixCommandKey(dockerPath, "image", "ls", "--no-trunc", "--format", "{{json .}}"): {
+			Stdout: `{"Repository":"demo-image","Tag":"1.0.0","ID":"sha256:` + strings.Repeat("c", 64) + `"}` + "\n",
 		},
 	}, errors: map[string]error{}}
 	return runner, inspector

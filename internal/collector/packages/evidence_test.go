@@ -109,6 +109,37 @@ func TestPackageEvidenceTargetsUseDockerAndPackageIdentitiesOnly(t *testing.T) {
 	}
 }
 
+func TestPackageAssetsAreConnectedToTheirVerifiedProbeExecutable(t *testing.T) {
+	got := collectWithFakeProbes(t)
+	assets := make(map[string]model.Asset, len(got.Assets))
+	observations := make(map[string]model.Observation, len(got.Observations))
+	for _, asset := range got.Assets {
+		assets[asset.ID] = asset
+	}
+	for _, observation := range got.Observations {
+		observations[observation.ID] = observation
+	}
+	want := make(map[model.Relationship]struct{})
+	for _, observation := range got.Observations {
+		if assets[observation.AssetID].Type != model.AssetPackage {
+			continue
+		}
+		executable := observations[observation.Metadata["executable_observation_id"]]
+		if assets[executable.AssetID].Type != model.AssetTool {
+			t.Fatalf("package observation has no verified executable endpoint: %+v", observation)
+		}
+		want[model.Relationship{From: observation.AssetID, Kind: model.RelationshipProbedBy, To: executable.AssetID}] = struct{}{}
+	}
+	if len(got.Relationships) != len(want) {
+		t.Fatalf("relationships=%+v want=%+v", got.Relationships, want)
+	}
+	for _, relationship := range got.Relationships {
+		if _, ok := want[relationship]; !ok {
+			t.Fatalf("unexpected relationship=%+v want=%+v", relationship, want)
+		}
+	}
+}
+
 func TestPackageToolObservationsReceiveNoEvidenceTarget(t *testing.T) {
 	got := collectWithFakeProbes(t)
 	assets := make(map[string]model.Asset, len(got.Assets))
