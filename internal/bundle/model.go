@@ -101,6 +101,10 @@ type Retention struct {
 }
 
 func Load(raw []byte, now time.Time) (Envelope, error) {
+	return loadEnvelope(raw, &now)
+}
+
+func loadEnvelope(raw []byte, now *time.Time) (Envelope, error) {
 	if len(raw) == 0 || len(raw) > maxBundleBytes || hasDuplicateObjectKey(raw) {
 		return Envelope{}, ErrMalformed
 	}
@@ -112,7 +116,10 @@ func Load(raw []byte, now time.Time) (Envelope, error) {
 		envelope.Version == "" || len(envelope.Version) > 128 || envelope.Sequence == 0 ||
 		envelope.KeyID == "" || len(envelope.KeyID) > 128 || envelope.GeneratedAt.IsZero() ||
 		envelope.ValidFrom.IsZero() || envelope.ValidUntil.IsZero() ||
-		envelope.ValidUntil.Before(envelope.ValidFrom) || now.Before(envelope.ValidFrom) || now.After(envelope.ValidUntil) {
+		envelope.ValidUntil.Before(envelope.ValidFrom) {
+		return Envelope{}, ErrMalformed
+	}
+	if now != nil && (now.Before(envelope.ValidFrom) || now.After(envelope.ValidUntil)) {
 		return Envelope{}, ErrMalformed
 	}
 	switch envelope.Family {

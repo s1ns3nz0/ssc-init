@@ -22,7 +22,16 @@ type Verified struct {
 
 func (v Verifier) Verify(raw, signature []byte, now time.Time) (Verified, error) {
 	envelope, err := Load(raw, now)
-	if err != nil || len(signature) != ed25519.SignatureSize {
+	return v.verify(raw, signature, envelope, err)
+}
+
+func (v Verifier) verifyStored(raw, signature []byte) (Verified, error) {
+	envelope, err := loadEnvelope(raw, nil)
+	return v.verify(raw, signature, envelope, err)
+}
+
+func (v Verifier) verify(raw, signature []byte, envelope Envelope, loadErr error) (Verified, error) {
+	if loadErr != nil || len(signature) != ed25519.SignatureSize {
 		return Verified{}, ErrVerification
 	}
 	publicKey := v.Keys[envelope.Family][envelope.KeyID]
