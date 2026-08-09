@@ -78,7 +78,7 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 			digests[name] = sha256.Sum256(content)
 		}
 		assertNativeVersion(t, repositoryRoot, wantVersion)
-		assertNativeIsolatedStatusV5(t, repositoryRoot)
+		assertNativeIsolatedStatusV7(t, repositoryRoot)
 		return digests
 	}
 
@@ -600,10 +600,10 @@ func assertNativeVersion(t *testing.T, repositoryRoot, want string) {
 	}
 }
 
-// assertNativeIsolatedStatusV5 smokes the release binary's status contract
-// against an isolated HOME: the v5 schema version must be reported, no
+// assertNativeIsolatedStatusV7 smokes the release binary's status contract
+// against an isolated HOME: the v7 schema version must be reported, no
 // baseline may be claimed, and state must be created only inside that home.
-func assertNativeIsolatedStatusV5(t *testing.T, repositoryRoot string) {
+func assertNativeIsolatedStatusV7(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	if runtime.GOOS != "darwin" || (runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64") {
 		t.Skip("native Darwin status smoke test")
@@ -629,7 +629,7 @@ func assertNativeIsolatedStatusV5(t *testing.T, repositoryRoot string) {
 	if err := json.Unmarshal(output, &result); err != nil {
 		t.Fatalf("decode native status output: %v\n%s", err, output)
 	}
-	if result.SchemaVersion != "ssc-init.status.v6" || result.Initialized {
+	if result.SchemaVersion != "ssc-init.status.v7" || result.Initialized {
 		t.Fatalf("native isolated status=%+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(isolatedHome, "Library", "Application Support", "SSC Init", "state.db")); err != nil {
