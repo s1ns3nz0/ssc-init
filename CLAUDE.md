@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-SSC Init (`ssc-init`) is a standalone, dependency-minimized, CGO-free, Darwin-only Go binary for developer supply-chain inventory and bounded local content evidence. It is snapshot-based and local-first, and explicitly not an EDR: no daemon, no kernel sensor, no continuous monitoring, and no scan result is a guarantee that an asset is safe. This build performs no content analysis and has no threat intelligence, so it produces no malware verdicts and blocks nothing — those are designed (foundation design §7.3, §9.1, §9.4) but unbuilt, so state the limitation as current capability rather than as a permanent principle. Missing or failed coverage stays visible instead of being treated as success. All commands emit JSON (`scan --baseline` and `status` also accept `--pretty` for human summary tables). State lives at `$HOME/Library/Application Support/SSC Init/state.db`.
+SSC Init (`ssc-init`) is a standalone, dependency-minimized, CGO-free, Darwin-only Go binary for developer supply-chain inventory, bounded local analysis, verified local TI/organization bundles, advisory host feedback, reversible quarantine, and opt-in daily scheduling. It is snapshot-based and local-first, and explicitly not an EDR: no daemon, no kernel sensor, no continuous monitoring, no automatic blocking, and no scan result is a guarantee that an asset is safe. Missing, stale, or failed coverage stays visible instead of being treated as success. State lives at `$HOME/Library/Application Support/SSC Init/state.db`.
 
 ## Commands
 
@@ -22,7 +22,7 @@ go mod download && sh scripts/build-darwin.sh          # release build → dist/
 The release build script disables network/toolchain downloads and requires a clean tracked worktree; binaries report the exact `v*` tag when HEAD is tagged, else `dev+git.<full-commit>` from committed HEAD.
 
 The reproducible release set is the two architecture slices, universal binary,
-`checksums.txt`, CycloneDX SBOM, and provenance statement. Developer ID signing
+three native adapter ZIPs, `checksums.txt`, CycloneDX SBOM, and provenance statement. Developer ID signing
 and `.dmg` notarization/stapling are separate because Apple's secure timestamp
 makes signed bytes non-reproducible. The current GitHub artifact may remain the
 reproducible unsigned universal binary. A stapled `ssc-init-darwin.dmg` is a
@@ -43,6 +43,10 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - `internal/install` — the only default product path that executes a supplied binary, solely for a bounded doctor health check; it is never reachable from scanning. The current-version pointer is a regular file, never a symlink, and every read re-validates it.
 - `internal/policy` — pure evaluation over already-recorded inventory facts. It must not read the host, run processes, open sockets, or import `internal/report`.
 - `internal/bundle` — closed TI/organization schemas, family-scoped Ed25519 verification, monotonic sequence protection, atomic stage/activate/rollback, and freshness state. It never fetches a bundle; production trust roots are an explicit reviewed input.
+- `internal/analyzer`, `internal/finding` — bounded facts and deterministic shared verdicts; adapters never invent or alter severity/action/rule identity.
+- `internal/adapter` and `adapters/{claude,codex,cursor}` — closed host contracts and native advisory packages over the one GitHub-installed core.
+- `internal/quarantine` — preview-bound, descriptor-rooted reversible file quarantine with identity-drift and collision refusal.
+- `internal/schedule` — one explicit, atomic, idempotent launchd job shared by every adapter.
 - `internal/inventory` — owns both inventory diffing and the shared change-ladder classifier; report code only renders its result.
 - `internal/acceptance` — isolated-home end-to-end fixtures.
 
@@ -54,12 +58,12 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - Default scans execute no process and perform no network access; discovered content is never executed.
 - Cancellation/deadline errors propagate and clear partial runtime state; hostile targets are isolated from safe siblings.
 - No new runtime dependency without revising the plan first. Deterministic input produces byte-identical report JSON and snapshot state.
-- Policy precedence always exposes five levels. Levels 1–3 remain present but inert in this build, with explicit reasons: no threat-intelligence evidence and no verified organization bundle.
-- `policy_pins`, `policy_exceptions`, and `policy_decisions` are independent local state and carry no `scan_id`. No policy field may enter the `ssc-init.scan.v6` or `ssc-init.status.v6` contracts.
+- Policy precedence always exposes five levels; verified TI and organization evidence fail closed when missing, stale, invalid, or inapplicable.
+- `policy_pins`, `policy_exceptions`, and `policy_decisions` are independent local state and carry no `scan_id`. No policy field may enter inventory snapshot contracts.
 
 ## Completed work
 
-The current public contracts are `ssc-init.scan.v6` / `ssc-init.status.v6`; v1–v4 snapshots load as `legacyInventory: true` without upgrading historical claims. The local content evidence core remains documented at:
+The current public contracts are `ssc-init.scan.v7` / `ssc-init.status.v7`; earlier snapshots load as legacy inventory without upgrading historical claims. The local content evidence core remains documented at:
 
 - design: `docs/superpowers/specs/2026-08-07-local-content-evidence-core-design.md`
 - plan: `docs/superpowers/plans/2026-08-07-local-content-evidence-core.md`
@@ -86,7 +90,7 @@ Program I adds bounded shell startup, Git credential-helper, project Git-hook an
 
 Program E adds the network-free verified-bundle core: closed TI and organization-policy payloads, family-scoped Ed25519 signatures, hardened local staging, last-known-good activation/rollback, high-water rollback protection, freshness reporting, CLI commands, rebuildable store indexes, publisher tooling, schemas, and CI gates. The production key registry is deliberately empty pending reviewed public keys; actual publication and scheduled retrieval remain external evidence. Program E does not yet correlate TI into findings or activate organization precedence in policy decisions—Program F owns that decision/reporting layer.
 
-Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include package payload hashing, TI, behavior analysis, verified organization bundles, warnings, blocking, and host adapters.
+Programs F/G/H add shared finding verdicts, bounded analyzers, advisory host packages, reversible quarantine, and explicit launchd scheduling. Native adapters use the installed core and never bundle an unsigned executable or maintain separate state. Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include broader package/language coverage, production bundle publication, automatic host blocking, and optional Apple signing/notarization.
 
 Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set. For multi-task plans, SDD conventions apply: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; review fixes need a reproducing failing test first; adversarial/race-prone suites re-verified with `-count=50`.
 

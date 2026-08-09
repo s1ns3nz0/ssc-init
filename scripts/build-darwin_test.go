@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
@@ -95,17 +96,59 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(checksums)), "\n")
-	if len(lines) != 4 ||
-		!strings.HasSuffix(lines[0], "  dist/sbom.cdx.json") ||
-		!strings.HasSuffix(lines[1], "  dist/ssc-init-darwin-amd64") ||
-		!strings.HasSuffix(lines[2], "  dist/ssc-init-darwin-arm64") ||
-		!strings.HasSuffix(lines[3], "  dist/ssc-init-darwin-universal") {
+	wantChecksumFiles := []string{
+		"dist/sbom.cdx.json",
+		"dist/ssc-init-adapter-claude.zip",
+		"dist/ssc-init-adapter-codex.zip",
+		"dist/ssc-init-adapter-cursor.zip",
+		"dist/ssc-init-darwin-amd64",
+		"dist/ssc-init-darwin-arm64",
+		"dist/ssc-init-darwin-universal",
+	}
+	if len(lines) != len(wantChecksumFiles) {
 		t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+	}
+	for index, name := range wantChecksumFiles {
+		if !strings.HasSuffix(lines[index], "  "+name) {
+			t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
+		}
+	}
+}
+
+func TestAdapterPackagerEmitsNativePackagesWithoutExecutables(t *testing.T) {
+	repositoryRoot := repositoryRoot(t)
+	distribution := t.TempDir()
+	command := exec.Command("go", "run", filepath.Join(repositoryRoot, "scripts", "package-adapters.go"), filepath.Join(repositoryRoot, "adapters"), distribution)
+	command.Env = environmentWith("SOURCE_DATE_EPOCH", "0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("package failed: %v\n%s", err, output)
+	}
+	for _, host := range []string{"claude", "codex", "cursor"} {
+		archive, err := zip.OpenReader(filepath.Join(distribution, "ssc-init-adapter-"+host+".zip"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundManifest, foundCapabilities := false, false
+		for _, entry := range archive.File {
+			if filepath.IsAbs(entry.Name) || strings.Contains(entry.Name, "..") || entry.Mode()&0o111 != 0 {
+				archive.Close()
+				t.Fatalf("unsafe %s entry %q mode=%v", host, entry.Name, entry.Mode())
+			}
+			foundManifest = foundManifest || strings.HasSuffix(entry.Name, "-plugin/plugin.json")
+			foundCapabilities = foundCapabilities || strings.HasSuffix(entry.Name, "/ssc-init-capabilities.json")
+		}
+		archive.Close()
+		if !foundManifest || !foundCapabilities {
+			t.Fatalf("host=%s manifest=%v capabilities=%v", host, foundManifest, foundCapabilities)
+		}
 	}
 }
 
 // releaseArtifactNames is every file a release build writes into dist/.
 var releaseArtifactNames = []string{
+	"ssc-init-adapter-claude.zip",
+	"ssc-init-adapter-codex.zip",
+	"ssc-init-adapter-cursor.zip",
 	"ssc-init-darwin-amd64",
 	"ssc-init-darwin-arm64",
 	"ssc-init-darwin-universal",

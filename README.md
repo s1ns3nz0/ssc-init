@@ -4,7 +4,7 @@
 
 SSC Init is an open-source, snapshot-based inventory tool for the developer supply chain. The current build provides macOS local inventory within versioned developer-tool catalogs and configured project roots, records a local baseline with bounded local content evidence, and reports explicit target and evidence coverage.
 
-This tool is not an EDR. There is no daemon, kernel sensor, or arbitrary personal-file scan, and it does not continuously monitor processes or files. No scan result is a guarantee that an asset is safe. This build performs no content analysis and has no threat intelligence, so it produces no malware verdicts and blocks nothing. Missing or failed coverage remains visible instead of being silently treated as success.
+This tool is not an EDR. There is no daemon, kernel sensor, or arbitrary personal-file scan, and it does not continuously monitor processes or files. No scan result is a guarantee that an asset is safe. The current build performs bounded local analysis and can consume explicitly installed, verified threat-intelligence and organization-policy bundles, but it blocks nothing automatically. Missing, stale, or failed coverage remains visible instead of being silently treated as success.
 
 ## Current coverage
 
@@ -23,7 +23,7 @@ The baseline collector inventories and, where a bounded local implementation exi
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Broader package payload hashing, Git-managed policy compilation, host adapters, warnings, and blocking remain later programs. Bounded version ranges, mutable-reference signals, dangerous-API/obfuscation facts, and narrow credential-to-network flows are implemented over sealed content; they retain only closed facts and explicit coverage, never source bytes or paths. Finding JSON, privacy-safe SARIF, inventory CycloneDX, and explicit HTTPS webhook delivery are implemented; no command claims host enforcement. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
+Broader package payload hashing, Git-managed policy compilation, and automatic blocking remain later programs. Bounded version ranges, mutable-reference signals, dangerous-API/obfuscation facts, and narrow credential-to-network flows are implemented over sealed content; they retain only closed facts and explicit coverage, never source bytes or paths. Finding JSON, privacy-safe SARIF, inventory CycloneDX, explicit HTTPS webhook delivery, advisory Claude/Codex/Cursor packages, reversible quarantine, and one opt-in daily schedule are implemented. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
 
 ## Commands
 
@@ -49,10 +49,14 @@ ssc-init bundle rollback --family ti --json
 ssc-init findings --json
 ssc-init findings --pretty
 ssc-init findings --json --webhook https://security.example.invalid/ssc-init
+ssc-init adapter evaluate --json
 ssc-init quarantine preview --asset-id <canonical-id> --observation-id <canonical-id> --evidence-id <canonical-id> --json
 ssc-init quarantine apply --asset-id <canonical-id> --observation-id <canonical-id> --evidence-id <canonical-id> --approval-id <preview-approval-id> --json
 ssc-init quarantine restore-preview --record-id <quarantine-record-id> --json
 ssc-init quarantine restore-apply --record-id <quarantine-record-id> --approval-id <preview-approval-id> --json
+ssc-init schedule preview --json
+ssc-init schedule install --json
+ssc-init schedule remove --json
 ```
 
 `doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
@@ -88,6 +92,17 @@ current file mode. `apply` re-reads and re-verifies all of them, so a changed
 file requires a new preview. Restore follows the same two-step rule and never
 overwrites an existing destination. Quarantine is reversible and never deletes
 its managed copy automatically.
+
+The three packages under `adapters/` call the same installed core and declare
+only capabilities their host actually provides. They do not bundle another
+executable or keep another database. Release builds publish deterministic
+`ssc-init-adapter-{claude,codex,cursor}.zip` files beside the core binary.
+
+Scheduling is explicit and shared: `schedule preview` shows the exact daily
+09:00 command, tokenized log locations, and removal command; `install` creates
+one private `launchd` plist; `remove` unloads and removes that exact managed
+job. Repeated or concurrent requests are idempotent, and no adapter installs a
+second scheduler.
 
 State is local-first and stored at:
 
@@ -144,8 +159,8 @@ Pruning frees pages for reuse, but those pages return to the filesystem only whe
 ## Download and verify
 
 The current GitHub distribution can publish the reproducible unsigned
-Universal Binary `ssc-init-darwin-universal` with `checksums.txt`,
-`sbom.cdx.json`, and `provenance.json`. Apple Developer membership is not
+Universal Binary `ssc-init-darwin-universal`, three native adapter ZIPs,
+`checksums.txt`, `sbom.cdx.json`, and `provenance.json`. Apple Developer membership is not
 needed to build or publish those files. Verify the downloaded bytes before
 running them:
 
