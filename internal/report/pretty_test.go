@@ -14,7 +14,7 @@ import (
 
 func prettyFixture() (model.ScanResult, model.Inventory, model.Delta) {
 	scan := model.ScanResult{
-		SchemaVersion: "ssc-init.scan.v3",
+		SchemaVersion: "ssc-init.scan.v4",
 		ScanID:        "00000000-0000-4000-8000-000000000001",
 		Status:        "partial",
 		StartedAt:     time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC),
@@ -78,7 +78,7 @@ func TestWritePrettyRendersDeterministicBaselineTables(t *testing.T) {
 	output := first.String()
 	for _, want := range []string{
 		"SSC Init baseline scan",
-		"ssc-init.scan.v3",
+		"ssc-init.scan.v4",
 		"00000000-0000-4000-8000-000000000001",
 		"COLLECTOR COVERAGE",
 		"EVIDENCE COVERAGE",
@@ -143,7 +143,7 @@ func TestWriteStatusPrettyNeverPrintsADigestAnchoredAssetIDInIssues(t *testing.T
 	var buffer bytes.Buffer
 	if err := report.WriteStatusPretty(&buffer, report.StatusData{
 		Initialized:            true,
-		InventorySchemaVersion: "ssc-init.scan.v3",
+		InventorySchemaVersion: "ssc-init.scan.v4",
 		EvidenceCoverage:       &model.EvidenceCoverage{Status: model.CoveragePartial},
 		Inventory:              &inventory,
 	}); err != nil {
@@ -160,7 +160,7 @@ func TestWriteStatusPrettyNeverPrintsADigestAnchoredAssetIDInIssues(t *testing.T
 
 func TestWritePrettyHandlesEmptyScanWithoutPlaceholderRows(t *testing.T) {
 	scan := model.ScanResult{
-		SchemaVersion:    "ssc-init.scan.v3",
+		SchemaVersion:    "ssc-init.scan.v4",
 		ScanID:           "00000000-0000-4000-8000-000000000002",
 		Status:           "complete",
 		StartedAt:        time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC),
@@ -221,7 +221,7 @@ func TestWriteStatusPrettyCoversInitializedLegacyAndEmptyStates(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := initialized.String()
-	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v3", "COLLECTOR COVERAGE", "ISSUES", "symlink_rejected"} {
+	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v4", "COLLECTOR COVERAGE", "ISSUES", "symlink_rejected"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("status pretty missing %q:\n%s", want, output)
 		}

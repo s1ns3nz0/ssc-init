@@ -64,7 +64,7 @@ func TestBaselineFixturePersistsWithRealStore(t *testing.T) {
 	if !initialized || !reflect.DeepEqual(latestSnapshot.Inventory, inventory) || !reflect.DeepEqual(latestSnapshot.Scan, result) {
 		t.Fatalf("initialized=%v latest=%#v result=%#v inventory=%#v", initialized, latestSnapshot, result, inventory)
 	}
-	if result.SchemaVersion != "ssc-init.scan.v3" {
+	if result.SchemaVersion != "ssc-init.scan.v4" {
 		t.Fatalf("persisted schema version=%q", result.SchemaVersion)
 	}
 	if latestSnapshot.Inventory.Evidence == nil || len(latestSnapshot.Inventory.Evidence) == 0 {

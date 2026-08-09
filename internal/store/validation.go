@@ -103,15 +103,15 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 		}
 		observationAssets[observation.ID] = observation.AssetID
 	}
-	// Task 13 gating decision: a v3 snapshot always carries one non-zero
+	// Content-evidence snapshots (v3 onward) always carry one non-zero
 	// evidence coverage object and a non-nil evidence slice. Earlier schema
 	// versions predate content evidence and stay valid without either.
-	if scan.SchemaVersion == "ssc-init.scan.v3" {
+	if scan.SchemaVersion == "ssc-init.scan.v3" || scan.SchemaVersion == "ssc-init.scan.v4" {
 		if evidenceCoverageIsZero(scan.EvidenceCoverage) {
-			return errors.New("v3 snapshot requires evidence coverage")
+			return errors.New("evidence snapshot requires evidence coverage")
 		}
 		if inventory.Evidence == nil {
-			return errors.New("v3 snapshot requires an evidence inventory")
+			return errors.New("evidence snapshot requires an evidence inventory")
 		}
 	}
 	evidenceByID := make(map[string]model.ContentEvidence, len(inventory.Evidence))

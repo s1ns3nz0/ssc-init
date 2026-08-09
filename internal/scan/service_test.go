@@ -80,7 +80,7 @@ func TestBaselinePersistsPartialScanAndDiffsPreviousInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v3" {
+	if result.Status != "partial" || result.SchemaVersion != "ssc-init.scan.v4" {
 		t.Fatalf("result=%+v", result)
 	}
 	if len(snapshots.saved) != 1 || snapshots.saved[0].ScanID != result.ScanID {
@@ -141,7 +141,7 @@ func TestBaselineBuildsAndPersistsV3ScopeAndDropsLocalTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SchemaVersion != "ssc-init.scan.v3" || !reflect.DeepEqual(result.Scope, wantScope) {
+	if result.SchemaVersion != "ssc-init.scan.v4" || !reflect.DeepEqual(result.Scope, wantScope) {
 		t.Fatalf("result=%+v", result)
 	}
 	if !reflect.DeepEqual(collectedScope, wantScope) {
@@ -742,7 +742,7 @@ func TestBaselineCollectsEvidenceAfterGraphNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanResult.SchemaVersion != "ssc-init.scan.v3" || len(inventoryResult.Evidence) != 1 || scanResult.EvidenceCoverage.Status != model.CoverageComplete {
+	if scanResult.SchemaVersion != "ssc-init.scan.v4" || len(inventoryResult.Evidence) != 1 || scanResult.EvidenceCoverage.Status != model.CoverageComplete {
 		t.Fatalf("scan=%+v inventory=%+v delta=%+v", scanResult, inventoryResult, delta)
 	}
 	wantDigest := sha256.Sum256([]byte("manifest"))
@@ -761,7 +761,7 @@ func TestBaselineCollectsEvidenceAfterGraphNormalization(t *testing.T) {
 			t.Fatalf("runtime issuer survived: %+v", result)
 		}
 	}
-	if snapshots.saved[0].SchemaVersion != "ssc-init.scan.v3" || !reflect.DeepEqual(snapshots.saved[0].EvidenceCoverage, scanResult.EvidenceCoverage) {
+	if snapshots.saved[0].SchemaVersion != "ssc-init.scan.v4" || !reflect.DeepEqual(snapshots.saved[0].EvidenceCoverage, scanResult.EvidenceCoverage) {
 		t.Fatalf("saved=%+v", snapshots.saved[0])
 	}
 	foundEvidenceChange := false

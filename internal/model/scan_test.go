@@ -87,7 +87,7 @@ func TestScanV3MarshalsNonNilEmptyEvidenceContracts(t *testing.T) {
 		Scan      ScanResult `json:"scan"`
 		Inventory Inventory  `json:"inventory"`
 	}{
-		Scan:      ScanResult{SchemaVersion: "ssc-init.scan.v3", EvidenceCoverage: EvidenceCoverage{Targets: []EvidenceTargetResult{}}},
+		Scan:      ScanResult{SchemaVersion: "ssc-init.scan.v4", EvidenceCoverage: EvidenceCoverage{Targets: []EvidenceTargetResult{}}},
 		Inventory: Inventory{Assets: []Asset{}, Evidence: []ContentEvidence{}, Relationships: []Relationship{}},
 	}
 	encoded, err := json.Marshal(value)

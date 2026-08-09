@@ -629,7 +629,7 @@ func assertNativeIsolatedStatusV3(t *testing.T, repositoryRoot string) {
 	if err := json.Unmarshal(output, &result); err != nil {
 		t.Fatalf("decode native status output: %v\n%s", err, output)
 	}
-	if result.SchemaVersion != "ssc-init.status.v3" || result.Initialized {
+	if result.SchemaVersion != "ssc-init.status.v4" || result.Initialized {
 		t.Fatalf("native isolated status=%+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(isolatedHome, "Library", "Application Support", "SSC Init", "state.db")); err != nil {

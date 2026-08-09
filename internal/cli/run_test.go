@@ -268,6 +268,17 @@ func TestRunVersionReturnsErrorWhenOutputFails(t *testing.T) {
 	}
 }
 
+func TestCurrentStatusContractIsV4(t *testing.T) {
+	app := App{StatusReader: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v4"}, Inventory: model.Inventory{Assets: []model.Asset{}, Evidence: []model.ContentEvidence{}, Relationships: []model.Relationship{}}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"status", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.status.v4"`) || strings.Contains(out.String(), `"legacyInventory":true`) {
+		t.Fatalf("status=%s", out.String())
+	}
+}
+
 func TestRunUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run(context.Background(), []string{"wat"}, &out, &errOut); code != 2 {
@@ -352,7 +363,7 @@ func (d fakeDoctor) Check(context.Context) doctor.Result { return d.result }
 
 func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
 	scanResult := model.ScanResult{
-		SchemaVersion: "ssc-init.scan.v3",
+		SchemaVersion: "ssc-init.scan.v4",
 		ScanID:        "00000000-0000-4000-8000-000000000009",
 		Status:        "partial",
 		Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoveragePartial}},
@@ -391,7 +402,7 @@ func TestScanAndStatusPrettyRenderHumanTablesWithoutJSON(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
 	statusOutput := out.String()
-	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v3", "COLLECTOR COVERAGE", "symlink_rejected"} {
+	for _, want := range []string{"SSC Init status", "initialized", "ssc-init.scan.v4", "COLLECTOR COVERAGE", "symlink_rejected"} {
 		if !strings.Contains(statusOutput, want) {
 			t.Fatalf("status pretty missing %q:\n%s", want, statusOutput)
 		}
@@ -445,7 +456,7 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
-	wantOutput := `{"schemaVersion":"ssc-init.scan.v3",` +
+	wantOutput := `{"schemaVersion":"ssc-init.scan.v4",` +
 		`"scanId":"00000000-0000-4000-8000-000000000001",` +
 		`"status":"partial",` +
 		`"startedAt":"2023-11-14T22:13:20Z",` +
@@ -468,18 +479,18 @@ func TestBaselineJSONReportsPartialCoverageAndPersists(t *testing.T) {
 	if len(snapshots.saved) != 1 {
 		t.Fatal("scan not persisted")
 	}
-	if snapshots.latest.Scan.SchemaVersion != "ssc-init.scan.v3" || len(snapshots.latest.Inventory.Assets) != 1 {
+	if snapshots.latest.Scan.SchemaVersion != "ssc-init.scan.v4" || len(snapshots.latest.Inventory.Assets) != 1 {
 		t.Fatalf("snapshot=%+v", snapshots.latest)
 	}
 }
 
-func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
+func TestStatusJSONHasStableEmptyV1V2V3AndV4Shapes(t *testing.T) {
 	legacyInventory := model.Inventory{
 		Assets:        []model.Asset{{ID: "tool:legacy", Type: model.AssetTool, Name: "legacy"}},
 		Relationships: []model.Relationship{},
 	}
 	emptyInventory := model.Inventory{Assets: []model.Asset{}, Relationships: []model.Relationship{}}
-	v3Inventory := model.Inventory{
+	v4Inventory := model.Inventory{
 		Assets: []model.Asset{}, Evidence: []model.ContentEvidence{}, Relationships: []model.Relationship{},
 	}
 	scanScope := model.ScanScope{
@@ -494,7 +505,7 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 		{
 			name:      "empty",
 			snapshots: &cliMemorySnapshots{},
-			want:      "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":false}\n",
+			want:      "{\"schemaVersion\":\"ssc-init.status.v4\",\"initialized\":false}\n",
 		},
 		{
 			name: "v1 legacy inventory",
@@ -506,7 +517,7 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 				},
 				Inventory: legacyInventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v1\",\"legacyInventory\":true,\"inventory\":{\"assets\":[{\"id\":\"tool:legacy\",\"type\":\"tool\",\"name\":\"legacy\"}],\"evidence\":null,\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v4\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v1\",\"legacyInventory\":true,\"inventory\":{\"assets\":[{\"id\":\"tool:legacy\",\"type\":\"tool\",\"name\":\"legacy\"}],\"evidence\":null,\"relationships\":[]}}\n",
 		},
 		{
 			name: "v2 legacy inventory",
@@ -521,22 +532,30 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 				},
 				Inventory: emptyInventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v2\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":null,\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v4\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v2\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":null,\"relationships\":[]}}\n",
 		},
 		{
-			name: "v3 provenance",
+			name: "v3 legacy evidence inventory",
+			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
+				Scan:      model.ScanResult{SchemaVersion: "ssc-init.scan.v3"},
+				Inventory: v4Inventory,
+			}},
+			want: "{\"schemaVersion\":\"ssc-init.status.v4\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v3\",\"legacyInventory\":true,\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
+		},
+		{
+			name: "v4 provenance",
 			snapshots: &cliMemorySnapshots{hasLatest: true, latest: model.Snapshot{
 				Scan: model.ScanResult{
-					SchemaVersion: "ssc-init.scan.v3",
+					SchemaVersion: "ssc-init.scan.v4",
 					Scope:         scanScope,
 					Coverage:      []model.CollectorResult{{Collector: "agents", Status: model.CoverageComplete}},
 					EvidenceCoverage: model.EvidenceCoverage{
 						Status: model.CoverageComplete, Targets: []model.EvidenceTargetResult{},
 					},
 				},
-				Inventory: v3Inventory,
+				Inventory: v4Inventory,
 			}},
-			want: "{\"schemaVersion\":\"ssc-init.status.v3\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v3\",\"scope\":{\"platform\":\"darwin\",\"catalogVersion\":\"ssc-init.catalog.v1\",\"projectRoots\":[\"$HOME/Projects\"],\"externalProbes\":false},\"coverage\":[{\"collector\":\"agents\",\"status\":\"complete\"}],\"evidenceCoverage\":{\"status\":\"complete\",\"targets\":[]},\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
+			want: "{\"schemaVersion\":\"ssc-init.status.v4\",\"initialized\":true,\"inventorySchemaVersion\":\"ssc-init.scan.v4\",\"scope\":{\"platform\":\"darwin\",\"catalogVersion\":\"ssc-init.catalog.v1\",\"projectRoots\":[\"$HOME/Projects\"],\"externalProbes\":false},\"coverage\":[{\"collector\":\"agents\",\"status\":\"complete\"}],\"evidenceCoverage\":{\"status\":\"complete\",\"targets\":[]},\"inventory\":{\"assets\":[],\"evidence\":[],\"relationships\":[]}}\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -776,7 +795,7 @@ func TestHookPassesFirstRunToTheRenderer(t *testing.T) {
 
 func TestHookIsAdvisoryAcrossDriftCleanAndFailure(t *testing.T) {
 	drift := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-plugin:claude:alpha@1.0.0"}}}
-	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}
+	scan := model.ScanResult{SchemaVersion: "ssc-init.scan.v4"}
 	// A scan diffs the snapshot it just wrote, so the added asset is in the
 	// inventory it hands the renderer. A second asset keeps the delta from
 	// looking like an initial baseline.

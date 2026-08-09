@@ -22,7 +22,7 @@ type baselinePayload struct {
 	Delta            model.Delta             `json:"delta"`
 }
 
-// inventoryPayload keeps the v3 baseline inventory contract explicit: every
+// inventoryPayload keeps the v4 baseline inventory contract explicit: every
 // graph slice is always present, including empty observation and evidence
 // slices that model.Inventory would otherwise omit.
 type inventoryPayload struct {

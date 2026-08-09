@@ -52,11 +52,11 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - Cancellation/deadline errors propagate and clear partial runtime state; hostile targets are isolated from safe siblings.
 - No new runtime dependency without revising the plan first. Deterministic input produces byte-identical report JSON and snapshot state.
 - Policy precedence always exposes five levels. Levels 1–3 remain present but inert in this build, with explicit reasons: no threat-intelligence evidence and no verified organization bundle.
-- `policy_pins`, `policy_exceptions`, and `policy_decisions` are independent local state and carry no `scan_id`. No policy field may enter the `ssc-init.scan.v3` or `ssc-init.status.v3` contracts.
+- `policy_pins`, `policy_exceptions`, and `policy_decisions` are independent local state and carry no `scan_id`. No policy field may enter the `ssc-init.scan.v4` or `ssc-init.status.v4` contracts.
 
 ## Completed work
 
-The local content evidence core (Tasks 1–14) is merged to `master`; the full suite, race detector, vet, static audits, and release build all pass. Public contracts are `ssc-init.scan.v3` / `ssc-init.status.v3`; v1/v2 snapshots load as `legacyInventory: true` with no evidence claims. Reference docs:
+The local content evidence core (Tasks 1–14) is merged to `master`; the full suite, race detector, vet, static audits, and release build all pass. Public contracts are `ssc-init.scan.v4` / `ssc-init.status.v4`; v1/v2 snapshots load as `legacyInventory: true` with no evidence claims. Reference docs:
 
 - design: `docs/superpowers/specs/2026-08-07-local-content-evidence-core-design.md`
 - plan: `docs/superpowers/plans/2026-08-07-local-content-evidence-core.md`

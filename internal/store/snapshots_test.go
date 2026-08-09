@@ -2562,7 +2562,7 @@ func TestMigration6AddsAssetHistoryAndPreservesExistingSnapshots(t *testing.T) {
 		{"legacy-old", earlier, []string{"legacy-asset", "legacy-gone"}},
 		{"legacy-new", later, []string{"legacy-asset"}},
 	} {
-		if _, err := db.Exec(`INSERT INTO scans(id, schema_version, status, started_at, finished_at, scope_json) VALUES (?, 'ssc-init.scan.v3', 'complete', ?, ?, '{}')`,
+		if _, err := db.Exec(`INSERT INTO scans(id, schema_version, status, started_at, finished_at, scope_json) VALUES (?, 'ssc-init.scan.v4', 'complete', ?, ?, '{}')`,
 			existing.scanID, formatTime(existing.finishedAt.Add(-time.Second)), formatTime(existing.finishedAt)); err != nil {
 			db.Close()
 			t.Fatal(err)

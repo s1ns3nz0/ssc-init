@@ -44,7 +44,7 @@ func (scanner policyAcceptanceScanner) Baseline(context.Context) (model.ScanResu
 func TestPolicyNeverEntersTheScanContract(t *testing.T) {
 	now := time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)
 	scanner := policyAcceptanceScanner{
-		scan:      model.ScanResult{SchemaVersion: "ssc-init.scan.v3", ScanID: "scan-isolated", Status: model.ScanComplete, StartedAt: now, FinishedAt: now},
+		scan:      model.ScanResult{SchemaVersion: "ssc-init.scan.v4", ScanID: "scan-isolated", Status: model.ScanComplete, StartedAt: now, FinishedAt: now},
 		inventory: model.Inventory{Assets: []model.Asset{}, Observations: []model.Observation{}, Evidence: []model.ContentEvidence{}, Relationships: []model.Relationship{}, Errors: []model.CoverageError{}},
 		delta:     model.Delta{Changes: []model.Change{}},
 	}
@@ -115,7 +115,7 @@ func TestPolicyLifecycleAgainstAnIsolatedHome(t *testing.T) {
 
 func policySnapshotAt(assetID, projectID, digest string, at time.Time) model.Snapshot {
 	return model.Snapshot{
-		Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v3", ScanID: "scan-1", Status: model.ScanComplete, FinishedAt: at},
+		Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v4", ScanID: "scan-1", Status: model.ScanComplete, FinishedAt: at},
 		Inventory: model.Inventory{
 			Assets:       []model.Asset{{ID: assetID, Type: model.AssetAgentPlugin, Name: "helpful-utils", Version: "1.0.0", Source: "claude"}},
 			Observations: []model.Observation{{AssetID: assetID, ProjectID: projectID}},

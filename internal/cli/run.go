@@ -162,18 +162,18 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to read status")
 			return 1
 		}
-		status := statusPayload{SchemaVersion: "ssc-init.status.v3", Initialized: initialized}
+		status := statusPayload{SchemaVersion: "ssc-init.status.v4", Initialized: initialized}
 		if initialized {
 			status.InventorySchemaVersion = snapshot.Scan.SchemaVersion
 			status.Inventory = &snapshot.Inventory
-			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v3" {
+			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v4" {
 				scope := snapshot.Scan.Scope
 				status.Scope = &scope
 				status.Coverage = snapshot.Scan.Coverage
 				evidenceCoverage := snapshot.Scan.EvidenceCoverage
 				status.EvidenceCoverage = &evidenceCoverage
 			} else {
-				// v1/v2 snapshots predate content evidence. They keep their
+				// Earlier snapshots predate the complete v4 external-fact contract. They keep their
 				// persisted inventory but never claim scope, coverage, or any
 				// evidence coverage they could not have collected.
 				status.LegacyInventory = true

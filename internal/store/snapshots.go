@@ -520,6 +520,8 @@ type persistedAsset struct {
 	SHA256     string            `json:"sha256,omitempty"`
 	ObservedAt time.Time         `json:"observedAt,omitempty,omitzero"`
 	Metadata   map[string]string `json:"metadata"`
+	Signature  *model.Signature  `json:"signature,omitempty"`
+	Provenance *model.Provenance `json:"provenance,omitempty"`
 }
 
 type persistedTargetCoverage struct {
@@ -562,6 +564,7 @@ func newPersistedCollectorResult(result model.CollectorResult) persistedCollecto
 				ID: asset.ID, Type: asset.Type, Name: asset.Name, Version: asset.Version,
 				Path: asset.Path, Source: asset.Source, SHA256: asset.SHA256,
 				ObservedAt: asset.ObservedAt, Metadata: asset.Metadata,
+				Signature: asset.Signature, Provenance: asset.Provenance,
 			}
 		}
 	}
@@ -602,6 +605,7 @@ func (persisted persistedCollectorResult) modelValue() model.CollectorResult {
 				ID: asset.ID, Type: asset.Type, Name: asset.Name, Version: asset.Version,
 				Path: asset.Path, Source: asset.Source, SHA256: asset.SHA256,
 				ObservedAt: asset.ObservedAt, Metadata: asset.Metadata,
+				Signature: asset.Signature, Provenance: asset.Provenance,
 			}
 		}
 	}
