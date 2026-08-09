@@ -230,6 +230,13 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			app.StatusReader = snapshots
 			app.PolicyStore = policyStore
 			app.Now = time.Now
+			if options.PolicyCommand == "check" {
+				tiManager, policyManager, managerErr := findingManagers(home)
+				if managerErr != nil {
+					return 1
+				}
+				app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: time.Now}
+			}
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "bundle":
@@ -273,6 +280,11 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		app.StatusReader = snapshots
+		tiManager, policyManager, managerErr := findingManagers(home)
+		if managerErr == nil {
+			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "invalid command arguments")
@@ -458,6 +470,22 @@ func loadDeviceID(dataDir string) (string, error) {
 		return "", closeErr
 	}
 	return "device:sha256:" + hex.EncodeToString(random[:]), nil
+}
+
+func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
+	makeManager := func(family bundle.Family) (*bundle.Manager, error) {
+		layout, err := bundle.LayoutFor(home, family)
+		if err != nil {
+			return nil, err
+		}
+		return &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}, nil
+	}
+	ti, err := makeManager(bundle.FamilyTI)
+	if err != nil {
+		return nil, nil, err
+	}
+	organization, err := makeManager(bundle.FamilyPolicy)
+	return ti, organization, err
 }
 
 func scanConfiguration(home string, options cli.Options) (collector.Environment, []collector.Collector, error) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -395,6 +396,16 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
+		previousIDs := map[string]struct{}{}
+		if a.FindingService != nil && a.StatusReader != nil {
+			if previous, ok, loadErr := a.StatusReader.LatestSnapshot(ctx); loadErr == nil && ok {
+				if evaluated, evaluationErr := a.FindingService.Evaluate(ctx, previous.Inventory); evaluationErr == nil {
+					for _, item := range evaluated.Findings {
+						previousIDs[item.ID] = struct{}{}
+					}
+				}
+			}
+		}
 		_, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
@@ -410,7 +421,19 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				policyResult = policy.Result{}
 			}
 		}
-		if err := report.WriteHookSummary(stdout, inventory, delta, firstRun, policyResult); err != nil {
+		var newFindings []model.Finding
+		if a.FindingService != nil {
+			if evaluated, evaluationErr := a.FindingService.Evaluate(ctx, inventory); evaluationErr == nil {
+				for _, item := range evaluated.Findings {
+					if _, standing := previousIDs[item.ID]; !standing {
+						newFindings = append(newFindings, item)
+					}
+				}
+			} else {
+				fmt.Fprintln(stderr, "ssc-init hook: finding evaluation failed")
+			}
+		}
+		if err := report.WriteHookSummaryFindings(stdout, inventory, delta, firstRun, newFindings, policyResult); err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
@@ -567,6 +590,40 @@ func (a App) runPolicyCheck(ctx context.Context, options Options, stdout, stderr
 		return 2
 	}
 	result := policy.Evaluate(policy.Input{Sources: sources, Inventory: snapshot.Inventory, Pins: pins, Exceptions: exceptions, Now: now})
+	criticalDecision := false
+	if a.FindingService != nil {
+		evaluated, evaluationErr := a.FindingService.Evaluate(ctx, snapshot.Inventory)
+		if evaluationErr != nil {
+			fmt.Fprintln(stderr, "failed to evaluate verified findings")
+			return 1
+		}
+		assets := make(map[string]model.Asset, len(snapshot.Inventory.Assets))
+		for _, asset := range snapshot.Inventory.Assets {
+			assets[asset.ID] = asset
+		}
+		for _, item := range evaluated.Findings {
+			if item.Level > 3 || item.Action == model.ActionAllowed || item.Action == model.ActionExcepted {
+				continue
+			}
+			ruleID := "verified-finding"
+			if len(item.RuleIDs) > 0 {
+				ruleID = item.RuleIDs[0]
+			} else if len(item.IntelligenceIDs) > 0 {
+				ruleID = item.IntelligenceIDs[0]
+			}
+			asset := assets[item.AssetID]
+			result.Violations = append(result.Violations, policy.Violation{RuleID: ruleID, Level: item.Level, AssetID: item.AssetID, AssetType: string(item.AssetType), AssetName: asset.Name})
+			if item.Verdict == model.VerdictKnownMalicious || item.Level == 2 {
+				criticalDecision = true
+			}
+		}
+	}
+	sort.Slice(result.Violations, func(i, j int) bool {
+		if result.Violations[i].RuleID != result.Violations[j].RuleID {
+			return result.Violations[i].RuleID < result.Violations[j].RuleID
+		}
+		return result.Violations[i].AssetID < result.Violations[j].AssetID
+	})
 	standing := map[string]bool{}
 	for _, decision := range decisions {
 		standing[decision.RuleID+"\x00"+decision.AssetID] = true
@@ -591,6 +648,9 @@ func (a App) runPolicyCheck(ctx context.Context, options Options, stdout, stderr
 		return 1
 	}
 	if len(result.Violations) > 0 {
+		if criticalDecision {
+			return 4
+		}
 		return 3
 	}
 	return 0

@@ -21,6 +21,14 @@ const maxHookDetailRows = 20
 // recorded zero assets makes the next run look identical — so the caller must
 // pass the fact.
 func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.Delta, firstRun bool, policyResults ...policy.Result) error {
+	return writeHookSummary(writer, inventory, delta, firstRun, nil, policyResults...)
+}
+
+func WriteHookSummaryFindings(writer io.Writer, inventory model.Inventory, delta model.Delta, firstRun bool, findings []model.Finding, policyResults ...policy.Result) error {
+	return writeHookSummary(writer, inventory, delta, firstRun, findings, policyResults...)
+}
+
+func writeHookSummary(writer io.Writer, inventory model.Inventory, delta model.Delta, firstRun bool, findings []model.Finding, policyResults ...policy.Result) error {
 	var policyResult policy.Result
 	if len(policyResults) > 0 {
 		policyResult = policyResults[0]
@@ -34,7 +42,7 @@ func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.D
 			newViolations = append(newViolations, violation)
 		}
 	}
-	if len(delta.Changes) == 0 && len(policyResult.Violations) == 0 {
+	if len(delta.Changes) == 0 && len(policyResult.Violations) == 0 && len(findings) == 0 {
 		return nil
 	}
 	printer := &prettyPrinter{writer: writer}
@@ -80,6 +88,10 @@ func WriteHookSummary(writer io.Writer, inventory model.Inventory, delta model.D
 			label = "violation"
 		}
 		printer.line(fmt.Sprintf("ssc-init: %d policy %s standing (run: ssc-init policy check)", standing, label))
+	}
+	if len(findings) > 0 {
+		printer.line("")
+		printer.line(fmt.Sprintf("ssc-init: %d new verified findings (advisory — run: ssc-init findings --pretty)", len(findings)))
 	}
 	return printer.err
 }

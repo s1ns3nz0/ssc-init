@@ -245,6 +245,23 @@ func TestPolicyCheckExitsThreeOnViolationAndNamesInertLevels(t *testing.T) {
 	}
 }
 
+func TestPolicyCheckConsumesVerifiedLevelOneFinding(t *testing.T) {
+	document, err := policy.Load(policy.Starter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	snapshots.latest.Scan.ScanID = "scan-verified"
+	store := &memoryPolicyStore{}
+	asset := snapshots.latest.Inventory.Assets[0]
+	verified := model.Finding{ID: "finding:verified", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"ti:verified"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	app := App{StatusReader: snapshots, PolicyStore: store, PolicyDocument: document, FindingService: fakeFindingService{result: finding.Result{Findings: []model.Finding{verified}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check", "--json"}, &out, &errOut); code != 4 || len(store.recorded) != 1 || store.recorded[0].Level != 1 {
+		t.Fatalf("code=%d recorded=%+v err=%q", code, store.recorded, errOut.String())
+	}
+}
+
 func TestPolicyCheckExitsTwoOnAnUnloadableDocument(t *testing.T) {
 	app := App{PolicyLoadError: errors.New("rules[0].family: unknown rule family")}
 	var out, errOut bytes.Buffer

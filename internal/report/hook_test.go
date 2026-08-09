@@ -178,6 +178,17 @@ func TestWriteHookSummaryIsSilentOnEmptyDelta(t *testing.T) {
 	}
 }
 
+func TestWriteHookSummaryFindingsUsesSeparateAdvisorySection(t *testing.T) {
+	var output bytes.Buffer
+	finding := model.Finding{ID: "finding:new"}
+	if err := report.WriteHookSummaryFindings(&output, model.Inventory{}, model.Delta{}, false, []model.Finding{finding}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "1 new verified findings") || !strings.Contains(got, "advisory") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
 func TestWriteHookSummaryCapsDetailRows(t *testing.T) {
 	var delta model.Delta
 	var inventory model.Inventory
