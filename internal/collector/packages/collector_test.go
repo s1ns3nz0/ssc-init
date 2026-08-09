@@ -36,14 +36,14 @@ func TestPackagesCollectorUsesFixedProbesAndEmitsPackageURLs(t *testing.T) {
 	writeFile(t, filepath.Join(goPath, "bin", "gopls"), "binary")
 
 	runner := &testutil.FakeRunner{Results: map[string]platform.CommandResult{
-		commandKey("npm", "root", "-g"):                               {Stdout: npmRoot + "\n"},
-		commandKey("python3", "-m", "pip", "list", "--format=json"):   {Stdout: `[{"name":"requests","version":"2.32.3"},{"name":"Foo__..Bar","version":"1.0.0"}]`},
-		commandKey("pipx", "list", "--json"):                          {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"},"injected_packages":{"isort":{"package":"isort","package_version":"5.13.2"}}}}}}`},
-		commandKey("uv", "tool", "list"):                              {Stdout: "ruff v0.5.0\n- ruff\n"},
-		commandKey("cargo", "install", "--list"):                      {Stdout: "ripgrep v14.1.0:\n    rg\n"},
-		commandKey("go", "env", "GOPATH"):                             {Stdout: goPath + "\n"},
-		commandKey("brew", "list", "--versions"):                      {Stdout: "jq 1.7.1\nopenssl@3 3.3.1 3.3.2\n"},
-		commandKey("docker", "image", "ls", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:abc"}` + "\n"},
+		commandKey("npm", "root", "-g"):                                             {Stdout: npmRoot + "\n"},
+		commandKey("python3", "-m", "pip", "list", "--format=json"):                 {Stdout: `[{"name":"requests","version":"2.32.3"},{"name":"Foo__..Bar","version":"1.0.0"}]`},
+		commandKey("pipx", "list", "--json"):                                        {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"},"injected_packages":{"isort":{"package":"isort","package_version":"5.13.2"}}}}}}`},
+		commandKey("uv", "tool", "list"):                                            {Stdout: "ruff v0.5.0\n- ruff\n"},
+		commandKey("cargo", "install", "--list"):                                    {Stdout: "ripgrep v14.1.0:\n    rg\n"},
+		commandKey("go", "env", "GOPATH"):                                           {Stdout: goPath + "\n"},
+		commandKey("brew", "list", "--versions"):                                    {Stdout: "jq 1.7.1\nopenssl@3 3.3.1 3.3.2\n"},
+		commandKey("docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:abc"}` + "\n"},
 	}}
 	env := optInEnvironment(t, home, runner)
 
@@ -71,7 +71,7 @@ func TestPackagesCollectorUsesFixedProbesAndEmitsPackageURLs(t *testing.T) {
 		commandKey("cargo", "install", "--list"),
 		commandKey("go", "env", "GOPATH"),
 		commandKey("brew", "list", "--versions"),
-		commandKey("docker", "image", "ls", "--format", "{{json .}}"),
+		commandKey("docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"),
 	}
 	if !reflect.DeepEqual(runner.Calls, wantCalls) {
 		t.Fatalf("calls=%q want=%q", runner.Calls, wantCalls)
@@ -476,7 +476,7 @@ func TestDockerEvidenceKeepsReportedReferenceWithUnknownLocality(t *testing.T) {
 		errors: missingInspectorErrors("docker"),
 	}
 	runner := &recordingRunner{results: map[string]platform.CommandResult{
-		commandKey(dockerPath, "image", "ls", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:local-only"}` + "\n"},
+		commandKey(dockerPath, "image", "ls", "--no-trunc", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:local-only"}` + "\n"},
 	}}
 	env := testutil.Environment(t, home)
 	env.Scope.ExternalProbes = true
@@ -658,7 +658,7 @@ func TestDockerFailureClassificationIsBoundedEphemeralAndAlwaysVerified(t *testi
 				},
 				errors: missingInspectorErrors("docker"),
 			}
-			key := commandKey(dockerPath, "image", "ls", "--format", "{{json .}}")
+			key := commandKey(dockerPath, "image", "ls", "--no-trunc", "--format", "{{json .}}")
 			runner := &recordingRunner{
 				events: &events, results: map[string]platform.CommandResult{key: testCase.result}, errors: map[string]error{key: testCase.runErr},
 			}
@@ -992,6 +992,38 @@ func TestDockerMalformedNDJSONLinePreservesValidSiblingsAndReportsLoss(t *testin
 	}
 }
 
+func TestParseDockerTrustsOnlyAFullLowercaseImageID(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	assets, err := parseDocker(context.Background(), collector.Environment{}, `{"Repository":"alpine","Tag":"3.20","ID":"sha256:`+digest+`"}`+"\n")
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("assets=%+v err=%v", assets, err)
+	}
+	if assets[0].SHA256 != digest || assets[0].Provenance == nil || assets[0].Provenance.Status != model.ProvenanceImmutable || assets[0].Provenance.Integrity != "sha256:"+digest {
+		t.Fatalf("full identity was not trusted: %+v", assets[0])
+	}
+	for _, id := range []string{"sha256:abc", "sha256:" + strings.Repeat("A", 64), digest, "sha512:" + digest} {
+		assets, err := parseDocker(context.Background(), collector.Environment{}, `{"Repository":"alpine","Tag":"3.20","ID":"`+id+`"}`+"\n")
+		if err != nil || len(assets) != 1 {
+			t.Fatalf("id=%q assets=%+v err=%v", id, assets, err)
+		}
+		if assets[0].SHA256 != "" || assets[0].Provenance == nil || assets[0].Provenance.Status != model.ProvenanceUnknown || assets[0].Provenance.Integrity != "" {
+			t.Fatalf("untrusted ID became immutable: id=%q asset=%+v", id, assets[0])
+		}
+	}
+}
+
+func TestDockerProbeRequestsUntruncatedImageIDs(t *testing.T) {
+	for _, probe := range probes() {
+		if probe.targetID == dockerProbeTargetID {
+			if !reflect.DeepEqual(probe.args, []string{"image", "ls", "--no-trunc", "--format", "{{json .}}"}) {
+				t.Fatalf("docker args=%q", probe.args)
+			}
+			return
+		}
+	}
+	t.Fatal("docker probe missing")
+}
+
 func TestNPMManifestFIFOIsRejectedWithoutBlockingAndValidSiblingSurvives(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "node_modules")
@@ -1268,7 +1300,7 @@ func missingRunner() *testutil.FakeRunner {
 		{"cargo", "install", "--list"},
 		{"go", "env", "GOPATH"},
 		{"brew", "list", "--versions"},
-		{"docker", "image", "ls", "--format", "{{json .}}"},
+		{"docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"},
 	} {
 		errorsByCommand[commandKey(command[0], command[1:]...)] = exec.ErrNotFound
 	}

@@ -166,14 +166,14 @@ func collectWithFakeProbes(t *testing.T) model.CollectorResult {
 	writeFile(t, filepath.Join(goPath, "bin", "gopls"), "binary")
 
 	runner := &testutil.FakeRunner{Results: map[string]platform.CommandResult{
-		commandKey("npm", "root", "-g"):                               {Stdout: npmRoot + "\n"},
-		commandKey("python3", "-m", "pip", "list", "--format=json"):   {Stdout: `[{"name":"requests","version":"2.32.3"}]`},
-		commandKey("pipx", "list", "--json"):                          {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"}}}}}`},
-		commandKey("uv", "tool", "list"):                              {Stdout: "ruff v0.5.0\n"},
-		commandKey("cargo", "install", "--list"):                      {Stdout: "ripgrep v14.1.0:\n    rg\n"},
-		commandKey("go", "env", "GOPATH"):                             {Stdout: goPath + "\n"},
-		commandKey("brew", "list", "--versions"):                      {Stdout: "jq 1.7.1\n"},
-		commandKey("docker", "image", "ls", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:abc"}` + "\n"},
+		commandKey("npm", "root", "-g"):                                             {Stdout: npmRoot + "\n"},
+		commandKey("python3", "-m", "pip", "list", "--format=json"):                 {Stdout: `[{"name":"requests","version":"2.32.3"}]`},
+		commandKey("pipx", "list", "--json"):                                        {Stdout: `{"venvs":{"black":{"metadata":{"main_package":{"package":"black","package_version":"24.4.2"}}}}}`},
+		commandKey("uv", "tool", "list"):                                            {Stdout: "ruff v0.5.0\n"},
+		commandKey("cargo", "install", "--list"):                                    {Stdout: "ripgrep v14.1.0:\n    rg\n"},
+		commandKey("go", "env", "GOPATH"):                                           {Stdout: goPath + "\n"},
+		commandKey("brew", "list", "--versions"):                                    {Stdout: "jq 1.7.1\n"},
+		commandKey("docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"): {Stdout: `{"Repository":"alpine","Tag":"3.20","ID":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"},
 	}}
 	got, err := New().Collect(context.Background(), optInEnvironment(t, home, runner))
 	if err != nil {

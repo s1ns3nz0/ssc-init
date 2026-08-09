@@ -333,7 +333,7 @@ func probes() []commandProbe {
 		{targetID: "packages.cargo", ecosystem: "cargo", command: "cargo", args: []string{"install", "--list"}, parse: parseCargo},
 		{targetID: "packages.go", ecosystem: "go", command: "go", args: []string{"env", "GOPATH"}, parse: parseGoPath},
 		{targetID: "packages.homebrew", ecosystem: "homebrew", command: "brew", args: []string{"list", "--versions"}, parse: parseBrew},
-		{targetID: "packages.docker", ecosystem: "docker", command: "docker", args: []string{"image", "ls", "--format", "{{json .}}"}, parse: parseDocker},
+		{targetID: "packages.docker", ecosystem: "docker", command: "docker", args: []string{"image", "ls", "--no-trunc", "--format", "{{json .}}"}, parse: parseDocker},
 	}
 }
 
@@ -859,12 +859,28 @@ func parseDocker(ctx context.Context, _ collector.Environment, stdout string) ([
 			loss = true
 			continue
 		}
-		assets = append(assets, purlAsset("docker", image.Repository, version, "docker"))
+		asset := purlAsset("docker", image.Repository, version, "docker")
+		asset.Provenance = &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "docker", Source: "local-daemon"}
+		if digest, ok := fullDockerImageID(image.ID); ok {
+			asset.SHA256 = digest
+			asset.Provenance.Status = model.ProvenanceImmutable
+			asset.Provenance.Integrity = "sha256:" + digest
+		}
+		assets = append(assets, asset)
 	}
 	if loss {
 		return assets, errParserLoss
 	}
 	return assets, nil
+}
+
+func fullDockerImageID(value string) (string, bool) {
+	digest, ok := strings.CutPrefix(value, "sha256:")
+	if !ok || len(digest) != sha256.Size*2 || digest != strings.ToLower(digest) {
+		return "", false
+	}
+	decoded, err := hex.DecodeString(digest)
+	return digest, err == nil && len(decoded) == sha256.Size
 }
 
 type packageEntryBudget struct {
