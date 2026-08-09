@@ -216,7 +216,87 @@ func validateAsset(asset model.Asset) error {
 	if err := validatePersistenceSafePath("asset path", asset.Path); err != nil {
 		return err
 	}
+	if err := validateSignature(asset.Signature); err != nil {
+		return err
+	}
+	if err := validateProvenance(asset.Provenance); err != nil {
+		return err
+	}
 	return validateMetadata("asset", asset.Metadata)
+}
+
+func validateSignature(signature *model.Signature) error {
+	if signature == nil {
+		return nil
+	}
+	if !signature.Status.Valid() {
+		return errors.New("invalid signature status")
+	}
+	if signature.Status != model.SignatureValid {
+		if signature.Identifier != "" || signature.TeamID != "" {
+			return errors.New("non-valid signature carries identity")
+		}
+		return nil
+	}
+	if !supplyChainToken(signature.Identifier, 255, false) || !supplyChainToken(signature.TeamID, 10, true) || len(signature.TeamID) != 10 {
+		return errors.New("invalid signature identity")
+	}
+	return nil
+}
+
+func validateProvenance(provenance *model.Provenance) error {
+	if provenance == nil {
+		return nil
+	}
+	if !provenance.Status.Valid() || !validProvenanceEcosystem(provenance.Ecosystem) {
+		return errors.New("invalid provenance fact")
+	}
+	if provenance.Source != "" && !validProvenanceSource(provenance.Source) {
+		return errors.New("invalid provenance source")
+	}
+	if provenance.Status == model.ProvenanceImmutable {
+		digest, ok := strings.CutPrefix(provenance.Integrity, "sha256:")
+		if !ok || !lowercaseSHA256Hex(digest) {
+			return errors.New("invalid provenance integrity")
+		}
+	} else if provenance.Integrity != "" {
+		return errors.New("non-immutable provenance carries integrity")
+	}
+	return nil
+}
+
+func supplyChainToken(value string, maximum int, uppercaseOnly bool) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for _, character := range []byte(value) {
+		allowed := character >= '0' && character <= '9' || character >= 'A' && character <= 'Z'
+		if !uppercaseOnly {
+			allowed = allowed || character >= 'a' && character <= 'z' || character == '.' || character == '_' || character == '-'
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func validProvenanceEcosystem(value string) bool {
+	switch value {
+	case "docker", "npm", "pnpm", "yarn", "bun", "pip", "pipx", "uv", "cargo", "go", "homebrew":
+		return true
+	default:
+		return false
+	}
+}
+
+func validProvenanceSource(value string) bool {
+	switch value {
+	case "local-daemon", "registry", "lockfile", "package-manager":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateObservation(observation model.Observation) error {
