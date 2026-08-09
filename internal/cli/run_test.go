@@ -334,12 +334,12 @@ func TestStatusJSONHasStableEmptyV1V2AndV3Shapes(t *testing.T) {
 }
 
 func TestDoctorJSONUsesInjectedReadOnlyChecker(t *testing.T) {
-	app := App{Doctor: fakeDoctor{result: doctor.Result{SchemaVersion: "ssc-init.doctor.v1", Status: "ready"}}}
+	app := App{Doctor: fakeDoctor{result: doctor.Result{SchemaVersion: "ssc-init.doctor.v2", Status: "ready"}}}
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"doctor", "--json"}, &out, &errOut); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.doctor.v1"`) {
+	if !strings.Contains(out.String(), `"schemaVersion":"ssc-init.doctor.v2"`) {
 		t.Fatalf("stdout=%q", out.String())
 	}
 }

@@ -88,7 +88,7 @@ func TestResultJSONContractIsPinned(t *testing.T) {
 			PreviousVersion:   "v0.1.0",
 			RollbackAvailable: true,
 			VersionsInstalled: 2,
-			CoreAvailable:     true,
+			IntegrityVerified: true,
 		},
 		CorePaths:               []Path{{Name: "data", Path: "$HOME/data"}},
 		Ecosystems:              []string{"npm"},
@@ -103,7 +103,7 @@ func TestResultJSONContractIsPinned(t *testing.T) {
 		`"store":{"sizeBytes":1,"reclaimableBytes":2,"snapshotCount":3,` +
 		`"snapshotRetentionSeconds":4,"assetHistoryRetentionSeconds":5},` +
 		`"install":{"managed":true,"currentVersion":"v0.2.0","previousVersion":"v0.1.0",` +
-		`"rollbackAvailable":true,"versionsInstalled":2,"coreAvailable":true},` +
+		`"rollbackAvailable":true,"versionsInstalled":2,"integrityVerified":true},` +
 		`"corePaths":[{"name":"data","path":"$HOME/data"}],"ecosystems":["npm"],` +
 		`"missingOptionalCommands":["docker"]}`
 	if string(raw) != want {
@@ -118,7 +118,7 @@ func TestCheckReportsInstallHealth(t *testing.T) {
 		PreviousVersion:   "v0.1.0",
 		RollbackAvailable: true,
 		VersionsInstalled: 2,
-		CoreAvailable:     true,
+		IntegrityVerified: true,
 	}
 	checker := New(Config{
 		Paths:             platform.PathsForHome(t.TempDir()),

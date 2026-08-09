@@ -66,7 +66,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	case "version":
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "doctor":
-		_, paths, ok := hostPathsForRun()
+		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
@@ -79,6 +79,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			DatabasePath:     filepath.Join(paths.DataDir, "state.db"),
 			Ecosystems:       ecosystems,
 			OptionalCommands: commands,
+			InstallReporter:  func() (doctor.Install, error) { return doctor.InstallReport(home) },
 		})
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "status":

@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -28,7 +30,21 @@ func installFixture(t *testing.T, versions []string, current, previous string) (
 			t.Fatal(err)
 		}
 		core := filepath.Join(directory, platform.CoreExecutableName)
-		if err := os.WriteFile(core, []byte("core"), 0o755); err != nil {
+		content := []byte("core-" + version)
+		if err := os.WriteFile(core, content, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(content)
+		manifest := map[string]string{
+			"schemaVersion": "ssc-init.install.manifest.v1",
+			"version":       version,
+			"sha256":        hex.EncodeToString(digest[:]),
+		}
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "manifest.json"), append(raw, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -77,7 +93,7 @@ func TestInstallReportCountsVersionsAndTheRollbackTarget(t *testing.T) {
 		PreviousVersion:   "v0.1.0",
 		RollbackAvailable: true,
 		VersionsInstalled: 2,
-		CoreAvailable:     true,
+		IntegrityVerified: true,
 	}
 	if report != want {
 		t.Fatalf("report=%+v want=%+v", report, want)
@@ -95,7 +111,7 @@ func TestInstallReportWithoutARollbackTarget(t *testing.T) {
 		Managed:           true,
 		CurrentVersion:    "v0.1.0",
 		VersionsInstalled: 1,
-		CoreAvailable:     true,
+		IntegrityVerified: true,
 	}
 	if report != want {
 		t.Fatalf("report=%+v want=%+v", report, want)
@@ -141,7 +157,23 @@ func TestInstallReportMarksAMissingActiveCoreUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a missing core became an error rather than a report: %v", err)
 	}
-	if !report.Managed || report.CoreAvailable || report.CurrentVersion != "v0.1.0" {
+	if !report.Managed || report.IntegrityVerified || report.CurrentVersion != "v0.1.0" {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestInstallReportMarksADigestMismatchUnverified(t *testing.T) {
+	home, layout := installFixture(t, []string{"v0.1.0"}, "v0.1.0", "")
+	core := filepath.Join(layout.VersionsDir, "v0.1.0", platform.CoreExecutableName)
+	if err := os.WriteFile(core, []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := InstallReport(home)
+	if err != nil {
+		t.Fatalf("a digest mismatch became an unreadable report: %v", err)
+	}
+	if !report.Managed || report.IntegrityVerified || report.CurrentVersion != "v0.1.0" {
 		t.Fatalf("report=%+v", report)
 	}
 }
@@ -160,7 +192,7 @@ func TestInstallReportDoesNotFollowASymlinkedCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.CoreAvailable {
+	if report.IntegrityVerified {
 		t.Fatalf("a symlinked core was reported available: %+v", report)
 	}
 }
