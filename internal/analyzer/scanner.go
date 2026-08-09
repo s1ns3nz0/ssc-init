@@ -47,6 +47,11 @@ func (Scanner) Analyze(ctx context.Context, content evidence.SealedContent) ([]m
 		digest := sha256.Sum256([]byte("ssc-init.analyzer.fact.v1\x00" + content.AssetID() + "\x00" + content.EvidenceID() + "\x00" + rule.id))
 		facts = append(facts, model.AnalyzerFact{ID: fmt.Sprintf("analyzer:sha256:%x", digest), AssetID: content.AssetID(), EvidenceID: content.EvidenceID(), RuleID: rule.id, Category: rule.category, Confidence: rule.confidence, Occurrences: min(occurrences, 10_000)})
 	}
+	if occurrences := obfuscationOccurrences(raw); occurrences > 0 {
+		ruleID := "ssc-init/content/obfuscation"
+		digest := sha256.Sum256([]byte("ssc-init.analyzer.fact.v1\x00" + content.AssetID() + "\x00" + content.EvidenceID() + "\x00" + ruleID))
+		facts = append(facts, model.AnalyzerFact{ID: fmt.Sprintf("analyzer:sha256:%x", digest), AssetID: content.AssetID(), EvidenceID: content.EvidenceID(), RuleID: ruleID, Category: model.AnalyzerObfuscation, Confidence: model.ConfidenceMedium, Occurrences: min(occurrences, 10_000)})
+	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
 	return facts, nil
 }
