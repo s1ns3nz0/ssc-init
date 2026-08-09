@@ -217,6 +217,46 @@ func TestPolicyCheckTouchesNoCollectorRoot(t *testing.T) {
 	}
 }
 
+func TestHookEvaluatesPolicyAndAlwaysExitsZero(t *testing.T) {
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[{"id":"unpinned","family":"pin","enabled":true,"description":"d"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := policySnapshot().latest.Inventory
+	store := &memoryPolicyStore{}
+	app := App{
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			return model.ScanResult{}, inventory, model.Delta{}, false, nil
+		}),
+		PolicyStore: store, PolicyDocument: document, Now: func() time.Time { return time.Unix(1, 0) },
+	}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "POLICY (1 violations)") || len(store.recorded) != 1 {
+		t.Fatalf("stdout=%q recorded=%+v", out.String(), store.recorded)
+	}
+}
+
+func TestHookPolicyLoadFailureKeepsTheLadderAdvisory(t *testing.T) {
+	inventory := model.Inventory{Assets: []model.Asset{{ID: "agent-skill:claude:x", Type: model.AssetSkill, Name: "x", Source: "claude"}}}
+	delta := model.Delta{Changes: []model.Change{{Kind: model.ChangeAdded, Entity: model.ChangeEntityAsset, EntityID: "agent-skill:claude:x"}}}
+	app := App{
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			return model.ScanResult{}, inventory, delta, false, nil
+		}),
+		PolicyLoadError: errors.New("invalid"),
+	}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if !strings.Contains(out.String(), "NEW") || errOut.String() != "ssc-init hook: policy document could not be loaded\n" {
+		t.Fatalf("stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+}
+
 func TestRunVersionReturnsErrorWhenOutputFails(t *testing.T) {
 	var errOut bytes.Buffer
 	code := Run(context.Background(), []string{"version", "--json"}, failingWriter{err: errors.New("disk full")}, &errOut)

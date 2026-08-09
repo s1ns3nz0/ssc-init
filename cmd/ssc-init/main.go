@@ -121,6 +121,20 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		policyContents, policyErr := os.ReadFile(paths.Install().PolicyFile)
+		if policyErr == nil {
+			app.PolicyDocument, app.PolicyLoadError = policy.Load(policyContents)
+			if app.PolicyLoadError == nil {
+				if policyStore, ok := snapshots.(cli.PolicyStore); ok {
+					app.PolicyStore = policyStore
+					app.Now = environment.Now
+				} else {
+					app.PolicyLoadError = errors.New("policy state is unavailable")
+				}
+			}
+		} else if !errors.Is(policyErr, os.ErrNotExist) {
+			app.PolicyLoadError = errors.New("policy document is unavailable")
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "install", "rollback":
 		home, _, ok := hostPathsForRun()

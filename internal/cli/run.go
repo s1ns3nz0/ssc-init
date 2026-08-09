@@ -302,7 +302,17 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
-		if err := report.WriteHookSummary(stdout, inventory, delta, firstRun); err != nil {
+		var policyResult policy.Result
+		if a.PolicyLoadError != nil {
+			fmt.Fprintln(stderr, "ssc-init hook: policy document could not be loaded")
+		} else if a.PolicyStore != nil {
+			policyResult, err = a.evaluatePolicy(ctx, inventory, delta)
+			if err != nil {
+				fmt.Fprintln(stderr, "ssc-init hook: policy evaluation failed")
+				policyResult = policy.Result{}
+			}
+		}
+		if err := report.WriteHookSummary(stdout, inventory, delta, firstRun, policyResult); err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
@@ -311,6 +321,42 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func (a App) evaluatePolicy(ctx context.Context, inventory model.Inventory, delta model.Delta) (policy.Result, error) {
+	pins, err := a.PolicyStore.Pins(ctx)
+	if err != nil {
+		return policy.Result{}, err
+	}
+	exceptions, err := a.PolicyStore.Exceptions(ctx)
+	if err != nil {
+		return policy.Result{}, err
+	}
+	decisions, err := a.PolicyStore.Decisions(ctx)
+	if err != nil {
+		return policy.Result{}, err
+	}
+	now := time.Now()
+	if a.Now != nil {
+		now = a.Now()
+	}
+	sources := a.PolicySources
+	sources.Document = a.PolicyDocument
+	if err := policy.VerifyExceptions(sources.Document, sources.Intelligence, now); err != nil {
+		return policy.Result{}, err
+	}
+	result := policy.Evaluate(policy.Input{Sources: sources, Inventory: inventory, Delta: delta, Pins: pins, Exceptions: exceptions, Now: now})
+	standing := map[string]bool{}
+	for _, decision := range decisions {
+		standing[decision.RuleID+"\x00"+decision.AssetID] = true
+	}
+	for index := range result.Violations {
+		result.Violations[index].Standing = standing[result.Violations[index].RuleID+"\x00"+result.Violations[index].AssetID]
+	}
+	if err := a.PolicyStore.RecordDecisions(ctx, result.Violations, now); err != nil {
+		return policy.Result{}, err
+	}
+	return result, nil
 }
 
 func (a App) runPolicyPin(ctx context.Context, options Options, stdout, stderr io.Writer) int {
