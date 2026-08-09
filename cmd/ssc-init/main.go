@@ -20,6 +20,8 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
+	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
+	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/install"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -388,7 +390,9 @@ func scanConfiguration(home string, options cli.Options) (collector.Environment,
 		agents.New(),
 		ide.New(),
 		projects.New(roots),
+		surfaces.New(),
 		packages.New(),
+		runtimecollector.New(),
 	}
 	return environment, configuredCollectors, nil
 }

@@ -355,7 +355,7 @@ func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) 
 	if environment.Inspector == nil || environment.SignatureInspector == nil {
 		t.Fatal("external-probe scan did not construct executable and signature inspectors")
 	}
-	wantNames := []string{"agents", "ide", "projects", "packages"}
+	wantNames := []string{"agents", "ide", "projects", "surfaces", "packages", "runtime"}
 	gotNames := make([]string, len(collectors))
 	for index, configuredCollector := range collectors {
 		gotNames[index] = configuredCollector.Name()
