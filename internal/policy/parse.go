@@ -268,13 +268,6 @@ func validateMatch(at string, rule Rule) error {
 		if len(match.Rungs) == 0 {
 			return fmt.Errorf("%s.match.rungs: a change rule must name at least one rung", at)
 		}
-		if shapeValues > 0 {
-			for _, field := range shapeFields(match) {
-				if field.values > 0 {
-					return fmt.Errorf("%s.match.%s: not valid for a change rule", at, field.name)
-				}
-			}
-		}
 	} else {
 		if len(match.Rungs) > 0 {
 			return fmt.Errorf("%s.match.rungs: not valid for a shape rule", at)

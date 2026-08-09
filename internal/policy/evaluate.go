@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	inventorypkg "github.com/s1ns3nz0/ssc-init/internal/inventory"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
@@ -80,6 +81,37 @@ func Evaluate(input Input) Result {
 					result.Violations = append(result.Violations, Violation{
 						RuleID: rule.ID, Level: 5, AssetID: asset.ID,
 						AssetType: string(asset.Type), AssetName: asset.Name, Host: observation.Host,
+					})
+					break
+				}
+			}
+		}
+	}
+
+	assets := make(map[string]model.Asset, len(input.Inventory.Assets))
+	for _, asset := range input.Inventory.Assets {
+		assets[asset.ID] = asset
+	}
+	for _, rule := range input.Sources.Document.Rules {
+		if !rule.Enabled || rule.Family != FamilyChange || rule.Match == nil {
+			continue
+		}
+		for _, row := range inventorypkg.Ladder(input.Inventory, input.Delta) {
+			if !matchesSet(rule.Match.Rungs, row.Rung.Label()) {
+				continue
+			}
+			asset, present := assets[row.AssetID()]
+			if !present {
+				asset = model.Asset{ID: row.AssetID(), Type: model.AssetType(row.Type), Name: row.Name, Source: row.Host}
+			}
+			candidates := observations[asset.ID]
+			if len(candidates) == 0 {
+				candidates = []model.Observation{{Host: row.Host}}
+			}
+			for _, observation := range candidates {
+				if matchesShape(*rule.Match, asset, observation, evidence[asset.ID]) {
+					result.Violations = append(result.Violations, Violation{
+						RuleID: rule.ID, Level: 5, AssetID: row.AssetID(), AssetType: row.Type, AssetName: row.Name, Host: row.Host,
 					})
 					break
 				}
