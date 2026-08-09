@@ -114,6 +114,7 @@ type App struct {
 	Now             func() time.Time
 	BundleManagers  map[bundle.Family]BundleManager
 	FindingService  FindingService
+	DeviceID        string
 }
 
 // Run executes the CLI with the development version.
@@ -229,16 +230,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to evaluate findings")
 			return 1
 		}
-		payload := map[string]any{"schemaVersion": "ssc-init.findings.v1", "intelligence": result.Intelligence, "policy": result.Policy, "findings": result.Findings}
-		var writeErr error
-		if options.Pretty {
-			encoder := json.NewEncoder(stdout)
-			encoder.SetEscapeHTML(false)
-			encoder.SetIndent("", "  ")
-			writeErr = encoder.Encode(payload)
-		} else {
-			writeErr = writeJSON(stdout, payload)
-		}
+		writeErr := report.WriteFindingsJSON(stdout, report.FindingData{DeviceID: a.DeviceID, Intelligence: result.Intelligence, Policy: result.Policy, Findings: result.Findings}, options.Pretty)
 		if writeErr != nil {
 			fmt.Fprintln(stderr, "failed to write findings output")
 			return 1

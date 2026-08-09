@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,6 +133,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.StatusReader = statusReader
 		app.FindingService = finding.Service{TI: managers[bundle.FamilyTI], Policy: managers[bundle.FamilyPolicy], Now: time.Now}
+		app.DeviceID, err = loadDeviceID(paths.DataDir)
+		if err != nil {
+			return 1
+		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()
@@ -408,6 +414,48 @@ func operationalCommand(command string) bool {
 	default:
 		return false
 	}
+}
+
+func loadDeviceID(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, "device-id")
+	read := func() (string, error) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		value := strings.TrimSpace(string(raw))
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != 32 || len(value) != 64 {
+			return "", errors.New("invalid device identity")
+		}
+		return "device:sha256:" + value, nil
+	}
+	if value, err := read(); err == nil {
+		return value, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return read()
+	}
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := fmt.Fprintln(file, hex.EncodeToString(random[:]))
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(path)
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return "device:sha256:" + hex.EncodeToString(random[:]), nil
 }
 
 func scanConfiguration(home string, options cli.Options) (collector.Environment, []collector.Collector, error) {
