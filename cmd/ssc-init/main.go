@@ -51,8 +51,9 @@ var (
 	// The local-policy build always opens the store with documented retention
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
-	openStoreForRun  = func(path string) (applicationStore, error) { return store.Open(path) }
-	bundleKeysForRun = bundle.KeyRegistry{}
+	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
+	bundleKeysForRun             = bundle.KeyRegistry{}
+	adapterInputForRun io.Reader = os.Stdin
 )
 
 func main() {
@@ -108,7 +109,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		defer snapshots.Close()
 		app.StatusReader = snapshots
 		return app.RunOptions(ctx, options, stdout, stderr)
-	case "findings":
+	case "findings", "adapter":
 		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
@@ -134,6 +135,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.StatusReader = statusReader
 		app.FindingService = finding.Service{TI: managers[bundle.FamilyTI], Policy: managers[bundle.FamilyPolicy], Now: time.Now}
+		if options.Command == "adapter" {
+			app.AdapterInput = adapterInputForRun
+			return app.RunOptions(ctx, options, stdout, stderr)
+		}
 		app.DeviceID, err = loadDeviceID(paths.DataDir)
 		if err != nil {
 			return 1
@@ -423,7 +428,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "bundle", "doctor", "findings", "hook", "install", "policy", "rollback", "scan", "status":
+	case "adapter", "bundle", "doctor", "findings", "hook", "install", "policy", "rollback", "scan", "status":
 		return true
 	default:
 		return false

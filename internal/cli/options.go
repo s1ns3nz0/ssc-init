@@ -37,6 +37,7 @@ type Options struct {
 	BundleSource    string
 	BundleSignature string
 	WebhookURL      string
+	AdapterCommand  string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -110,6 +111,11 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parseBundleOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
+	case "adapter":
+		if len(args) != 2 || args[1] != "evaluate" {
+			return Options{}, ErrInvalidOptions
+		}
+		options.AdapterCommand = args[1]
 	case "hook":
 		if len(args) != 1 {
 			return Options{}, ErrInvalidOptions

@@ -233,3 +233,15 @@ func TestParseOptionsRejectsAmbiguousForms(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAdapterEvaluateOptions(t *testing.T) {
+	got, err := ParseOptions([]string{"adapter", "evaluate"})
+	if err != nil || got.Command != "adapter" || got.AdapterCommand != "evaluate" {
+		t.Fatalf("options=%+v err=%v", got, err)
+	}
+	for _, args := range [][]string{{"adapter"}, {"adapter", "evaluate", "--json"}, {"adapter", "unknown"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}

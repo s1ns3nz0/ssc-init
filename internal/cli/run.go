@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/adapter"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
@@ -122,6 +123,7 @@ type App struct {
 	FindingService  FindingService
 	DeviceID        string
 	Webhook         WebhookDeliverer
+	AdapterInput    io.Reader
 }
 
 // Run executes the CLI with the development version.
@@ -266,6 +268,32 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			}
 		}
 		return code
+	case "adapter":
+		if options.AdapterCommand != "evaluate" || a.AdapterInput == nil || a.StatusReader == nil || a.FindingService == nil {
+			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		invocation, err := decodeAdapterInvocation(a.AdapterInput)
+		if err != nil {
+			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		snapshot, initialized, err := a.StatusReader.LatestSnapshot(ctx)
+		if err != nil || !initialized {
+			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		result, err := a.FindingService.Evaluate(ctx, snapshot.Inventory)
+		if err != nil {
+			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		evaluation, err := adapter.Evaluate(invocation, result)
+		if err != nil || writeJSON(stdout, evaluation) != nil {
+			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		return 0
 	case "doctor":
 		if a.Doctor == nil {
 			fmt.Fprintln(stderr, "doctor is unavailable")
@@ -444,6 +472,25 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func decodeAdapterInvocation(input io.Reader) (adapter.Invocation, error) {
+	const maxAdapterInput = 64 << 10
+	encoded, err := io.ReadAll(io.LimitReader(input, maxAdapterInput+1))
+	if err != nil || len(encoded) == 0 || len(encoded) > maxAdapterInput {
+		return adapter.Invocation{}, errors.New("invalid adapter input")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var invocation adapter.Invocation
+	if err := decoder.Decode(&invocation); err != nil || !invocation.Valid() {
+		return adapter.Invocation{}, errors.New("invalid adapter input")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return adapter.Invocation{}, errors.New("invalid adapter input")
+	}
+	return invocation, nil
 }
 
 func (a App) evaluatePolicy(ctx context.Context, inventory model.Inventory, delta model.Delta) (policy.Result, error) {

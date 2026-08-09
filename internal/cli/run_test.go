@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/adapter"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
@@ -49,6 +50,35 @@ func TestRunFindingsUsesLatestSnapshotAndClosedExitCodes(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"findings", "--json"}, &out, &errOut); code != 4 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.findings.v1"`) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunAdapterEvaluateReadsBoundedInvocationAndWritesSharedVerdict(t *testing.T) {
+	asset := model.Asset{ID: "tool:bad", Type: model.AssetTool, Name: "bad"}
+	item := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictSuspicious, Severity: model.SeverityHigh, Confidence: model.ConfidenceHigh, Level: 4, RuleIDs: []string{"ssc-init/test"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	input := `{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory","assetIds":["tool:bad"]}`
+	app := App{AdapterInput: strings.NewReader(input), StatusReader: &cliMemorySnapshots{latest: model.Snapshot{Inventory: model.Inventory{Assets: []model.Asset{asset}}}, hasLatest: true}, FindingService: fakeFindingService{result: finding.Result{Intelligence: "fresh", Policy: "inactive", Findings: []model.Finding{item}}}}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"adapter", "evaluate"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	var got adapter.Evaluation
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || !got.Valid() || got.Host != adapter.HostCodex || len(got.Findings) != 1 || got.Findings[0].Verdict != item.Verdict {
+		t.Fatalf("evaluation=%+v err=%v", got, err)
+	}
+}
+
+func TestRunAdapterEvaluateRejectsUnknownTrailingAndOversizeInputWithoutEcho(t *testing.T) {
+	for _, input := range []string{
+		`{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory","secret":"private-value"}`,
+		`{"schemaVersion":"ssc-init.adapter-invocation.v1","host":"codex","event":"post-execution","capability":"advisory"}{}`,
+		strings.Repeat("x", 64<<10+1),
+	} {
+		var out, errOut bytes.Buffer
+		app := App{AdapterInput: strings.NewReader(input)}
+		if code := app.Run(context.Background(), []string{"adapter", "evaluate"}, &out, &errOut); code != 1 || out.Len() != 0 || errOut.String() != "adapter evaluation failed\n" || strings.Contains(errOut.String(), "private-value") {
+			t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+		}
 	}
 }
 
