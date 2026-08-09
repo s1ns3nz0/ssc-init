@@ -118,7 +118,7 @@ func Load(raw []byte, now time.Time) (Envelope, error) {
 	switch envelope.Family {
 	case FamilyTI:
 		var payload TIPayload
-		if err := decodeClosed(envelope.Payload, &payload); err != nil || payload.Records == nil {
+		if err := decodeClosed(envelope.Payload, &payload); err != nil || payload.Records == nil || validateTIPayload(payload) != nil {
 			return Envelope{}, ErrMalformed
 		}
 		envelope.TI = &payload
