@@ -185,6 +185,25 @@ CREATE TABLE policy_decisions (
     last_seen_at TEXT NOT NULL,
     PRIMARY KEY (rule_id, asset_id)
 );`,
+	// Verified bundle state is a rebuildable index and bounded audit trail. It
+	// carries no scan_id: snapshot pruning cannot alter active trust state.
+	`CREATE TABLE bundle_index (
+    family TEXT PRIMARY KEY CHECK (family IN ('ti', 'policy')),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    version TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    freshness TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale', 'expired', 'unavailable')),
+    valid_until TEXT NOT NULL,
+    indexed_at TEXT NOT NULL
+);
+CREATE TABLE bundle_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    family TEXT NOT NULL CHECK (family IN ('ti', 'policy')),
+    action TEXT NOT NULL CHECK (action IN ('install', 'rollback')),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    recorded_at TEXT NOT NULL
+);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -263,6 +282,8 @@ var requiredColumns = map[string][]columnSpec{
 	"policy_pins":        {{"asset_id", "TEXT", "", 1, 1, false}, {"evidence_kind", "TEXT", "", 1, 2, false}, {"subject", "TEXT", "", 1, 3, false}, {"digest", "TEXT", "", 1, 0, false}, {"pinned_at", "TEXT", "", 1, 0, false}},
 	"policy_exceptions":  {{"rule_id", "TEXT", "", 1, 1, false}, {"scope", "TEXT", "", 1, 2, false}, {"subject_ref", "TEXT", "", 1, 3, false}, {"reason", "TEXT", "", 1, 0, false}, {"created_at", "TEXT", "", 1, 0, false}, {"expires_at", "TEXT", "", 1, 0, false}},
 	"policy_decisions":   {{"rule_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"level", "INTEGER", "", 1, 0, false}, {"outcome", "TEXT", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
+	"bundle_index":       {{"family", "TEXT", "", 0, 1, false}, {"sequence", "INTEGER", "", 1, 0, false}, {"version", "TEXT", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"freshness", "TEXT", "", 1, 0, false}, {"valid_until", "TEXT", "", 1, 0, false}, {"indexed_at", "TEXT", "", 1, 0, false}},
+	"bundle_audit":       {{"id", "INTEGER", "", 0, 1, false}, {"family", "TEXT", "", 1, 0, false}, {"action", "TEXT", "", 1, 0, false}, {"sequence", "INTEGER", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"recorded_at", "TEXT", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -319,6 +340,8 @@ var requiredChecks = map[string][]string{
 	"evidence_state":     {"check(evidence_index>=0)", "check(metadata_nilin(0,1))", "check(errors_nilin(0,1))"},
 	"content_cache":      {"check(length(cache_key)=32)", "check(size>=0)"},
 	"policy_decisions":   {"check(level>=1andlevel<=5)"},
+	"bundle_index":       {"check(familyin('ti','policy'))", "check(sequence>0)", "check(length(digest)=64)", "check(freshnessin('fresh','stale','expired','unavailable'))"},
+	"bundle_audit":       {"check(familyin('ti','policy'))", "check(actionin('install','rollback'))", "check(sequence>0)", "check(length(digest)=64)"},
 }
 
 func verifyTableChecksAndTriggers(db *sql.DB, table string) error {
@@ -439,6 +462,8 @@ var requiredIndexFingerprints = map[string][]string{
 	"policy_pins":        {"pk:1:asset_id,evidence_kind,subject"},
 	"policy_exceptions":  {"pk:1:rule_id,scope,subject_ref"},
 	"policy_decisions":   {"pk:1:rule_id,asset_id"},
+	"bundle_index":       {"pk:1:family"},
+	"bundle_audit":       {},
 }
 
 func verifyIndices(db *sql.DB) error {
