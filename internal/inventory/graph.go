@@ -128,6 +128,9 @@ func Build(results []model.CollectorResult) model.Inventory {
 	relationships := make(map[model.Relationship]struct{})
 	for _, result := range results {
 		for _, relationship := range result.Relationships {
+			if !model.ValidRelationshipKind(relationship.Kind) || relationship.From == relationship.To {
+				continue
+			}
 			if _, exists := validAssets[relationship.From]; !exists {
 				continue
 			}

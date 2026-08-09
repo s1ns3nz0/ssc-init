@@ -371,6 +371,12 @@ func validateRelationship(relationship model.Relationship) error {
 			return err
 		}
 	}
+	if !model.ValidRelationshipKind(relationship.Kind) {
+		return errors.New("inventory relationship kind is unsupported")
+	}
+	if relationship.From == relationship.To {
+		return errors.New("inventory relationship must connect distinct assets")
+	}
 	return nil
 }
 

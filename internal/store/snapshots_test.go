@@ -1178,6 +1178,25 @@ func TestSaveRejectsInvalidShapeWithoutRows(t *testing.T) {
 	assertNoSnapshotRows(t, s)
 }
 
+func TestSaveRejectsUnknownAndSelfRelationships(t *testing.T) {
+	for _, relationship := range []model.Relationship{
+		{From: "a", Kind: "unknown", To: "b"},
+		{From: "a", Kind: model.RelationshipUses, To: "a"},
+	} {
+		t.Run(relationship.Kind+relationship.To, func(t *testing.T) {
+			s := openTestStore(t)
+			inventory := model.Inventory{
+				Assets:        []model.Asset{{ID: "a"}, {ID: "b"}},
+				Relationships: []model.Relationship{relationship},
+			}
+			if err := s.SaveScan(context.Background(), testScan("invalid-relationship", time.Unix(2, 0).UTC()), inventory); err == nil {
+				t.Fatalf("relationship unexpectedly saved: %+v", relationship)
+			}
+			assertNoSnapshotRows(t, s)
+		})
+	}
+}
+
 func TestSaveScanRejectsUndocumentedStatus(t *testing.T) {
 	t.Run("save", func(t *testing.T) {
 		s := openTestStore(t)
@@ -1485,7 +1504,7 @@ func TestLatestInventoryRejectsDeletedSnapshotRows(t *testing.T) {
 		statements []string
 	}{
 		{name: "asset", statements: []string{`DELETE FROM asset_state WHERE asset_id = 'b'`, `DELETE FROM assets WHERE asset_id = 'b'`}},
-		{name: "relationship", statements: []string{`DELETE FROM relationship_state WHERE relationship_index = 1`, `DELETE FROM relationships WHERE kind = 'second'`}},
+		{name: "relationship", statements: []string{`DELETE FROM relationship_state WHERE relationship_index = 1`, `DELETE FROM relationships WHERE kind = 'uses'`}},
 		{name: "error", statements: []string{`DELETE FROM inventory_errors WHERE error_index = 1`}},
 	}
 	for _, deletion := range deletions {
@@ -1494,8 +1513,8 @@ func TestLatestInventoryRejectsDeletedSnapshotRows(t *testing.T) {
 			inventory := model.Inventory{
 				Assets: []model.Asset{{ID: "a"}, {ID: "b"}},
 				Relationships: []model.Relationship{
-					{From: "a", Kind: "first", To: "b"},
-					{From: "b", Kind: "second", To: "a"},
+					{From: "a", Kind: model.RelationshipContains, To: "b"},
+					{From: "b", Kind: model.RelationshipUses, To: "a"},
 				},
 				Errors: []model.CoverageError{{Code: "one", Message: "one"}, {Code: "two", Message: "two"}},
 			}

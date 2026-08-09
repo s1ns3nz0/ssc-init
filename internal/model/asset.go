@@ -100,3 +100,27 @@ type Relationship struct {
 	To   string `json:"to"`
 	Kind string `json:"kind"`
 }
+
+const (
+	RelationshipContains   = "contains"
+	RelationshipConfigures = "configures"
+	RelationshipUses       = "uses"
+	RelationshipSameAs     = "same-as"
+	RelationshipProbedBy   = "probed-by"
+	RelationshipDeclaredBy = "declared-by"
+	RelationshipResolvesTo = "resolves-to"
+	RelationshipExecutes   = "executes"
+	RelationshipConnectsTo = "connects-to"
+)
+
+// ValidRelationshipKind reports whether kind belongs to the persisted graph
+// vocabulary. Collectors must not mint relationship semantics dynamically.
+func ValidRelationshipKind(kind string) bool {
+	switch kind {
+	case RelationshipContains, RelationshipConfigures, RelationshipUses, RelationshipSameAs, RelationshipProbedBy, RelationshipDeclaredBy,
+		RelationshipResolvesTo, RelationshipExecutes, RelationshipConnectsTo:
+		return true
+	default:
+		return false
+	}
+}
