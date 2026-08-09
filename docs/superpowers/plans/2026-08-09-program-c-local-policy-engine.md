@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented decisions (2026-08-09):** The controller decisions in
+> `.superpowers/sdd/2026-08-09-program-c/progress.md` supersede the unresolved
+> alternatives retained at the end of this original plan. In particular, a
+> local document cannot configure retention, policy tables live in `state.db`,
+> the ladder classifier lives in `internal/inventory`, and policy violation
+> exit code is 3.
+
 **Goal:** Ship the `[NOW]` half of the policy layer: a pure `internal/policy` engine with the five-level precedence structure (levels 1–3 present and inert), three rule families (shape, change, pin), user exceptions with structural refusal of the four prohibited forms, trust-on-first-use pins, `policy init` / `policy pin` / `policy check`, a `POLICY` section in the hook, and an audit store that rides the existing `internal/store` discipline. Nothing about policy enters `ssc-init.scan.v3`, the snapshot payload, or the scan JSON.
 
 **Architecture:** `internal/policy` is a pure package: it parses an `ssc-init.policy.v1` JSON document, takes `(model.Inventory, model.Delta)` plus pins and exceptions as values, and returns a `policy.Result`. It performs no filesystem access, executes no process, and opens no socket during evaluation. The ladder classifier moves out of `internal/report` into `internal/inventory` so both the renderer and the engine read one classification — `internal/report` imports `internal/policy` to render, so `internal/policy` must never import `internal/report`. Pins, exceptions, and decisions live in three new tables in the existing `state.db`, keyed by asset ID with no `scan_id` and no foreign key, exactly as `asset_history` already is (migration 6). `internal/cli` gains `policy init|pin|check`; `cmd/ssc-init` wires the store and the policy document path.
@@ -1429,7 +1436,9 @@ func TestLocalPolicyCannotConfigureRetention(t *testing.T) {
 }
 ```
 
-Note the direction: `internal/policy` may import `internal/store` for the `Options` type only. If that import offends the layering, move `StoreOptions` into `cmd/ssc-init` instead — state which you chose in the task report.
+`internal/policy` does not import `internal/store`. `store.Options` remains the
+in-process signed-bundle seam, while the binary opens the store with defaults
+until a verified organization-bundle loader exists.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -1546,5 +1555,7 @@ These are places the design does not settle, and the implementer should not sett
 2. **Audit store location.** The policy design says "separate from the inventory snapshot"; foundation §5.3 says "a single state database" and §5.2 module 7 puts decisions, exceptions, and audit history in that store. This plan reads them together as *separate tables in `state.db`*, following the `asset_history` precedent (no `scan_id`, no foreign key, not pruned with snapshots). If "separate" was meant as a separate file, Task 8 changes shape substantially and duplicates the hardened open path.
 3. **Where the ladder classifier lives.** Task 4 moves it to `internal/inventory` because `internal/report` must import `internal/policy` to render. The alternative — `internal/policy` imports `internal/report` and the POLICY section is rendered from a report-local type the CLI translates into — avoids the move but makes the policy engine depend on the renderer. Task 4 is the largest no-behaviour-change diff in the program; confirm before it runs.
 4. **`policy check` and "no filesystem access".** The design says it "reads the latest snapshot and does not scan — no filesystem access". It must still open the policy document and the SQLite store. This plan reads the sentence as *no scanning access*: no collector root is opened, no process runs, no socket opens. Confirm that reading is right before Task 11's test is written against it.
-5. **Whether the local document may set retention (Task 13).** §10 makes retention configurable "through signed policy", which is `[BUNDLE]`. This plan lets the local level-5 document set it because the user owns their own disk and Program B built the seam for exactly this. If retention must wait for a signed bundle, Task 13 becomes a comment change only.
+5. **Whether the local document may set retention (Task 13). RESOLVED.** It may
+   not. Foundation §10 reserves retention configuration for signed policy
+   `[BUNDLE]`; the parser rejects the field and the store seam remains unwired.
 6. **`unpinned` default noise.** With `unpinned` enabled, every install and upgrade fires. It ships disabled, so nothing fires by default — but a user who enables it after `policy pin` will see a burst after each update batch. That is the design's stated intent (keeping the noisy rule separate from the sharp one); confirm no throttle is wanted, because a throttle would need its own state and its own justification.

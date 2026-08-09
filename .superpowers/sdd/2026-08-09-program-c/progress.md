@@ -14,3 +14,22 @@ CONTROLLER DECISIONS on the plan's six ambiguities:
 
 Also noted by the planner: internal/report/rung.go render() hard-codes %-10s; the plan generalizes to render(label, width, row) so ladder output stays byte-identical while POLICY gets a 19-wide column.
 Task 1: dispatched (internal/policy, new package — zero conflict with Program A's in-flight cli/cmd work)
+Task 1 complete: 43cd9d2
+Task 2 complete: 2b19060
+Task 3 complete: 8f54f2b
+Task 4 complete: a89ceb4
+Task 5 complete: 6f137f4
+Task 6 complete: 62e305f
+Task 7 complete: 201db7c
+Task 8 complete: c6a210d
+Task 9 complete: d86c510
+Task 10 complete: 63828a3
+Task 11 complete: 28f5765
+Task 12 complete: 406dbc4
+Task 13 complete: a18fdf5
+Task 14 complete: 277ba20
+
+Program complete. Verification at 277ba20: `go test -race -count=1 ./...`,
+`go test ./internal/policy -count=50`,
+`go test ./internal/acceptance -run Policy -count=50`, `go vet ./...`,
+`go mod verify`, formatting, diff, and clean-worktree checks all passed.

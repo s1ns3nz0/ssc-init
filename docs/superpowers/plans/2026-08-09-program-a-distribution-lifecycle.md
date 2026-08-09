@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented decision (2026-08-09):** The shipping container is a signed,
+> notarized, stapled `.dmg`, not the bare Mach-O/online-ticket fallback described
+> in the original Task 11 draft and open decision 1 below. The implemented
+> `scripts/notarize-darwin.sh` creates and signs `ssc-init-darwin.dmg`, submits
+> it, staples and validates the ticket, performs a Gatekeeper assessment, and
+> writes `checksums-notarized.txt`. `docs/release-runbook.md` is the authority
+> for the final artifact set and release ordering.
+
 **Goal:** Turn `scripts/build-darwin.sh` from "two unsigned per-arch binaries and a checksum file" into the §5.2/§14 release artifact set (Universal Binary, checksums, SBOM, build provenance, signature, notarization), and turn `~/Library/Application Support/SSC Init/` from "one directory containing `state.db`" into the §5.3 shared installation with versioned core binaries, a current-version pointer, and a §11 stage → verify → health check → atomic switch → rollback lifecycle.
 
 **Architecture:** The release side stays in `scripts/`: `build-darwin.sh` gains a `lipo` step, a CycloneDX SBOM derived from `go version -m`, and an in-toto/SLSA provenance statement — all deterministic, all still produced with no network and no new module. Signing and notarization move to two *separate* scripts (`scripts/sign-darwin.sh`, `scripts/notarize-darwin.sh`) because a Developer ID signature carries an Apple secure timestamp and is therefore inherently non-reproducible: it must not run inside the reproducible build. The install side is a new `internal/install` package operating through `os.Root` on `DataDir`, with `internal/platform` owning the layout and the version-string trust boundary, `internal/cli` + `cmd/ssc-init` exposing `install`/`rollback`, and `internal/doctor` reporting install health.
