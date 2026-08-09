@@ -34,6 +34,10 @@ ssc-init scan --baseline --pretty
 ssc-init status --json
 ssc-init status --pretty
 ssc-init hook
+ssc-init policy init
+ssc-init policy pin
+ssc-init policy check
+ssc-init policy check --pretty
 ```
 
 `doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
@@ -65,6 +69,31 @@ State is local-first and stored at:
 ```text
 $HOME/Library/Application Support/SSC Init/state.db
 ```
+
+## Local policy
+
+`ssc-init policy init` writes an annotated starter document to
+`$HOME/Library/Application Support/SSC Init/policy.json`. Every shipped rule is
+disabled until the user enables it. `policy init` and `policy check` accept an
+absolute `--policy` path or a path below `$HOME`; the override changes only the
+document being initialized or evaluated.
+
+`ssc-init policy pin` records the complete evidence currently present in the
+latest snapshot. This is trust on first use: a pin protects against future
+change, and pinning a compromised machine approves that compromise. Use
+`policy pin --update <asset-id>` to approve one changed asset deliberately.
+
+`ssc-init policy check` reads the policy document and the latest recorded
+snapshot; it does not run a scan. JSON is the default and `--pretty` is
+available for an interactive summary. It exits `0` when clean, `3` when policy
+violations exist, `2` for invalid arguments or documents, and `1` for an
+operational failure.
+
+The current capability is advisory plus on-demand. Policy cannot block a
+process, installation, or session start. A code `3` can gate a pipeline that
+chooses to act on it; it is not an enforcement claim. The session hook reports
+new violations in a separate `POLICY` section and collapses standing violations
+to one reminder line, while continuing to exit zero.
 
 The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity of the executable used; it does not make that executable trusted.
 

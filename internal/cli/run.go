@@ -420,6 +420,8 @@ type policyCheckPayload struct {
 	Levels        []policy.Level     `json:"levels"`
 	Snapshot      policySnapshotRef  `json:"snapshot"`
 	Violations    []policy.Violation `json:"violations"`
+	Applied       []policy.Applied   `json:"exceptionsApplied,omitempty"`
+	Expired       []policy.Applied   `json:"exceptionsExpired,omitempty"`
 }
 
 type policySnapshotRef struct {
@@ -479,7 +481,8 @@ func (a App) runPolicyCheck(ctx context.Context, options Options, stdout, stderr
 		return 1
 	}
 	payload := policyCheckPayload{SchemaVersion: "ssc-init.policy-check.v1", Capability: "advisory", Levels: result.Levels,
-		Snapshot: policySnapshotRef{ScanID: snapshot.Scan.ScanID, FinishedAt: snapshot.Scan.FinishedAt}, Violations: result.Violations}
+		Snapshot: policySnapshotRef{ScanID: snapshot.Scan.ScanID, FinishedAt: snapshot.Scan.FinishedAt}, Violations: result.Violations,
+		Applied: result.Applied, Expired: result.Expired}
 	if options.Pretty {
 		if err := report.WritePolicy(stdout, result); err != nil {
 			fmt.Fprintln(stderr, "failed to write policy output")

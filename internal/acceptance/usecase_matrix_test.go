@@ -276,6 +276,7 @@ func TestScopedCollectorsUseOnlyTheInjectedFilesystemForHostReads(t *testing.T) 
 		"internal/collector/mcp",
 		"internal/collector/packages",
 		"internal/collector/projects",
+		"internal/policy",
 	} {
 		directory := filepath.Join(repositoryRoot, relativeDirectory)
 		entries, err := os.ReadDir(directory)

@@ -32,6 +32,8 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
 - `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state.
+- `internal/policy` — pure evaluation over already-recorded inventory facts. It must not read the host, run processes, open sockets, or import `internal/report`.
+- `internal/inventory` — owns both inventory diffing and the shared change-ladder classifier; report code only renders its result.
 - `internal/acceptance` — isolated-home end-to-end fixtures.
 
 ## Security invariants (release-blocking)
@@ -42,6 +44,8 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - Default scans execute no process and perform no network access; discovered content is never executed.
 - Cancellation/deadline errors propagate and clear partial runtime state; hostile targets are isolated from safe siblings.
 - No new runtime dependency without revising the plan first. Deterministic input produces byte-identical report JSON and snapshot state.
+- Policy precedence always exposes five levels. Levels 1–3 remain present but inert in this build, with explicit reasons: no threat-intelligence evidence and no verified organization bundle.
+- `policy_pins`, `policy_exceptions`, and `policy_decisions` are independent local state and carry no `scan_id`. No policy field may enter the `ssc-init.scan.v3` or `ssc-init.status.v3` contracts.
 
 ## Completed work
 
@@ -61,7 +65,9 @@ Program B (scan status vocabulary, retention, budgets) is also merged to `master
 - `scan.DefaultBudget` (10 minutes, design §12 baseline) bounds one baseline scan and degrades to `partial` with the unfinished collectors named in coverage; a caller cancellation or caller deadline is different — it still errors and persists nothing.
 - The performance harness `internal/acceptance/perf_budget_test.go` is behind `//go:build perfbudget` and is excluded from `go test ./...`. Run it with `go test ./internal/acceptance -tags perfbudget -run TestPerformanceBudgets -v -count=1`.
 
-Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Design non-goals still unimplemented: package payload hashing, immutable Docker identity, code signatures, TI, behavior analysis, policy/warnings/blocking, host adapters.
+Program C adds the local advisory policy engine: an inert starter document, five-level precedence with levels 1–3 truthfully inactive, shape/change/pin rules, expiring scoped exceptions, TOFU pins, `policy check` exit code 3 for violations, and hook reporting. It does not add enforcement, threat intelligence, or verified organization bundles.
+
+Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Design non-goals still unimplemented: package payload hashing, immutable Docker identity, code signatures, TI, behavior analysis, policy enforcement, verified organization bundles, warnings, and host adapters.
 
 Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set. For multi-task plans, SDD conventions apply: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; review fixes need a reproducing failing test first; adversarial/race-prone suites re-verified with `-count=50`.
 
