@@ -40,3 +40,11 @@ func TestServicePropagatesUnexpectedBundleFailure(t *testing.T) {
 		t.Fatal("error=nil")
 	}
 }
+
+func TestServiceReturnsAnalyzerFindingsWhenIntelligenceIsUnavailable(t *testing.T) {
+	asset := model.Asset{ID: "pkg:npm/example@latest", Type: model.AssetPackage, Name: "example", Version: "latest"}
+	got, err := (Service{}).Evaluate(context.Background(), model.Inventory{Assets: []model.Asset{asset}})
+	if err != nil || got.Intelligence != "unavailable" || len(got.Findings) != 1 || got.Findings[0].Verdict != model.VerdictSuspicious {
+		t.Fatalf("result=%+v err=%v", got, err)
+	}
+}

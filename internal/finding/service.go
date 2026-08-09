@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/analyzer"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
@@ -33,23 +34,25 @@ func (s Service) Evaluate(ctx context.Context, inventory model.Inventory) (Resul
 		now = s.Now().UTC()
 	}
 	result := Result{Intelligence: "unavailable", Policy: "inactive", Findings: []model.Finding{}}
-	if s.TI == nil {
-		return result, nil
-	}
-	ti, err := s.TI.Active(ctx)
-	if err != nil {
-		if errors.Is(err, bundle.ErrActiveUnavailable) {
-			return result, nil
+	var correlated []model.Finding
+	if s.TI != nil {
+		ti, err := s.TI.Active(ctx)
+		if err != nil && !errors.Is(err, bundle.ErrActiveUnavailable) {
+			return Result{}, err
 		}
-		return Result{}, err
-	}
-	result.Intelligence = string(ti.Status.Freshness)
-	correlated := Correlate(inventory, ti, now)
-	if ti.Status.Freshness == bundle.FreshnessStale || ti.Status.Freshness == bundle.FreshnessExpired {
-		for index := range correlated {
-			correlated[index].Confidence = lowerConfidence(correlated[index].Confidence)
+		if err == nil {
+			result.Intelligence = string(ti.Status.Freshness)
+			correlated = Correlate(inventory, ti, now)
+			if ti.Status.Freshness == bundle.FreshnessStale || ti.Status.Freshness == bundle.FreshnessExpired {
+				for index := range correlated {
+					correlated[index].Confidence = lowerConfidence(correlated[index].Confidence)
+				}
+			}
 		}
 	}
+	facts := append([]model.AnalyzerFact(nil), inventory.AnalyzerFacts...)
+	facts = append(facts, analyzer.MutableFacts(inventory)...)
+	correlated = append(correlated, CorrelateAnalyzer(inventory, facts, now)...)
 	var activePolicy *bundle.ActiveBundle
 	if s.Policy != nil {
 		value, policyErr := s.Policy.Active(ctx)
