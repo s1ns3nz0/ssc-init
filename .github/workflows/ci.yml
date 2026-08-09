@@ -36,6 +36,24 @@ jobs:
       - name: Unit and race gates
         run: go test -race -count=1 ./internal/... ./cmd/...
 
+      - name: Verified bundle publication gates
+        env:
+          SSC_INIT_TI_BUNDLE_SIGNING_SEED_BASE64: ${{ secrets.SSC_INIT_TI_BUNDLE_SIGNING_SEED_BASE64 }}
+          SSC_INIT_POLICY_BUNDLE_SIGNING_SEED_BASE64: ${{ secrets.SSC_INIT_POLICY_BUNDLE_SIGNING_SEED_BASE64 }}
+        run: |
+          jq empty schemas/bundle-v1.schema.json
+          go test -count=1 ./internal/bundle ./cmd/ssc-init-bundle
+          if [ -n "$SSC_INIT_TI_BUNDLE_SIGNING_SEED_BASE64" ] && [ -f publication/ti.json ]; then
+            go run ./cmd/ssc-init-bundle sign \
+              --family ti --from "$PWD/publication/ti.json" \
+              --signature "$PWD/publication/ti.sig"
+          fi
+          if [ -n "$SSC_INIT_POLICY_BUNDLE_SIGNING_SEED_BASE64" ] && [ -f publication/policy.json ]; then
+            go run ./cmd/ssc-init-bundle sign \
+              --family policy --from "$PWD/publication/policy.json" \
+              --signature "$PWD/publication/policy.sig"
+          fi
+
       - name: Release build gates
         run: |
           git status --porcelain

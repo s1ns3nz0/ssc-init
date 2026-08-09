@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc-init.dev/schemas/bundle-v1.schema.json",
+  "title": "SSC Init verified bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "family", "version", "sequence", "keyId", "generatedAt", "validFrom", "validUntil", "payload"],
+  "properties": {
+    "schemaVersion": {"const": "ssc-init.bundle.v1"},
+    "family": {"enum": ["ti", "policy"]},
+    "version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "sequence": {"type": "integer", "minimum": 1},
+    "keyId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "validFrom": {"type": "string", "format": "date-time"},
+    "validUntil": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"family": {"const": "ti"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/tiPayload"}}}
+    },
+    {
+      "if": {"properties": {"family": {"const": "policy"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/policyPayload"}}}
+    }
+  ],
+  "$defs": {
+    "tiPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records"],
+      "properties": {"records": {"type": "array", "maxItems": 100000, "items": {"type": "object"}}}
+    },
+    "policyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["denies", "allows", "exceptions", "tests"],
+      "properties": {
+        "denies": {"type": "array", "maxItems": 10000},
+        "allows": {"type": "array", "maxItems": 10000},
+        "exceptions": {"type": "array", "maxItems": 10000},
+        "tests": {"type": "array", "maxItems": 10000},
+        "retention": {"type": "object"}
+      }
+    }
+  }
+}
