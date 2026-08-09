@@ -127,6 +127,23 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	if err := validateEvidenceCoverageResult(scan.EvidenceCoverage, evidenceByID); err != nil {
 		return err
 	}
+	findingIDs := make(map[string]struct{}, len(inventory.Findings))
+	for _, finding := range inventory.Findings {
+		if !finding.Valid() {
+			return errors.New("invalid inventory finding")
+		}
+		if _, ok := assetIDs[finding.AssetID]; !ok {
+			return errors.New("inventory finding references missing asset")
+		}
+		if _, duplicate := findingIDs[finding.ID]; duplicate {
+			return errors.New("duplicate inventory finding id")
+		}
+		findingIDs[finding.ID] = struct{}{}
+		encoded, err := json.Marshal(finding)
+		if err != nil || privacy.ContainsSensitiveValue(string(encoded)) {
+			return ErrSensitiveSnapshot
+		}
+	}
 
 	collectors := make(map[string]struct{}, len(scan.Coverage))
 	for _, result := range scan.Coverage {

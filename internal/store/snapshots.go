@@ -83,6 +83,9 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 	if err = saveEvidence(ctx, tx, scan.ScanID, inventory.Evidence); err != nil {
 		return err
 	}
+	if err = saveFindings(ctx, tx, scan.ScanID, inventory.Findings); err != nil {
+		return err
+	}
 	for index, relationship := range inventory.Relationships {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO relationships(scan_id, from_id, kind, to_id) VALUES (?, ?, ?, ?)`,
 			scan.ScanID, relationship.From, relationship.Kind, relationship.To); err != nil {
@@ -114,10 +117,10 @@ func (s *Store) saveScanAt(ctx context.Context, scan model.ScanResult, inventory
 			return fmt.Errorf("insert inventory error %d: %w", index, err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count, evidence_nil, evidence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err = tx.ExecContext(ctx, `INSERT INTO inventory_state(scan_id, assets_nil, relationships_nil, errors_nil, asset_count, relationship_count, error_count, observations_nil, observation_count, evidence_nil, evidence_count, findings_nil, finding_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		scan.ScanID, boolInt(inventory.Assets == nil), boolInt(inventory.Relationships == nil), boolInt(inventory.Errors == nil),
 		len(inventory.Assets), len(inventory.Relationships), len(inventory.Errors), boolInt(inventory.Observations == nil), len(inventory.Observations),
-		boolInt(inventory.Evidence == nil), len(inventory.Evidence)); err != nil {
+		boolInt(inventory.Evidence == nil), len(inventory.Evidence), boolInt(inventory.Findings == nil), len(inventory.Findings)); err != nil {
 		return fmt.Errorf("insert inventory state: %w", err)
 	}
 	if err = recordAssetHistory(ctx, tx, scan, inventory); err != nil {
@@ -182,6 +185,7 @@ const defaultSnapshotRetention = 30 * 24 * time.Hour
 // declared ON DELETE NO ACTION and the connection enables PRAGMA foreign_keys,
 // so child rows are removed explicitly and never by cascade.
 var snapshotChildTables = []string{
+	"findings",
 	"evidence_state",
 	"evidence",
 	"evidence_coverage",
@@ -382,13 +386,13 @@ func (s *Store) LatestSnapshot(ctx context.Context) (model.Snapshot, bool, error
 		return model.Snapshot{}, false, err
 	}
 
-	var assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil int
-	var assetCount, relationshipCount, errorCount, observationCount, evidenceCount int
-	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, observations_nil, evidence_nil, asset_count, relationship_count, error_count, observation_count, evidence_count FROM inventory_state WHERE scan_id = ?`, scan.ScanID).
-		Scan(&assetsNil, &relationshipsNil, &errorsNil, &observationsNil, &evidenceNil, &assetCount, &relationshipCount, &errorCount, &observationCount, &evidenceCount); err != nil {
+	var assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil, findingsNil int
+	var assetCount, relationshipCount, errorCount, observationCount, evidenceCount, findingCount int
+	if err := db.QueryRowContext(ctx, `SELECT assets_nil, relationships_nil, errors_nil, observations_nil, evidence_nil, findings_nil, asset_count, relationship_count, error_count, observation_count, evidence_count, finding_count FROM inventory_state WHERE scan_id = ?`, scan.ScanID).
+		Scan(&assetsNil, &relationshipsNil, &errorsNil, &observationsNil, &evidenceNil, &findingsNil, &assetCount, &relationshipCount, &errorCount, &observationCount, &evidenceCount, &findingCount); err != nil {
 		return model.Snapshot{}, false, fmt.Errorf("load inventory state for scan %q: %w", scan.ScanID, err)
 	}
-	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil); err != nil {
+	if err := validateBoolInts(assetsNil, relationshipsNil, errorsNil, observationsNil, evidenceNil, findingsNil); err != nil {
 		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: %w", scan.ScanID, err)
 	}
 
@@ -436,6 +440,18 @@ func (s *Store) LatestSnapshot(ctx context.Context) (model.Snapshot, bool, error
 		inventory.Evidence = evidence
 	} else if len(evidence) != 0 {
 		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: evidence marked nil but rows exist", scan.ScanID)
+	}
+	findings, err := loadFindings(ctx, db, scan.ScanID)
+	if err != nil {
+		return model.Snapshot{}, false, err
+	}
+	if findingCount < 0 || len(findings) != findingCount {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: finding row count mismatch", scan.ScanID)
+	}
+	if findingsNil == 0 {
+		inventory.Findings = findings
+	} else if len(findings) != 0 {
+		return model.Snapshot{}, false, fmt.Errorf("validate inventory state for scan %q: findings marked nil but rows exist", scan.ScanID)
 	}
 	relationships, err := loadRelationships(ctx, db, scan.ScanID)
 	if err != nil {
