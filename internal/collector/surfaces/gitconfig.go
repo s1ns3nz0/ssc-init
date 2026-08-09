@@ -2,15 +2,21 @@ package surfaces
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
 var errGitConfigMalformed = errors.New("git credential configuration is malformed")
@@ -63,6 +69,54 @@ func parseCredentialHelpers(contents []byte) ([]string, string, error) {
 	}
 	sort.Strings(ordered)
 	return ordered, credentialSemanticDigest(ordered), nil
+}
+
+func readVerifiedHomeFile(ctx context.Context, env collector.Environment, relative string) ([]byte, error) {
+	rooted, ok := env.FS.(platform.RootedFileSystem)
+	if !ok || rooted == nil {
+		return nil, errGitConfigMalformed
+	}
+	root, err := rooted.OpenRoot(env.Home)
+	if err != nil {
+		return nil, errGitConfigMalformed
+	}
+	defer root.Close()
+	components := strings.Split(filepath.Clean(relative), string(filepath.Separator))
+	parent := root
+	if len(components) > 1 {
+		parent, err = platform.OpenVerifiedRoot(ctx, root, components[:len(components)-1]...)
+		if err != nil {
+			return nil, errGitConfigMalformed
+		}
+		defer parent.Close()
+	}
+	file, expected, opened, err := platform.OpenVerifiedFile(parent, components[len(components)-1])
+	if err != nil {
+		return nil, errGitConfigMalformed
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(&surfaceContextReader{ctx: ctx, reader: file}, maxSurfaceFileBytes+1))
+	if err != nil || int64(len(contents)) > maxSurfaceFileBytes {
+		return nil, errGitConfigMalformed
+	}
+	after, err := file.Stat()
+	postName, postErr := parent.Lstat(components[len(components)-1])
+	if err != nil || postErr != nil || after == nil || postName == nil || !os.SameFile(expected, postName) || !os.SameFile(opened, after) {
+		return nil, errGitConfigMalformed
+	}
+	return contents, nil
+}
+
+type surfaceContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *surfaceContextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }
 
 func normalizedCredentialHelper(value string) (string, bool) {

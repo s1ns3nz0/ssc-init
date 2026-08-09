@@ -185,6 +185,9 @@ func validPresetShape(collectorName string, target model.LocalEvidenceTarget, an
 	if target.Kind == model.EvidenceContainerIdentity && target.PresetStatus == model.EvidenceComplete {
 		return target.PresetAlgorithm == "sha256" && lowercaseSHA256(target.PresetDigest) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}
+	if target.Kind == model.EvidenceSemanticSHA256 && target.Subject == model.EvidenceSubjectCredentialConfig && target.PresetStatus == model.EvidenceComplete {
+		return collectorName == "surfaces" && target.PresetAlgorithm == "sha256" && lowercaseSHA256(target.PresetDigest) && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
+	}
 	if target.Kind == model.EvidencePackageContent || target.Kind == model.EvidenceContainerIdentity {
 		return (target.PresetStatus == model.EvidenceUnsupported || target.PresetStatus == model.EvidenceSkipped) && target.PresetAlgorithm == "" && target.PresetDigest == "" && target.RootPath == "" && target.RelativePath == "" && anchor == (Anchor{})
 	}

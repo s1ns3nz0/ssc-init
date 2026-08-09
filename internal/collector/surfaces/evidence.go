@@ -61,3 +61,16 @@ func issueSurfacePreset(result *model.CollectorResult, target model.LocalEvidenc
 	target.PresetStatus = status
 	result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(target, evidence.Anchor{}))
 }
+
+func issueCredentialSemanticEvidence(result *model.CollectorResult, targetID, assetID, observationID, digest string) {
+	issuer := evidence.BindCollectorResult(result)
+	if issuer == nil {
+		return
+	}
+	target := model.LocalEvidenceTarget{
+		TargetID: targetID, AssetID: assetID, ObservationID: observationID,
+		Kind: model.EvidenceSemanticSHA256, Subject: model.EvidenceSubjectCredentialConfig,
+		PresetStatus: model.EvidenceComplete, PresetAlgorithm: "sha256", PresetDigest: digest,
+	}
+	result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(target, evidence.Anchor{}))
+}
