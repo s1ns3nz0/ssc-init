@@ -107,6 +107,8 @@ ssc-init rollback --json
 
 The installer stages and verifies the digest and universal Mach-O shape, runs
 the staged core's doctor health check, then atomically switches a pointer file.
+Rollback succeeds only after at least two versions have been activated; a
+first installation correctly reports `rollbackAvailable: false`.
 The pointer is never a symlink and is validated on every read. Removing an
 adapter must never remove `state.db`, intelligence or policy bundles, reports,
 or quarantine contents. Neither `install` nor `rollback` touches that shared
