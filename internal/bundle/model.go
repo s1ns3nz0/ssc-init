@@ -124,7 +124,7 @@ func Load(raw []byte, now time.Time) (Envelope, error) {
 		envelope.TI = &payload
 	case FamilyPolicy:
 		var payload PolicyPayload
-		if err := decodeClosed(envelope.Payload, &payload); err != nil || payload.Denies == nil || payload.Allows == nil || payload.Exceptions == nil || payload.Tests == nil {
+		if err := decodeClosed(envelope.Payload, &payload); err != nil || payload.Denies == nil || payload.Allows == nil || payload.Exceptions == nil || payload.Tests == nil || validatePolicyPayload(payload, envelope.GeneratedAt) != nil {
 			return Envelope{}, ErrMalformed
 		}
 		envelope.Policy = &payload
