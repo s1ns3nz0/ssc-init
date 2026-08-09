@@ -488,7 +488,7 @@ func newVersionRecordingReleaseRepository(t *testing.T) (string, string, []strin
 	root, script, _ := newIsolatedReleaseRepository(t)
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := fakeGoVersionBranch + "output=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
+	fakeGoSource := fakeGoRunBranch(t) + fakeGoVersionBranch + "output=\nall=\"$*\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf '%s\\n' \"$all\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -536,6 +536,16 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	if err := os.WriteFile(script, source, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	packager, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "package-adapters.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "package-adapters.go"), packager, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(root, "adapters"), os.DirFS(filepath.Join(repositoryRoot(t), "adapters"))); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/dist/\n/.superpowers/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -545,17 +555,26 @@ func newIsolatedReleaseRepository(t *testing.T) (string, string, []string) {
 	runGit(t, root, "init", "-q")
 	runGit(t, root, "config", "user.email", "ssc-init-tests@example.invalid")
 	runGit(t, root, "config", "user.name", "SSC Init Tests")
-	runGit(t, root, "add", ".gitignore", "scripts/build-darwin.sh", "tracked.txt")
+	runGit(t, root, "add", ".gitignore", "scripts", "adapters", "tracked.txt")
 	runGit(t, root, "commit", "-q", "-m", "fixture")
 
 	binDirectory := t.TempDir()
 	fakeGo := filepath.Join(binDirectory, "go")
-	fakeGoSource := fakeGoVersionBranch + "output=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
+	fakeGoSource := fakeGoRunBranch(t) + fakeGoVersionBranch + "output=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    output=$1\n  fi\n  shift\ndone\n[ -n \"$output\" ] || exit 2\nprintf 'fake-%s\\n' \"$GOARCH\" > \"$output\"\n"
 	if err := os.WriteFile(fakeGo, []byte(fakeGoSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFakeLipo(t, binDirectory)
 	return root, script, environmentWith("PATH", binDirectory+":/usr/bin:/bin")
+}
+
+func fakeGoRunBranch(t *testing.T) string {
+	t.Helper()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = run ]; then exec %q \"$@\"; fi\n", realGo)
 }
 
 func runGit(t *testing.T, root string, arguments ...string) {
