@@ -1,0 +1,17 @@
+{
+  "description": "Run a non-blocking SSC Init scan after tool use",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ssc-init hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

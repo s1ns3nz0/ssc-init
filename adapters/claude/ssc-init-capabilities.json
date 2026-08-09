@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "ssc-init.adapter-capabilities.v1",
+  "host": "claude",
+  "events": [
+    {"event": "on-demand", "capability": "on-demand"},
+    {"event": "post-execution", "capability": "advisory"}
+  ]
+}

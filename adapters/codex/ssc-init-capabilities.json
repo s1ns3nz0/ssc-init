@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "ssc-init.adapter-capabilities.v1",
+  "host": "codex",
+  "events": [
+    {"event": "on-demand", "capability": "on-demand"}
+  ]
+}
