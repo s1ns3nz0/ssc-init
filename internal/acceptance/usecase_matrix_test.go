@@ -784,7 +784,7 @@ func TestMigrationThreeLegacySnapshotSurfacesThroughStatusV3AsLegacyInventory(t 
 	if err := json.Unmarshal(raw, &status); err != nil {
 		t.Fatalf("decode status: %v\n%s", err, raw)
 	}
-	if status.SchemaVersion != "ssc-init.status.v6" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
+	if status.SchemaVersion != "ssc-init.status.v7" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v1" || !status.LegacyInventory {
 		t.Fatalf("legacy status=%+v", status)
 	}
 	if status.Scope != nil || status.Coverage != nil || status.EvidenceCoverage != nil || status.Inventory == nil {
@@ -828,7 +828,7 @@ func TestV3BaselineReopenStatusQuiescentRescanAndObservedLocationDelta(t *testin
 		scanID: "00000000-0000-4000-8000-000000000013",
 	})
 	status := readMatrixStatusFromPath(t, databasePath)
-	if status.SchemaVersion != "ssc-init.status.v6" || status.InventorySchemaVersion != "ssc-init.scan.v6" || status.LegacyInventory || !status.Initialized {
+	if status.SchemaVersion != "ssc-init.status.v7" || status.InventorySchemaVersion != "ssc-init.scan.v7" || status.LegacyInventory || !status.Initialized {
 		t.Fatalf("v3 status provenance=%+v", status)
 	}
 	if status.Scope == nil || !reflect.DeepEqual(*status.Scope, first.Scan.Scope) || !reflect.DeepEqual(status.Coverage, first.Scan.Coverage) || status.Inventory == nil || !reflect.DeepEqual(*status.Inventory, first.Inventory) {

@@ -184,16 +184,17 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to read status")
 			return 1
 		}
-		status := statusPayload{SchemaVersion: "ssc-init.status.v6", Initialized: initialized}
+		status := statusPayload{SchemaVersion: "ssc-init.status.v7", Initialized: initialized}
 		if initialized {
 			status.InventorySchemaVersion = snapshot.Scan.SchemaVersion
 			status.Inventory = &snapshot.Inventory
-			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v6" {
+			if snapshot.Scan.SchemaVersion == "ssc-init.scan.v7" {
 				scope := snapshot.Scan.Scope
 				status.Scope = &scope
 				status.Coverage = snapshot.Scan.Coverage
 				evidenceCoverage := snapshot.Scan.EvidenceCoverage
 				status.EvidenceCoverage = &evidenceCoverage
+				status.AnalyzerCoverage = snapshot.Scan.AnalyzerCoverage
 			} else {
 				// Earlier snapshots predate the complete v4 external-fact contract. They keep their
 				// persisted inventory but never claim scope, coverage, or any
@@ -209,6 +210,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				Scope:                  status.Scope,
 				Coverage:               status.Coverage,
 				EvidenceCoverage:       status.EvidenceCoverage,
+				AnalyzerCoverage:       status.AnalyzerCoverage,
 				Inventory:              status.Inventory,
 			})
 			if err != nil {
@@ -681,6 +683,7 @@ type statusPayload struct {
 	Scope                  *model.ScanScope        `json:"scope,omitempty"`
 	Coverage               []model.CollectorResult `json:"coverage,omitempty"`
 	EvidenceCoverage       *model.EvidenceCoverage `json:"evidenceCoverage,omitempty"`
+	AnalyzerCoverage       *model.AnalyzerCoverage `json:"analyzerCoverage,omitempty"`
 	Inventory              *model.Inventory        `json:"inventory,omitempty"`
 }
 

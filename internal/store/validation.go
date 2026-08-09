@@ -30,7 +30,11 @@ const (
 )
 
 func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
-	if scan.AnalyzerCoverage != nil || inventory.AnalyzerFacts != nil {
+	if scan.SchemaVersion == "ssc-init.scan.v7" {
+		if scan.AnalyzerCoverage == nil || !scan.AnalyzerCoverage.Valid() {
+			return errors.New("v7 snapshot requires valid analyzer coverage")
+		}
+	} else if scan.AnalyzerCoverage != nil || inventory.AnalyzerFacts != nil {
 		return errors.New("analyzer persistence requires schema v7")
 	}
 	for field, value := range map[string]string{
@@ -109,7 +113,7 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	// Content-evidence snapshots (v3 onward) always carry one non-zero
 	// evidence coverage object and a non-nil evidence slice. Earlier schema
 	// versions predate content evidence and stay valid without either.
-	if scan.SchemaVersion == "ssc-init.scan.v3" || scan.SchemaVersion == "ssc-init.scan.v4" || scan.SchemaVersion == "ssc-init.scan.v5" || scan.SchemaVersion == "ssc-init.scan.v6" {
+	if scan.SchemaVersion == "ssc-init.scan.v3" || scan.SchemaVersion == "ssc-init.scan.v4" || scan.SchemaVersion == "ssc-init.scan.v5" || scan.SchemaVersion == "ssc-init.scan.v6" || scan.SchemaVersion == "ssc-init.scan.v7" {
 		if evidenceCoverageIsZero(scan.EvidenceCoverage) {
 			return errors.New("evidence snapshot requires evidence coverage")
 		}
@@ -129,6 +133,28 @@ func validateSnapshot(scan model.ScanResult, inventory model.Inventory) error {
 	}
 	if err := validateEvidenceCoverageResult(scan.EvidenceCoverage, evidenceByID); err != nil {
 		return err
+	}
+	analyzerIDs := make(map[string]struct{}, len(inventory.AnalyzerFacts))
+	for _, fact := range inventory.AnalyzerFacts {
+		if !fact.Valid() {
+			return errors.New("invalid analyzer fact")
+		}
+		encoded, err := json.Marshal(fact)
+		if err != nil || privacy.ContainsSensitiveValue(string(encoded)) {
+			return ErrSensitiveSnapshot
+		}
+		if _, ok := assetIDs[fact.AssetID]; !ok {
+			return errors.New("analyzer fact references missing asset")
+		}
+		if fact.EvidenceID != "" {
+			if _, ok := evidenceByID[fact.EvidenceID]; !ok {
+				return errors.New("analyzer fact references missing evidence")
+			}
+		}
+		if _, duplicate := analyzerIDs[fact.ID]; duplicate {
+			return errors.New("duplicate analyzer fact id")
+		}
+		analyzerIDs[fact.ID] = struct{}{}
 	}
 	findingIDs := make(map[string]struct{}, len(inventory.Findings))
 	for _, finding := range inventory.Findings {

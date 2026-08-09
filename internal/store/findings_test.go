@@ -14,7 +14,7 @@ func TestV6FindingsRoundTripAndHighSeverityIncidentSurvivesSnapshotPruning(t *te
 	s := openTestStore(t)
 	now := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
 	scan, inventory := validV3Snapshot(t, "finding-old")
-	scan.SchemaVersion = "ssc-init.scan.v6"
+	scan.SchemaVersion = "ssc-init.scan.v7"
 	scan.StartedAt, scan.FinishedAt = now.Add(-91*24*time.Hour), now.Add(-90*24*time.Hour)
 	inventory.Findings = []model.Finding{storeFinding(inventory.Assets[0], model.SeverityCritical, now.Add(-90*24*time.Hour))}
 	if err := s.saveScanAt(context.Background(), scan, inventory, scan.FinishedAt); err != nil {
@@ -27,7 +27,7 @@ func TestV6FindingsRoundTripAndHighSeverityIncidentSurvivesSnapshotPruning(t *te
 	}
 
 	newScan, newInventory := validV3Snapshot(t, "finding-new")
-	newScan.SchemaVersion, newScan.StartedAt, newScan.FinishedAt = "ssc-init.scan.v6", now.Add(-time.Minute), now
+	newScan.SchemaVersion, newScan.StartedAt, newScan.FinishedAt = "ssc-init.scan.v7", now.Add(-time.Minute), now
 	newInventory.Findings = []model.Finding{}
 	if err := s.saveScanAt(context.Background(), newScan, newInventory, now); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestV6FindingsRoundTripAndHighSeverityIncidentSurvivesSnapshotPruning(t *te
 func TestV6LowSeverityFindingDoesNotEnterIncidentHistory(t *testing.T) {
 	s := openTestStore(t)
 	scan, inventory := validV3Snapshot(t, "finding-low")
-	scan.SchemaVersion = "ssc-init.scan.v6"
+	scan.SchemaVersion = "ssc-init.scan.v7"
 	inventory.Findings = []model.Finding{storeFinding(inventory.Assets[0], model.SeverityMedium, scan.FinishedAt)}
 	if err := s.SaveScan(context.Background(), scan, inventory); err != nil {
 		t.Fatal(err)

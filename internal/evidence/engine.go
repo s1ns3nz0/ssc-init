@@ -191,6 +191,10 @@ func (engine Engine) Collect(ctx context.Context, env collector.Environment, inv
 	sortCoverageErrors(collection.Coverage.Errors)
 	if len(candidates) == 0 {
 		collection.Coverage.Status = evidenceCoverageStatus(collection.Coverage.Errors, nil)
+		if engine.Analyzer != nil {
+			collection.AnalyzerFacts = []model.AnalyzerFact{}
+			collection.AnalyzerCoverage = &model.AnalyzerCoverage{Status: model.CoverageSkipped, SkippedRules: []string{"no-analyzable-content"}}
+		}
 		return collection
 	}
 

@@ -42,7 +42,7 @@ func TestV4SnapshotRoundTripsSupplyChainFacts(t *testing.T) {
 	}
 	defer opened.Close()
 	scan, inventory := validV3Snapshot(t, "scan-v5-facts")
-	scan.SchemaVersion = "ssc-init.scan.v6"
+	scan.SchemaVersion = "ssc-init.scan.v7"
 	scan.StartedAt = time.Now().UTC().Add(-time.Second)
 	scan.FinishedAt = time.Now().UTC()
 	inventory.Assets[0].Signature = &model.Signature{Status: model.SignatureValid, Identifier: "dev.sscinit.core", TeamID: "ABCDE12345"}

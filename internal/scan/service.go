@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/analyzer"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/mcp"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
@@ -18,7 +19,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
-const schemaVersion = "ssc-init.scan.v6"
+const schemaVersion = "ssc-init.scan.v7"
 
 // DefaultBudget bounds one baseline scan. Design §12 allows the initial
 // baseline at most 10 minutes; exceeding a time budget must produce a partial
@@ -125,6 +126,9 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, err
 	}
 	current.Evidence = append(current.Evidence, collection.Evidence...)
+	if len(collection.AnalyzerFacts) > 0 {
+		current.AnalyzerFacts = append([]model.AnalyzerFact(nil), collection.AnalyzerFacts...)
+	}
 	sort.SliceStable(current.Evidence, func(i, j int) bool {
 		return current.Evidence[i].ID < current.Evidence[j].ID
 	})
@@ -159,6 +163,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		Coverage:         results,
 		EvidenceCoverage: collection.Coverage,
 		Scope:            s.environment.Scope,
+		AnalyzerCoverage: collection.AnalyzerCoverage,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
 		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("save baseline snapshot")
@@ -196,7 +201,7 @@ func clearRuntimeState(results []model.CollectorResult) {
 // for reporting or persistence. The persistent store's content cache is wired
 // automatically; other snapshot stores use the explicit disabled cache.
 func (s *Service) collectLocalEvidence(ctx context.Context, current model.Inventory, results []model.CollectorResult) evidence.Collection {
-	engine := evidence.Engine{Cache: evidence.DisabledLeafCache{}}
+	engine := evidence.Engine{Cache: evidence.DisabledLeafCache{}, Analyzer: analyzer.Scanner{}}
 	if cache, ok := s.snapshots.(evidence.LeafCache); ok {
 		engine.Cache = cache
 	}

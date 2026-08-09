@@ -225,6 +225,22 @@ CREATE TABLE incidents (
 );
 ALTER TABLE inventory_state ADD COLUMN findings_nil INTEGER NOT NULL DEFAULT 1 CHECK (findings_nil IN (0, 1));
 ALTER TABLE inventory_state ADD COLUMN finding_count INTEGER NOT NULL DEFAULT 0 CHECK (finding_count >= 0);`,
+	`CREATE TABLE analyzer_facts (
+    scan_id TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    fact_index INTEGER NOT NULL CHECK (fact_index >= 0),
+    fact_json BLOB NOT NULL,
+    PRIMARY KEY (scan_id, fact_id),
+    UNIQUE (scan_id, fact_index),
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+CREATE TABLE analyzer_coverage (
+    scan_id TEXT PRIMARY KEY,
+    coverage_json BLOB NOT NULL,
+    FOREIGN KEY (scan_id) REFERENCES scans(id)
+);
+ALTER TABLE inventory_state ADD COLUMN analyzer_facts_nil INTEGER NOT NULL DEFAULT 1 CHECK (analyzer_facts_nil IN (0, 1));
+ALTER TABLE inventory_state ADD COLUMN analyzer_fact_count INTEGER NOT NULL DEFAULT 0 CHECK (analyzer_fact_count >= 0);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -289,7 +305,7 @@ var requiredColumns = map[string][]columnSpec{
 	"assets":             {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_json", "BLOB", "", 1, 0, false}},
 	"relationships":      {{"scan_id", "TEXT", "", 1, 1, false}, {"from_id", "TEXT", "", 1, 2, false}, {"kind", "TEXT", "", 1, 3, false}, {"to_id", "TEXT", "", 1, 4, false}},
 	"coverage":           {{"scan_id", "TEXT", "", 1, 1, false}, {"collector", "TEXT", "", 1, 2, false}, {"result_json", "BLOB", "", 1, 0, false}},
-	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}, {"evidence_nil", "INTEGER", "1", 1, 0, true}, {"evidence_count", "INTEGER", "0", 1, 0, true}, {"findings_nil", "INTEGER", "1", 1, 0, true}, {"finding_count", "INTEGER", "0", 1, 0, true}},
+	"inventory_state":    {{"scan_id", "TEXT", "", 0, 1, false}, {"assets_nil", "INTEGER", "", 1, 0, false}, {"relationships_nil", "INTEGER", "", 1, 0, false}, {"errors_nil", "INTEGER", "", 1, 0, false}, {"asset_count", "INTEGER", "0", 1, 0, true}, {"relationship_count", "INTEGER", "0", 1, 0, true}, {"error_count", "INTEGER", "0", 1, 0, true}, {"observations_nil", "INTEGER", "1", 1, 0, true}, {"observation_count", "INTEGER", "0", 1, 0, true}, {"evidence_nil", "INTEGER", "1", 1, 0, true}, {"evidence_count", "INTEGER", "0", 1, 0, true}, {"findings_nil", "INTEGER", "1", 1, 0, true}, {"finding_count", "INTEGER", "0", 1, 0, true}, {"analyzer_facts_nil", "INTEGER", "1", 1, 0, true}, {"analyzer_fact_count", "INTEGER", "0", 1, 0, true}},
 	"asset_state":        {{"scan_id", "TEXT", "", 1, 1, false}, {"asset_id", "TEXT", "", 1, 2, false}, {"asset_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}},
 	"observations":       {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"asset_id", "TEXT", "", 1, 0, false}, {"observation_json", "BLOB", "", 1, 0, false}},
 	"observation_state":  {{"scan_id", "TEXT", "", 1, 1, false}, {"observation_id", "TEXT", "", 1, 2, false}, {"observation_index", "INTEGER", "", 1, 0, false}, {"metadata_nil", "INTEGER", "", 1, 0, false}, {"consumers_nil", "INTEGER", "", 1, 0, false}},
@@ -307,6 +323,8 @@ var requiredColumns = map[string][]columnSpec{
 	"bundle_audit":       {{"id", "INTEGER", "", 0, 1, false}, {"family", "TEXT", "", 1, 0, false}, {"action", "TEXT", "", 1, 0, false}, {"sequence", "INTEGER", "", 1, 0, false}, {"digest", "TEXT", "", 1, 0, false}, {"recorded_at", "TEXT", "", 1, 0, false}},
 	"findings":           {{"scan_id", "TEXT", "", 1, 1, false}, {"finding_id", "TEXT", "", 1, 2, false}, {"finding_index", "INTEGER", "", 1, 0, false}, {"finding_json", "BLOB", "", 1, 0, false}},
 	"incidents":          {{"finding_id", "TEXT", "", 0, 1, false}, {"severity", "TEXT", "", 1, 0, false}, {"finding_json", "BLOB", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
+	"analyzer_facts":     {{"scan_id", "TEXT", "", 1, 1, false}, {"fact_id", "TEXT", "", 1, 2, false}, {"fact_index", "INTEGER", "", 1, 0, false}, {"fact_json", "BLOB", "", 1, 0, false}},
+	"analyzer_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"coverage_json", "BLOB", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -355,9 +373,10 @@ func normalizeType(value string) string {
 }
 
 var requiredChecks = map[string][]string{
-	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)", "check(evidence_nilin(0,1))", "check(evidence_count>=0)", "check(findings_nilin(0,1))", "check(finding_count>=0)"},
+	"inventory_state":    {"check(assets_nilin(0,1))", "check(relationships_nilin(0,1))", "check(errors_nilin(0,1))", "check(asset_count>=0)", "check(relationship_count>=0)", "check(error_count>=0)", "check(observations_nilin(0,1))", "check(observation_count>=0)", "check(evidence_nilin(0,1))", "check(evidence_count>=0)", "check(findings_nilin(0,1))", "check(finding_count>=0)", "check(analyzer_facts_nilin(0,1))", "check(analyzer_fact_count>=0)"},
 	"findings":           {"check(finding_index>=0)"},
 	"incidents":          {"check(severityin('critical','high'))"},
+	"analyzer_facts":     {"check(fact_index>=0)"},
 	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
 	"observation_state":  {"check(observation_index>=0)", "check(metadata_nilin(0,1))", "check(consumers_nilin(0,1))"},
 	"relationship_state": {"check(relationship_index>=0)"},
@@ -415,6 +434,8 @@ var requiredForeignKeys = map[string][]foreignKeyGroup{
 	"evidence_state":    {{"evidence", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "scan_id"}, {"evidence_id", "evidence_id"}}}},
 	"evidence_coverage": {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 	"findings":          {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"analyzer_facts":    {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
+	"analyzer_coverage": {{"scans", "NO ACTION", "NO ACTION", "NONE", []foreignKeyMapping{{"scan_id", "id"}}}},
 }
 
 func verifyForeignKeys(db *sql.DB) error {
@@ -492,6 +513,8 @@ var requiredIndexFingerprints = map[string][]string{
 	"bundle_audit":       {},
 	"findings":           {"pk:1:scan_id,finding_id", "u:1:scan_id,finding_index"},
 	"incidents":          {"pk:1:finding_id"},
+	"analyzer_facts":     {"pk:1:scan_id,fact_id", "u:1:scan_id,fact_index"},
+	"analyzer_coverage":  {"pk:1:scan_id"},
 }
 
 func verifyIndices(db *sql.DB) error {
