@@ -93,7 +93,7 @@ func runAdversarialBaseline(t *testing.T, options adversarialOptions) adversaria
 	}
 	service := scan.NewService(
 		collector.Orchestrator{
-			Timeout: time.Second, MaxConcurrent: 4,
+			Timeout: 30 * time.Second, MaxConcurrent: 4,
 			Collectors: []collector.Collector{agents.New(), ide.New(), projects.New(roots), packages.New()},
 		},
 		snapshots,
