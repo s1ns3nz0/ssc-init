@@ -13,9 +13,9 @@ implementation exists.
 | Foundation requirement | State | Current evidence | Missing evidence/work |
 |---|---|---|---|
 | §5.1 Claude/Codex/Cursor adapters | Missing | No adapter/package directories exist | Three native host packages, common structured invocation, capability declarations, bootstrap verification, contract tests |
-| §5.2.1 collectors | Partial | `internal/collector/{agents,ide,mcp,packages,projects}` and isolated-home acceptance suite | Developer surfaces, process/listener snapshots, immutable Docker evidence, broader package managers and recent-workspace discovery |
+| §5.2.1 collectors | Partial | `internal/collector/{agents,ide,mcp,packages,projects}` and isolated-home acceptance suite; full local Docker SHA-256 identity behind external probes | Process/listener snapshots, broader package managers and recent-workspace discovery |
 | §5.2.2 inventory graph | Partial | Canonical assets, observations and relationships in `internal/model`; normalization in `internal/inventory` | Executable/package/repository/service/permission dependency edges across all collectors |
-| §5.2.3 analyzers | Partial | Bounded hashes, semantic MCP digest, manifest facts and version diff | Signature analysis, provenance validation, dependency extraction, entropy/obfuscation, dangerous APIs and source-to-sink flows |
+| §5.2.3 analyzers | Partial | Bounded hashes, semantic MCP digest, closed macOS signature facts, local npm/Cargo/Go provenance and version diff | Dependency extraction beyond supported lockfiles, entropy/obfuscation, dangerous APIs and source-to-sink flows |
 | §5.2.4 decision engine | Partial | Deterministic local shape/change/pin policy in `internal/policy` | TI evidence, behavior findings, signed organization policy and final verdict correlation |
 | §5.2.5 TI manager | Missing | Precedence level exists but reports `no evidence available` | Signed schema, trust root, ingestion/retrieval, stage/activate/rollback, freshness and withdrawal |
 | §5.2.6 policy manager | Partial | Local `ssc-init.policy.v1`, scoped expiring exceptions, pins and decision audit | Git-managed YAML compiler, deterministic signed bundle, signature/schema verification, organization deny/allow indexing |
@@ -23,7 +23,7 @@ implementation exists.
 | §5.2.8 reporters | Partial | Scan/status/doctor/install/policy JSON and human hook/pretty output | Finding JSON, SARIF 2.1.0, inventory CycloneDX, HTTPS webhook and complete local evidence report |
 | §5.3 shared installation | Partial | Universal build, versioned stage/activate/rollback, doctor v2, signed/notarized/stapled-DMG scripts and runbook | Real Developer ID signing/notary execution; adapter bootstrap; TI/policy/report/quarantine lifecycle |
 | §5.4 scheduling | Missing | No launchd module or command | Explicit opt-in preview, one shared job, logs/removal instructions, idempotence tests |
-| §6.1 quick scan | Partial | Identity/version/publisher/hash and explicit coverage gaps | Code signatures, immutable package provenance, TI, suspicious forms and dangerous-token/obfuscation facts |
+| §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance and explicit coverage gaps | TI, suspicious forms and dangerous-token/obfuscation facts |
 | §6.2 deep scan | Missing | No deep-analysis package or promotion scheduler | Bounded decoding, bundled dependencies, static flows, semantic version differences, WASM/native metadata |
 | §6.3 mutable dependencies | Partial | Local policy can match exact recorded metadata and pin digest changes | Proven registry integrity, normalized mutable-reference facts, warning/finding decisions, organization default deny |
 | §7 intelligence | Missing | None; level 1 is explicitly inert | Licensed source ingestion, normalized records, signed distribution, freshness, verdict matching and campaign provenance |

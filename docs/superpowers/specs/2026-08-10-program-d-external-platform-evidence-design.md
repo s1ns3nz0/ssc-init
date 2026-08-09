@@ -135,7 +135,8 @@ the underlying inventory asset.
 Program D is complete only when tests prove:
 
 1. a full Docker ID becomes complete container evidence and a one-character
-   mutation changes the evidence ID/delta;
+   mutation preserves the stable evidence ID while producing an evidence
+   `changed` delta;
 2. truncated/malformed IDs never become trusted evidence;
 3. default scans invoke no signature, Docker or package command;
 4. valid/invalid/unsigned/replaced code-signature fixtures map to closed facts

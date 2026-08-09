@@ -44,7 +44,8 @@ acceptance fixtures and docs.
 and tests; `internal/store/evidence.go` and tests.
 
 1. RED: a sealed complete container digest succeeds; forged, mutated,
-   malformed and unsupported shapes fail; mutation changes evidence ID.
+   malformed and unsupported shapes fail; a digest mutation preserves the
+   stable evidence ID and changes the evidence delta.
 2. Add runtime-only preset algorithm/digest fields to the issuer proof and
    allow only full SHA-256 for complete `container-identity`.
 3. Run evidence/store race tests and mutation tests.

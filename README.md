@@ -14,11 +14,13 @@ The baseline collector inventories and, where a bounded local implementation exi
 - VS Code, VS Code Insiders, VS Code OSS, Cursor, Windsurf, and JetBrains extensions, with file evidence for each supported manifest and each declared `main`/`browser` entry point validated beneath the extension root, plus a bounded payload-tree digest (JetBrains trees include JAR bytes without enumerating or analyzing archive members);
 - user-level and project-level MCP configurations, with one secret-free semantic digest (`ssc-init.semantic-mcp.v1`) per parsed declaration — raw MCP configuration files are never hashed, persisted, or exposed because they can contain credentials;
 - an exact, closed project manifest and lockfile filename catalog (npm-compatible, Python, Go, Cargo, and Homebrew names) inside explicitly configured project roots, with per-file SHA-256 evidence; project source trees, vendored dependencies, and caches are never hashed;
-- global developer package ecosystems and Docker only when command probes are explicitly enabled; discovered package payloads and Docker image identities receive explicit `unsupported` evidence rather than a claim.
+- global developer package ecosystems and Docker only when command probes are explicitly enabled; exact full Docker SHA-256 image IDs become complete container-identity evidence, while truncated or missing IDs and ordinary package payloads remain explicit `unsupported` evidence;
+- bounded npm, Cargo, and Go lockfile provenance from configured project roots. npm/Cargo SHA-256 facts are immutable; Go `h1` is retained as a source-specific fact rather than being mislabeled as SHA-256. Package-to-lockfile and package-to-probe relationships use a closed graph vocabulary;
+- macOS signature facts for verified probe executables when external probes are enabled. The result is a closed `valid`, `invalid`, `unsigned`, `unavailable`, or `unsupported` fact, not a safety verdict; signer diagnostics and certificate chains are discarded.
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Package payload hashing, immutable Docker image identity, code-signature validation, threat intelligence (TI), behavior analysis, Git-managed policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs.
+Package payload hashing, threat intelligence (TI), behavior analysis, Git-managed organization policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs. Real release signing/notarization also remains a release-time step requiring Apple Developer credentials; it is separate from local signature inspection.
 
 ## Commands
 
@@ -95,7 +97,7 @@ chooses to act on it; it is not an enforcement claim. The session hook reports
 new violations in a separate `POLICY` section and collapses standing violations
 to one reminder line, while continuing to exit zero.
 
-The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity of the executable used; it does not make that executable trusted.
+The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity and macOS signature fact of the executable used; neither fact makes that executable safe or trusted.
 
 ## Retention and store size
 

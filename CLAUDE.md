@@ -33,8 +33,9 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 
 - `internal/collector/{agents,ide,mcp,packages,projects}` — closed-catalog discovery: Claude/Codex/Cursor plugins and skills, VS Code-family and JetBrains extensions, MCP configurations, project manifests/lockfiles, and (only with `--external-probes`) package/Docker command probes. Collectors additionally issue sealed runtime-only `LocalEvidenceTarget` values (`json:"-"`, never persisted).
 - `internal/evidence` — validates sealed targets against the normalized graph (issuer seal, graph binding, path validation), then performs descriptor-anchored file/tree hashing and secret-free semantic MCP hashing. Discovery-time identity anchors are re-verified before and after every read; mismatch yields `unavailable/identity_changed`.
-- `internal/platform` — descriptor-rooted, no-follow filesystem primitives (`os.Root`-based) and file identity fingerprints.
-- `internal/model` — public data model: assets, observations, `ContentEvidence` with closed kind/subject/status/error/metadata vocabularies.
+- `internal/platform` — descriptor-rooted, no-follow filesystem primitives (`os.Root`-based), file identity fingerprints, and bounded macOS `codesign` inspection.
+- `internal/model` — public v4 data model: assets with closed signature/provenance facts, observations, relationships, and `ContentEvidence` with closed kind/subject/status/error/metadata vocabularies.
+- `internal/provenance` — bounded, network-free npm/Cargo/Go lockfile parsing; Go `h1` remains a source-specific integrity fact and is never mislabeled SHA-256.
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
 - `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state.
@@ -56,7 +57,7 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 
 ## Completed work
 
-The local content evidence core (Tasks 1–14) is merged to `master`; the full suite, race detector, vet, static audits, and release build all pass. Public contracts are `ssc-init.scan.v4` / `ssc-init.status.v4`; v1/v2 snapshots load as `legacyInventory: true` with no evidence claims. Reference docs:
+The local content evidence core (Tasks 1–14) is merged to `master`; the full suite, race detector, vet, static audits, and release build all pass. Public contracts are `ssc-init.scan.v4` / `ssc-init.status.v4`; v1–v3 snapshots load as `legacyInventory: true` without upgrading historical claims. Reference docs:
 
 - design: `docs/superpowers/specs/2026-08-07-local-content-evidence-core-design.md`
 - plan: `docs/superpowers/plans/2026-08-07-local-content-evidence-core.md`
@@ -77,7 +78,9 @@ Program C adds the local advisory policy engine: an inert starter document, five
 The doctor JSON contract is `ssc-init.doctor.v2`; its `install` object reports
 managed-install integrity and rollback availability without paths.
 
-Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Design non-goals still unimplemented: package payload hashing, immutable Docker identity, code signatures, TI, behavior analysis, policy enforcement, verified organization bundles, warnings, and host adapters.
+Program D adds full local Docker SHA-256 identity evidence, bounded macOS signature facts for verified external-probe executables, npm/Cargo/Go lockfile provenance, and a closed deterministic relationship vocabulary. It adds no verdict, safety claim, network lookup, or enforcement. Real Developer ID signing/notarization remains a release-time `[APPLE]` step awaiting credentials.
+
+Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include package payload hashing, TI, behavior analysis, verified organization bundles, warnings, blocking, and host adapters.
 
 Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set. For multi-task plans, SDD conventions apply: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; review fixes need a reproducing failing test first; adversarial/race-prone suites re-verified with `-count=50`.
 
