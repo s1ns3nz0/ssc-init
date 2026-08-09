@@ -50,6 +50,53 @@ func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T)
 	}
 }
 
+func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "package-lock.json"), `{"packages":{"node_modules/demo":{"name":"demo","version":"1.2.3","integrity":"sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo="}}}`)
+	result := collectProjectsAt(t, home, root)
+
+	var packageAsset model.Asset
+	var lockfileID string
+	for _, asset := range result.Assets {
+		switch {
+		case asset.ID == "pkg:npm/demo@1.2.3":
+			packageAsset = asset
+		case asset.Source == "project-lockfile":
+			lockfileID = asset.ID
+		}
+	}
+	if packageAsset.Provenance == nil || packageAsset.Provenance.Status != model.ProvenanceImmutable || packageAsset.Provenance.Integrity != "sha256:"+strings.Repeat("aa", 32) || lockfileID == "" {
+		t.Fatalf("package=%+v lockfileID=%q assets=%+v", packageAsset, lockfileID, result.Assets)
+	}
+	want := model.Relationship{From: packageAsset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID}
+	found := false
+	for _, relationship := range result.Relationships {
+		found = found || relationship == want
+	}
+	if !found {
+		t.Fatalf("missing relationship=%+v in %+v", want, result.Relationships)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("manifest evidence was not preserved: %+v", collection)
+	}
+}
+
+func TestMalformedLockfileKeepsEvidenceAndMarksProvenancePartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "Cargo.lock"), "not valid cargo lock syntax = [")
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "provenance_malformed" {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("evidence=%+v", collection)
+	}
+}
+
 func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
@@ -59,7 +106,14 @@ func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 		"Cargo.toml", "Cargo.lock", "Brewfile",
 	}
 	for _, name := range names {
-		writeProjectFile(t, filepath.Join(root, name), name+" contents")
+		contents := name + " contents"
+		switch name {
+		case "package-lock.json", "npm-shrinkwrap.json":
+			contents = `{"packages":{}}`
+		case "go.sum", "Cargo.lock":
+			contents = ""
+		}
+		writeProjectFile(t, filepath.Join(root, name), contents)
 	}
 	for _, name := range []string{"requirements-dev.txt", "Package.json", "package.json.bak", "xCargo.toml"} {
 		writeProjectFile(t, filepath.Join(root, name), "must not be evidence")

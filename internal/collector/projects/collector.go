@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/identity"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/provenance"
 )
 
 const (
@@ -414,9 +416,11 @@ func buildEvidence(ctx context.Context, owner *projectCollector, env collector.E
 		if !exists || !observed {
 			continue
 		}
+		issueStart := len(result.Errors)
 		if err := issueProjectEvidence(ctx, owner, env, root, walked.rootFingerprint, item, projectID, observation, result); err != nil {
 			return errorsOut, err
 		}
+		errorsOut = append(errorsOut, result.Errors[issueStart:]...)
 	}
 	if err := ctx.Err(); err != nil {
 		return errorsOut, err
@@ -491,6 +495,9 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 			return issueProjectPreset(ctx, result, base, model.EvidenceUnavailable)
 		}
 	}
+	if format, supported := provenanceFormat(item.definition.basename); supported {
+		appendProjectLockfileProvenance(ctx, asset, item, configured, projectID, format, result)
+	}
 	base.RootPath = configured.Path
 	base.RelativePath = filepath.Clean(item.relativePath)
 	anchor := evidence.Anchor{
@@ -506,6 +513,100 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 		result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(base, anchor))
 	}
 	return ctx.Err()
+}
+
+func provenanceFormat(basename string) (provenance.Format, bool) {
+	switch basename {
+	case "package-lock.json", "npm-shrinkwrap.json":
+		return provenance.FormatNPM, true
+	case "Cargo.lock":
+		return provenance.FormatCargo, true
+	case "go.sum":
+		return provenance.FormatGoSum, true
+	default:
+		return "", false
+	}
+}
+
+func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
+	basename := filepath.Base(item.relativePath)
+	locationRef := identity.SafeLocationRef(configured.home, filepath.Join(configured.Path, item.relativePath), configured.Ref)
+	lockfileID := digestID("project-lockfile", "ssc-init.project-lockfile.v1", locationRef)
+	observation, err := identity.FinalizeObservation(model.Observation{
+		AssetID: lockfileID, Collector: "projects", Scope: model.ScopeProject, LocationRef: locationRef,
+		ProjectID: projectID, Source: item.definition.targetID(), Metadata: map[string]string{"root_ref": configured.Ref, "format": string(format)},
+	})
+	if err != nil {
+		appendProjectProvenanceError(result, "provenance_identity_rejected", "lockfile provenance identity was rejected")
+		return
+	}
+	file, _, opened, err := platform.OpenVerifiedFile(projectRoot, basename)
+	if err != nil {
+		appendProjectProvenanceError(result, "provenance_unavailable", "lockfile provenance is unavailable")
+		return
+	}
+	defer file.Close()
+	openedFingerprint, ok := platform.Fingerprint(opened)
+	if !ok || openedFingerprint != item.fileFingerprint {
+		appendProjectProvenanceError(result, "provenance_identity_changed", "lockfile provenance identity changed")
+		return
+	}
+	records, err := provenance.Parse(ctx, format, file, item.definition.maxBytes)
+	if err != nil {
+		if ctx.Err() == nil {
+			appendProjectProvenanceError(result, "provenance_malformed", "lockfile provenance is malformed")
+		}
+		return
+	}
+	after, err := file.Stat()
+	afterFingerprint, afterOK := platform.Fingerprint(after)
+	if err != nil || !afterOK || afterFingerprint != item.fileFingerprint {
+		appendProjectProvenanceError(result, "provenance_identity_changed", "lockfile provenance identity changed")
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	result.Assets = append(result.Assets, model.Asset{ID: lockfileID, Type: model.AssetProject, Name: basename, Source: "project-lockfile"})
+	result.Observations = append(result.Observations, observation)
+	result.Relationships = append(result.Relationships, model.Relationship{From: projectID, Kind: model.RelationshipContains, To: lockfileID})
+	for _, record := range records {
+		asset := provenancePackageAsset(record)
+		metadata := map[string]string{"lockfile_asset_id": lockfileID}
+		if record.SourceIntegrity != "" {
+			metadata["source_integrity"] = record.SourceIntegrity
+		}
+		packageObservation, finalizeErr := identity.FinalizeObservation(model.Observation{
+			AssetID: asset.ID, Collector: "projects", Host: record.Ecosystem, Consumers: []string{record.Ecosystem},
+			Scope: model.ScopeProject, LocationRef: locationRef, ProjectID: projectID, Source: item.definition.targetID(), Metadata: metadata,
+		})
+		if finalizeErr != nil {
+			appendProjectProvenanceError(result, "provenance_identity_rejected", "package provenance identity was rejected")
+			continue
+		}
+		result.Assets = append(result.Assets, asset)
+		result.Observations = append(result.Observations, packageObservation)
+		result.Relationships = append(result.Relationships, model.Relationship{From: asset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID})
+	}
+}
+
+func provenancePackageAsset(record provenance.Record) model.Asset {
+	parts := strings.Split(record.Name, "/")
+	for index := range parts {
+		parts[index] = strings.ReplaceAll(url.PathEscape(parts[index]), "@", "%40")
+	}
+	version := strings.ReplaceAll(url.PathEscape(record.Version), "@", "%40")
+	provenanceFact := record.Provenance
+	return model.Asset{
+		ID:   "pkg:" + record.Ecosystem + "/" + strings.Join(parts, "/") + "@" + version,
+		Type: model.AssetPackage, Name: record.Name, Version: record.Version, Provenance: &provenanceFact,
+	}
+}
+
+func appendProjectProvenanceError(result *model.CollectorResult, code, message string) {
+	if len(result.Errors) < maxWalkErrors {
+		result.Errors = append(result.Errors, model.CoverageError{Code: code, Message: message})
+	}
 }
 
 func issueProjectPreset(ctx context.Context, result *model.CollectorResult, target model.LocalEvidenceTarget, status model.EvidenceStatus) error {
