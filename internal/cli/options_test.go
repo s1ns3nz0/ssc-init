@@ -57,6 +57,17 @@ func TestParseOptionsAcceptsPolicyPinForms(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsPolicyCheckForms(t *testing.T) {
+	for _, args := range [][]string{{"policy", "check"}, {"policy", "check", "--json"}, {"policy", "check", "--pretty"}, {"policy", "check", "--policy", "/tmp/policy.json", "--json"}} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	if _, err := ParseOptions([]string{"policy", "check", "--json", "--pretty"}); err == nil {
+		t.Fatal("accepted two output formats")
+	}
+}
+
 func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 	tests := []struct {
 		args []string

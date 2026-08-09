@@ -88,22 +88,38 @@ func parsePolicyOptions(args []string, options *Options) error {
 		return ErrInvalidOptions
 	}
 	options.PolicyCommand = args[0]
-	if options.PolicyCommand != "init" && options.PolicyCommand != "pin" {
+	if options.PolicyCommand != "init" && options.PolicyCommand != "pin" && options.PolicyCommand != "check" {
 		return ErrInvalidOptions
 	}
 	for index := 1; index < len(args); index++ {
 		flag := args[index]
-		if index+1 == len(args) {
-			return ErrInvalidOptions
-		}
-		index++
 		switch flag {
+		case "--json":
+			if options.PolicyCommand != "check" || options.JSON || options.Pretty {
+				return ErrInvalidOptions
+			}
+			options.JSON = true
+			continue
+		case "--pretty":
+			if options.PolicyCommand != "check" || options.JSON || options.Pretty {
+				return ErrInvalidOptions
+			}
+			options.Pretty = true
+			continue
 		case "--policy":
+			if index+1 == len(args) {
+				return ErrInvalidOptions
+			}
+			index++
 			if options.PolicyPath != "" || !validPolicyPath(args[index]) {
 				return ErrInvalidOptions
 			}
 			options.PolicyPath = args[index]
 		case "--update":
+			if index+1 == len(args) {
+				return ErrInvalidOptions
+			}
+			index++
 			if options.PolicyCommand != "pin" || options.PolicyAssetID != "" || args[index] == "" || strings.ContainsRune(args[index], '\x00') {
 				return ErrInvalidOptions
 			}
@@ -111,6 +127,9 @@ func parsePolicyOptions(args []string, options *Options) error {
 		default:
 			return ErrInvalidOptions
 		}
+	}
+	if options.PolicyCommand == "check" && !options.JSON && !options.Pretty {
+		options.JSON = true
 	}
 	return nil
 }

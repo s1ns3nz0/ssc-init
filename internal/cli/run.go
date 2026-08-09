@@ -97,6 +97,8 @@ type App struct {
 	PolicyPath      string
 	PolicyStore     PolicyStore
 	PolicySources   policy.Sources
+	PolicyDocument  policy.Document
+	PolicyLoadError error
 	Now             func() time.Time
 }
 
@@ -255,6 +257,9 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		if options.PolicyCommand == "pin" {
 			return a.runPolicyPin(ctx, options, stdout, stderr)
 		}
+		if options.PolicyCommand == "check" {
+			return a.runPolicyCheck(ctx, options, stdout, stderr)
+		}
 		if options.PolicyCommand != "init" {
 			fmt.Fprintln(stderr, "invalid command arguments")
 			return 2
@@ -360,6 +365,87 @@ func (a App) runPolicyPin(ctx context.Context, options Options, stdout, stderr i
 	fmt.Fprintln(stdout, "  A pin protects against future change, not against what is already there —")
 	fmt.Fprintln(stdout, "  pinning a compromised machine approves the compromise.")
 	fmt.Fprintf(stdout, "  pinned %d evidence subjects\n", len(pins))
+	return 0
+}
+
+type policyCheckPayload struct {
+	SchemaVersion string             `json:"schemaVersion"`
+	Capability    string             `json:"capability"`
+	Levels        []policy.Level     `json:"levels"`
+	Snapshot      policySnapshotRef  `json:"snapshot"`
+	Violations    []policy.Violation `json:"violations"`
+}
+
+type policySnapshotRef struct {
+	ScanID     string    `json:"scanId"`
+	FinishedAt time.Time `json:"finishedAt"`
+}
+
+func (a App) runPolicyCheck(ctx context.Context, options Options, stdout, stderr io.Writer) int {
+	if a.PolicyLoadError != nil {
+		fmt.Fprintf(stderr, "invalid policy document: %v\n", a.PolicyLoadError)
+		return 2
+	}
+	if a.StatusReader == nil || a.PolicyStore == nil {
+		fmt.Fprintln(stderr, "policy state is unavailable")
+		return 1
+	}
+	snapshot, initialized, err := a.StatusReader.LatestSnapshot(ctx)
+	if err != nil || !initialized {
+		fmt.Fprintln(stderr, "latest snapshot is unavailable")
+		return 1
+	}
+	pins, err := a.PolicyStore.Pins(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, "failed to read policy pins")
+		return 1
+	}
+	exceptions, err := a.PolicyStore.Exceptions(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, "failed to read policy exceptions")
+		return 1
+	}
+	decisions, err := a.PolicyStore.Decisions(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, "failed to read policy decisions")
+		return 1
+	}
+	now := time.Now()
+	if a.Now != nil {
+		now = a.Now()
+	}
+	sources := a.PolicySources
+	sources.Document = a.PolicyDocument
+	if err := policy.VerifyExceptions(sources.Document, sources.Intelligence, now); err != nil {
+		fmt.Fprintf(stderr, "invalid policy document: %v\n", err)
+		return 2
+	}
+	result := policy.Evaluate(policy.Input{Sources: sources, Inventory: snapshot.Inventory, Pins: pins, Exceptions: exceptions, Now: now})
+	standing := map[string]bool{}
+	for _, decision := range decisions {
+		standing[decision.RuleID+"\x00"+decision.AssetID] = true
+	}
+	for index := range result.Violations {
+		result.Violations[index].Standing = standing[result.Violations[index].RuleID+"\x00"+result.Violations[index].AssetID]
+	}
+	if err := a.PolicyStore.RecordDecisions(ctx, result.Violations, now); err != nil {
+		fmt.Fprintln(stderr, "failed to record policy decisions")
+		return 1
+	}
+	payload := policyCheckPayload{SchemaVersion: "ssc-init.policy-check.v1", Capability: "advisory", Levels: result.Levels,
+		Snapshot: policySnapshotRef{ScanID: snapshot.Scan.ScanID, FinishedAt: snapshot.Scan.FinishedAt}, Violations: result.Violations}
+	if options.Pretty {
+		if err := report.WritePolicy(stdout, result); err != nil {
+			fmt.Fprintln(stderr, "failed to write policy output")
+			return 1
+		}
+	} else if err := writeJSON(stdout, payload); err != nil {
+		fmt.Fprintln(stderr, "failed to write policy output")
+		return 1
+	}
+	if len(result.Violations) > 0 {
+		return 3
+	}
 	return 0
 }
 

@@ -77,8 +77,10 @@ func TestPolicyInitWritesStarterOnceWithPrivatePermissions(t *testing.T) {
 }
 
 type memoryPolicyStore struct {
-	pins  []policy.Pin
-	saved []policy.Pin
+	pins      []policy.Pin
+	saved     []policy.Pin
+	decisions []policy.Decision
+	recorded  []policy.Violation
 }
 
 func (store *memoryPolicyStore) Pins(context.Context) ([]policy.Pin, error) {
@@ -93,11 +95,13 @@ func (store *memoryPolicyStore) SavePins(_ context.Context, pins []policy.Pin, _
 func (store *memoryPolicyStore) Exceptions(context.Context) ([]policy.Exception, error) {
 	return nil, nil
 }
-func (store *memoryPolicyStore) RecordDecisions(context.Context, []policy.Violation, time.Time) error {
+
+func (store *memoryPolicyStore) RecordDecisions(_ context.Context, violations []policy.Violation, _ time.Time) error {
+	store.recorded = append([]policy.Violation(nil), violations...)
 	return nil
 }
 func (store *memoryPolicyStore) Decisions(context.Context) ([]policy.Decision, error) {
-	return nil, nil
+	return append([]policy.Decision(nil), store.decisions...), nil
 }
 
 func policySnapshot() *cliMemorySnapshots {
@@ -142,6 +146,74 @@ func TestPolicyPinRefusesUnderAnOrganizationBundle(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"policy", "pin"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "pins are authored in the organization bundle") {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestPolicyCheckExitsThreeOnViolationAndNamesInertLevels(t *testing.T) {
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[{"id":"unpinned","family":"pin","enabled":true,"description":"d"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	snapshots.latest.Scan.ScanID = "scan-1"
+	snapshots.latest.Scan.FinishedAt = time.Date(2026, 8, 9, 1, 2, 3, 0, time.UTC)
+	store := &memoryPolicyStore{}
+	app := App{StatusReader: snapshots, PolicyStore: store, PolicyDocument: document, Now: func() time.Time { return time.Date(2026, 8, 9, 2, 0, 0, 0, time.UTC) }}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check", "--json"}, &out, &errOut); code != 3 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	var payload struct {
+		SchemaVersion string             `json:"schemaVersion"`
+		Capability    string             `json:"capability"`
+		Levels        []policy.Level     `json:"levels"`
+		Violations    []policy.Violation `json:"violations"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SchemaVersion != "ssc-init.policy-check.v1" || payload.Capability != "advisory" || len(payload.Levels) != 5 || payload.Levels[0].Active || payload.Levels[0].Reason != "no evidence available" {
+		t.Fatalf("payload header=%+v", payload)
+	}
+	if len(payload.Violations) != 1 || payload.Violations[0].RuleID != "unpinned" || len(store.recorded) != 1 {
+		t.Fatalf("violations=%+v recorded=%+v", payload.Violations, store.recorded)
+	}
+}
+
+func TestPolicyCheckExitsTwoOnAnUnloadableDocument(t *testing.T) {
+	app := App{PolicyLoadError: errors.New("rules[0].family: unknown rule family")}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "rules[0].family") {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestPolicyCheckTouchesNoCollectorRoot(t *testing.T) {
+	root := t.TempDir()
+	plugin := filepath.Join(root, "plugin.json")
+	if err := os.WriteFile(plugin, []byte(`{"secret":"must-not-be-read"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(plugin, wantTime, wantTime); err != nil {
+		t.Fatal(err)
+	}
+	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := policySnapshot()
+	app := App{Home: root, StatusReader: snapshots, PolicyStore: &memoryPolicyStore{}, PolicyDocument: document}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "check"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	info, err := os.Stat(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshots.latestCalls != 1 || !info.ModTime().Equal(wantTime) {
+		t.Fatalf("latest calls=%d plugin mtime=%s", snapshots.latestCalls, info.ModTime())
 	}
 }
 
@@ -195,11 +267,12 @@ func TestRunOptionsUsesAlreadyParsedCommand(t *testing.T) {
 }
 
 type cliMemorySnapshots struct {
-	latest    model.Snapshot
-	hasLatest bool
-	loadErr   error
-	saved     []model.ScanResult
-	inventory []model.Inventory
+	latest      model.Snapshot
+	hasLatest   bool
+	loadErr     error
+	saved       []model.ScanResult
+	inventory   []model.Inventory
+	latestCalls int
 }
 
 func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult, inventory model.Inventory) error {
@@ -211,6 +284,7 @@ func (m *cliMemorySnapshots) SaveScan(_ context.Context, result model.ScanResult
 }
 
 func (m *cliMemorySnapshots) LatestSnapshot(context.Context) (model.Snapshot, bool, error) {
+	m.latestCalls++
 	return m.latest, m.hasLatest, m.loadErr
 }
 

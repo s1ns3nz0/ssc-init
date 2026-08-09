@@ -24,6 +24,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/install"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
 )
@@ -139,7 +140,25 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		app.Home = home
 		app.PolicyPath = paths.Install().PolicyFile
-		if options.PolicyCommand == "pin" {
+		if options.PolicyCommand == "check" {
+			policyPath := app.PolicyPath
+			if options.PolicyPath != "" {
+				policyPath = options.PolicyPath
+				if strings.HasPrefix(policyPath, "$HOME/") {
+					policyPath = filepath.Join(home, strings.TrimPrefix(policyPath, "$HOME/"))
+				}
+			}
+			contents, err := os.ReadFile(policyPath)
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to load policy document")
+				return 1
+			}
+			app.PolicyDocument, app.PolicyLoadError = policy.Load(contents)
+			if app.PolicyLoadError != nil {
+				return app.RunOptions(ctx, options, stdout, stderr)
+			}
+		}
+		if options.PolicyCommand == "pin" || options.PolicyCommand == "check" {
 			snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
 			if err != nil {
 				fmt.Fprintln(stderr, "failed to initialize SSC Init")
