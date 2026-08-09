@@ -21,6 +21,12 @@ go mod download && sh scripts/build-darwin.sh          # release build → dist/
 
 The release build script disables network/toolchain downloads and requires a clean tracked worktree; binaries report the exact `v*` tag when HEAD is tagged, else `dev+git.<full-commit>` from committed HEAD.
 
+The reproducible release set is the two architecture slices, universal binary,
+`checksums.txt`, CycloneDX SBOM, and provenance statement. Developer ID signing
+and `.dmg` notarization/stapling are separate because Apple's secure timestamp
+makes signed bytes non-reproducible. The final shipping artifact is the stapled
+`ssc-init-darwin.dmg`; see `docs/release-runbook.md`.
+
 ## Architecture
 
 Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` orchestration → collectors → graph normalization (`internal/inventory`) → local evidence engine (`internal/evidence`) → delta/report (`internal/report`) → atomic SQLite snapshot (`internal/store`).
@@ -32,6 +38,7 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
 - `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state.
+- `internal/install` — the only default product path that executes a supplied binary, solely for a bounded doctor health check; it is never reachable from scanning. The current-version pointer is a regular file, never a symlink, and every read re-validates it.
 - `internal/policy` — pure evaluation over already-recorded inventory facts. It must not read the host, run processes, open sockets, or import `internal/report`.
 - `internal/inventory` — owns both inventory diffing and the shared change-ladder classifier; report code only renders its result.
 - `internal/acceptance` — isolated-home end-to-end fixtures.
@@ -66,6 +73,9 @@ Program B (scan status vocabulary, retention, budgets) is also merged to `master
 - The performance harness `internal/acceptance/perf_budget_test.go` is behind `//go:build perfbudget` and is excluded from `go test ./...`. Run it with `go test ./internal/acceptance -tags perfbudget -run TestPerformanceBudgets -v -count=1`.
 
 Program C adds the local advisory policy engine: an inert starter document, five-level precedence with levels 1–3 truthfully inactive, shape/change/pin rules, expiring scoped exceptions, TOFU pins, `policy check` exit code 3 for violations, and hook reporting. It does not add enforcement, threat intelligence, or verified organization bundles.
+
+The doctor JSON contract is `ssc-init.doctor.v2`; its `install` object reports
+managed-install integrity and rollback availability without paths.
 
 Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Design non-goals still unimplemented: package payload hashing, immutable Docker identity, code signatures, TI, behavior analysis, policy enforcement, verified organization bundles, warnings, and host adapters.
 

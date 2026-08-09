@@ -111,21 +111,21 @@ Pruning frees pages for reuse, but those pages return to the filesystem only whe
 
 ## Download and verify
 
-Release artifacts are named for both supported macOS architectures:
-
-- `ssc-init-darwin-arm64` for Apple silicon;
-- `ssc-init-darwin-amd64` for Intel Macs; and
-- `checksums.txt` for SHA-256 verification.
-
-After downloading both binaries and `checksums.txt` from the matching release into a `dist` directory, verify them before use:
+The user-facing release artifact is the signed, notarized, stapled Universal
+Binary disk image `ssc-init-darwin.dmg`, accompanied by
+`checksums-notarized.txt`. Verify both the bytes and Apple's attached ticket
+before mounting it:
 
 ```sh
-shasum -a 256 -c dist/checksums.txt
-chmod 0755 dist/ssc-init-darwin-arm64
-./dist/ssc-init-darwin-arm64 version --json
+shasum -a 256 -c checksums-notarized.txt
+codesign --verify --strict --verbose=2 ssc-init-darwin.dmg
+xcrun stapler validate ssc-init-darwin.dmg
+spctl --assess -vvv --type open --context context:primary-signature ssc-init-darwin.dmg
 ```
 
-Use `ssc-init-darwin-amd64` instead on an Intel Mac.
+The disk image contains one `ssc-init` executable supporting both Apple silicon
+and Intel Macs. The complete release ordering and adapter verification steps
+are in [the release runbook](docs/release-runbook.md).
 
 ## Build from source
 
