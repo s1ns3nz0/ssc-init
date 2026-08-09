@@ -44,12 +44,28 @@ type fakeSchedule struct {
 }
 
 func (f fakeSchedule) Preview() (schedule.Preview, error) { return f.preview, f.err }
+func (f fakeSchedule) Install(context.Context) (schedule.Result, error) {
+	return schedule.Result{SchemaVersion: schedule.ResultSchemaV1, Label: schedule.Label, Status: schedule.StatusInstalled, Preview: f.preview}, f.err
+}
+func (f fakeSchedule) Remove(context.Context) (schedule.Result, error) {
+	return schedule.Result{SchemaVersion: schedule.ResultSchemaV1, Label: schedule.Label, Status: schedule.StatusRemoved, Preview: f.preview}, f.err
+}
 
 func TestRunSchedulePreviewWritesExactContract(t *testing.T) {
 	preview := schedule.Preview{SchemaVersion: schedule.SchemaV1, Label: schedule.Label, Command: []string{"$HOME/a/ssc-init", "scan", "--baseline", "--json"}, Hour: 9, Minute: 0, StandardOut: "$HOME/a/daily.stdout.log", StandardError: "$HOME/a/daily.stderr.log", RemovalCommand: "ssc-init schedule remove --json", Capability: "scheduled"}
 	var out, errOut bytes.Buffer
 	if code := (App{Schedule: fakeSchedule{preview: preview}}).Run(context.Background(), []string{"schedule", "preview", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.schedule-preview.v1"`) || strings.Contains(out.String(), "/Users/") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunScheduleInstallAndRemoveWriteClosedResults(t *testing.T) {
+	preview := schedule.Preview{SchemaVersion: schedule.SchemaV1, Label: schedule.Label, Command: []string{"$HOME/a/ssc-init", "scan", "--baseline", "--json"}, Hour: 9, StandardOut: "$HOME/a/daily.stdout.log", StandardError: "$HOME/a/daily.stderr.log", RemovalCommand: "ssc-init schedule remove --json", Capability: "scheduled"}
+	for _, command := range []string{"install", "remove"} {
+		var out, errOut bytes.Buffer
+		if code := (App{Schedule: fakeSchedule{preview: preview}}).Run(context.Background(), []string{"schedule", command, "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.schedule-result.v1"`) {
+			t.Fatalf("command=%s code=%d out=%q err=%q", command, code, out.String(), errOut.String())
+		}
 	}
 }
 

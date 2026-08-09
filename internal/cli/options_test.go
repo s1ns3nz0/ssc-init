@@ -276,7 +276,12 @@ func TestParseSchedulePreviewOptions(t *testing.T) {
 	if err != nil || got.ScheduleCommand != "preview" || !got.JSON {
 		t.Fatalf("options=%+v err=%v", got, err)
 	}
-	for _, args := range [][]string{{"schedule"}, {"schedule", "preview"}, {"schedule", "preview", "--pretty"}, {"schedule", "install", "--json"}} {
+	for _, command := range []string{"install", "remove"} {
+		if got, err := ParseOptions([]string{"schedule", command, "--json"}); err != nil || got.ScheduleCommand != command {
+			t.Fatalf("command=%s options=%+v err=%v", command, got, err)
+		}
+	}
+	for _, args := range [][]string{{"schedule"}, {"schedule", "preview"}, {"schedule", "preview", "--pretty"}, {"schedule", "unknown", "--json"}} {
 		if _, err := ParseOptions(args); err == nil {
 			t.Fatalf("accepted %q", args)
 		}

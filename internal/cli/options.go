@@ -128,7 +128,7 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, err
 		}
 	case "schedule":
-		if len(args) != 3 || args[1] != "preview" || args[2] != "--json" {
+		if len(args) != 3 || args[1] != "preview" && args[1] != "install" && args[1] != "remove" || args[2] != "--json" {
 			return Options{}, ErrInvalidOptions
 		}
 		options.ScheduleCommand, options.JSON = args[1], true

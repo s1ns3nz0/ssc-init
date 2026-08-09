@@ -34,6 +34,8 @@ type Preview struct {
 type Manager struct {
 	Home       string
 	Executable string
+	UID        int
+	Runner     platform.Runner
 }
 
 func (m Manager) Preview() (Preview, error) {

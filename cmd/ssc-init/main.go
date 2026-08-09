@@ -187,7 +187,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
 		}
-		app.Schedule = schedule.Manager{Home: home, Executable: filepath.Join(versionDir, platform.CoreExecutableName)}
+		app.Schedule = schedule.Manager{Home: home, Executable: filepath.Join(versionDir, platform.CoreExecutableName), UID: os.Getuid(), Runner: platform.ExecRunner{Timeout: 10 * time.Second, MaxOutputBytes: 4 << 10}}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()

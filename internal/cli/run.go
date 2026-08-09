@@ -94,6 +94,8 @@ type QuarantineReader interface {
 
 type ScheduleManager interface {
 	Preview() (schedule.Preview, error)
+	Install(context.Context) (schedule.Result, error)
+	Remove(context.Context) (schedule.Result, error)
 }
 
 // Install and rollback failure sentinels. They are the classification an
@@ -360,12 +362,23 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		}
 		return 0
 	case "schedule":
-		if options.ScheduleCommand != "preview" || a.Schedule == nil {
+		if a.Schedule == nil {
 			fmt.Fprintln(stderr, "schedule operation failed")
 			return 1
 		}
-		preview, err := a.Schedule.Preview()
-		if err != nil || writeJSON(stdout, preview) != nil {
+		var output any
+		var operationErr error
+		switch options.ScheduleCommand {
+		case "preview":
+			output, operationErr = a.Schedule.Preview()
+		case "install":
+			output, operationErr = a.Schedule.Install(ctx)
+		case "remove":
+			output, operationErr = a.Schedule.Remove(ctx)
+		default:
+			operationErr = errors.New("invalid schedule command")
+		}
+		if operationErr != nil || writeJSON(stdout, output) != nil {
 			fmt.Fprintln(stderr, "schedule operation failed")
 			return 1
 		}
