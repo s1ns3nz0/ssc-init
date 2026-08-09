@@ -16,7 +16,7 @@ func TestDockerIdentityRelationshipAndV4PrivacyAcceptance(t *testing.T) {
 		home: home, databasePath: filepath.Join(privateMatrixTempDir(t), "first.db"),
 		externalProbes: true, runner: runner, inspector: inspector,
 	})
-	if first.Scan.SchemaVersion != "ssc-init.scan.v4" {
+	if first.Scan.SchemaVersion != "ssc-init.scan.v5" {
 		t.Fatalf("schema=%q", first.Scan.SchemaVersion)
 	}
 	container := requireContentEvidence(t, first.Inventory, "package", model.EvidenceSubjectContainerImage)

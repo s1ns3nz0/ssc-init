@@ -72,7 +72,7 @@ func WriteStatusPretty(writer io.Writer, status StatusData) error {
 			len(status.Inventory.Assets), len(status.Inventory.Observations), len(status.Inventory.Evidence)))
 	}
 	if status.LegacyInventory {
-		printer.field("note", "legacy inventory (pre-v3): content evidence was not collected")
+		printer.field("note", "legacy inventory: current-version coverage is not claimed")
 		return printer.err
 	}
 	if status.Scope != nil {

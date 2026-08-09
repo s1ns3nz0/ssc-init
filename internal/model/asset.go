@@ -6,13 +6,19 @@ import "time"
 type AssetType string
 
 const (
-	AssetAgentPlugin  AssetType = "agent-plugin"
-	AssetSkill        AssetType = "agent-skill"
-	AssetMCP          AssetType = "mcp-server"
-	AssetIDEExtension AssetType = "ide-extension"
-	AssetPackage      AssetType = "package"
-	AssetProject      AssetType = "project"
-	AssetTool         AssetType = "tool"
+	AssetAgentPlugin       AssetType = "agent-plugin"
+	AssetSkill             AssetType = "agent-skill"
+	AssetMCP               AssetType = "mcp-server"
+	AssetIDEExtension      AssetType = "ide-extension"
+	AssetPackage           AssetType = "package"
+	AssetProject           AssetType = "project"
+	AssetTool              AssetType = "tool"
+	AssetShellStartup      AssetType = "shell-startup"
+	AssetGitHook           AssetType = "git-hook"
+	AssetCredentialHelper  AssetType = "credential-helper"
+	AssetLaunchConfig      AssetType = "launch-config"
+	AssetProcess           AssetType = "process"
+	AssetListeningEndpoint AssetType = "listening-endpoint"
 )
 
 // SignatureStatus is the closed result of platform signature inspection. It

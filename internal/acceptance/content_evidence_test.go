@@ -378,7 +378,7 @@ func TestContentEvidenceGoldenBaselineReport(t *testing.T) {
 	if err := json.Unmarshal(golden, &document); err != nil {
 		t.Fatal(err)
 	}
-	if document["schemaVersion"] != "ssc-init.scan.v4" {
+	if document["schemaVersion"] != "ssc-init.scan.v5" {
 		t.Fatalf("golden schemaVersion=%v", document["schemaVersion"])
 	}
 	if _, ok := document["evidenceCoverage"].(map[string]any); !ok {
@@ -446,7 +446,7 @@ func TestContentEvidenceCLIBaselineAndStatusEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(scanStdout.Bytes(), &baselineReport); err != nil {
 		t.Fatalf("decode baseline report: %v\n%s", err, scanStdout.String())
 	}
-	if baselineReport.SchemaVersion != "ssc-init.scan.v4" || baselineReport.EvidenceCoverage == nil || baselineReport.Inventory == nil {
+	if baselineReport.SchemaVersion != "ssc-init.scan.v5" || baselineReport.EvidenceCoverage == nil || baselineReport.Inventory == nil {
 		t.Fatalf("CLI baseline contract=%+v", baselineReport)
 	}
 	if baselineReport.EvidenceCoverage.Status != model.CoverageComplete || len(baselineReport.Inventory.Evidence) == 0 {
@@ -473,7 +473,7 @@ func TestContentEvidenceCLIBaselineAndStatusEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
 		t.Fatalf("decode status: %v\n%s", err, stdout.String())
 	}
-	if status.SchemaVersion != "ssc-init.status.v4" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v4" || status.LegacyInventory {
+	if status.SchemaVersion != "ssc-init.status.v5" || !status.Initialized || status.InventorySchemaVersion != "ssc-init.scan.v5" || status.LegacyInventory {
 		t.Fatalf("CLI status provenance=%+v", status)
 	}
 	if status.EvidenceCoverage == nil || !reflect.DeepEqual(*status.EvidenceCoverage, *baselineReport.EvidenceCoverage) {
