@@ -21,7 +21,14 @@ func TestRuntimeParsersRetainOnlyApprovedFacts(t *testing.T) {
 }
 
 func TestRuntimeParsersRejectHostileOrAmbiguousOutput(t *testing.T) {
-	for _, output := range []string{"1 tool --token secret\n", "1 good\n1 other\n", "0 tool\n", "1 bad\x00name\n"} {
+	for _, output := range []string{
+		"1 tool --token secret\n",
+		"1 good\n1 other\n",
+		"0 tool\n",
+		"1 bad\x00name\n",
+		"1 GITHUB_TOKEN=raw-secret\n",
+		"1 ghp_123456789012345678901234567890123456\n",
+	} {
 		if _, err := parseProcessSnapshot(output); err != errRuntimeOutput || strings.Contains(err.Error(), output) {
 			t.Fatalf("process output accepted or echoed: %q err=%v", output, err)
 		}

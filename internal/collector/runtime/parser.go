@@ -11,6 +11,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 var errRuntimeOutput = errors.New("runtime probe output is malformed")
@@ -65,6 +67,9 @@ func parseProcessSnapshot(output string) ([]processFact, error) {
 func normalizedExecutableName(value string) (string, bool) {
 	name := filepath.Base(value)
 	if name == "" || name == "." || name == string(filepath.Separator) || len(name) > 255 {
+		return "", false
+	}
+	if privacy.ContainsSensitiveValue(name) {
 		return "", false
 	}
 	for _, character := range name {

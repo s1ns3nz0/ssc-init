@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -80,8 +81,49 @@ func TestRuntimeCollectorConnectsListenersOnlyToObservedProcesses(t *testing.T) 
 	}
 }
 
+func TestRuntimeCollectorDegradesTruncatedTargetsIndependentlyWithoutEcho(t *testing.T) {
+	privateValue := "GITHUB_TOKEN=raw-secret"
+	runner := &testutil.FakeRunner{Results: map[string]platform.CommandResult{
+		strings.Join([]string{psPath, "-axo", "pid=,comm="}, "\x1f"):                      {Stdout: privateValue, Truncated: true},
+		strings.Join([]string{lsofPath, "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"}, "\x1f"): {Stdout: "p42\ncnode\nnremote.example:3000\n"},
+	}}
+	env := testutil.Environment(t, t.TempDir())
+	env.Scope.ExternalProbes = true
+	env.Runner = runner
+
+	got, err := New().Collect(context.Background(), env)
+	if err != nil || got.Status != model.CoveragePartial || len(got.Assets) != 1 {
+		t.Fatalf("result=%+v err=%v", got, err)
+	}
+	if got.Targets[0].Status != model.TargetPartial || got.Targets[1].Status != model.TargetComplete {
+		t.Fatalf("targets=%+v", got.Targets)
+	}
+	if strings.Contains(strings.Join([]string{got.Targets[0].Errors[0].Code, got.Targets[0].Errors[0].Message}, "\x00"), privateValue) {
+		t.Fatalf("private probe output echoed: %+v", got.Targets[0])
+	}
+}
+
+func TestRuntimeCollectorCancellationReturnsNoFalseSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := testutil.Environment(t, t.TempDir())
+	env.Scope.ExternalProbes = true
+	env.Runner = cancelRuntimeRunner{cancel: cancel}
+
+	got, err := New().Collect(ctx, env)
+	if !errors.Is(err, context.Canceled) || len(got.Assets) != 0 || len(got.Targets) != 0 {
+		t.Fatalf("result=%+v err=%v", got, err)
+	}
+}
+
 type panicRuntimeRunner struct{}
 
 func (panicRuntimeRunner) Run(context.Context, string, ...string) (platform.CommandResult, error) {
 	panic("runtime runner called")
+}
+
+type cancelRuntimeRunner struct{ cancel context.CancelFunc }
+
+func (r cancelRuntimeRunner) Run(context.Context, string, ...string) (platform.CommandResult, error) {
+	r.cancel()
+	return platform.CommandResult{Stdout: "42 /private/tool\n"}, nil
 }
