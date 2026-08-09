@@ -241,6 +241,11 @@ CREATE TABLE analyzer_coverage (
 );
 ALTER TABLE inventory_state ADD COLUMN analyzer_facts_nil INTEGER NOT NULL DEFAULT 1 CHECK (analyzer_facts_nil IN (0, 1));
 ALTER TABLE inventory_state ADD COLUMN analyzer_fact_count INTEGER NOT NULL DEFAULT 0 CHECK (analyzer_fact_count >= 0);`,
+	`CREATE TABLE quarantine_records (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('requested','quarantined','restored','failed')),
+    record_json BLOB NOT NULL
+);`,
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -325,6 +330,7 @@ var requiredColumns = map[string][]columnSpec{
 	"incidents":          {{"finding_id", "TEXT", "", 0, 1, false}, {"severity", "TEXT", "", 1, 0, false}, {"finding_json", "BLOB", "", 1, 0, false}, {"first_seen_at", "TEXT", "", 1, 0, false}, {"last_seen_at", "TEXT", "", 1, 0, false}},
 	"analyzer_facts":     {{"scan_id", "TEXT", "", 1, 1, false}, {"fact_id", "TEXT", "", 1, 2, false}, {"fact_index", "INTEGER", "", 1, 0, false}, {"fact_json", "BLOB", "", 1, 0, false}},
 	"analyzer_coverage":  {{"scan_id", "TEXT", "", 0, 1, false}, {"coverage_json", "BLOB", "", 1, 0, false}},
+	"quarantine_records": {{"id", "TEXT", "", 0, 1, false}, {"state", "TEXT", "", 1, 0, false}, {"record_json", "BLOB", "", 1, 0, false}},
 }
 
 func verifySchema(db *sql.DB) error {
@@ -377,6 +383,7 @@ var requiredChecks = map[string][]string{
 	"findings":           {"check(finding_index>=0)"},
 	"incidents":          {"check(severityin('critical','high'))"},
 	"analyzer_facts":     {"check(fact_index>=0)"},
+	"quarantine_records": {"check(statein('requested','quarantined','restored','failed'))"},
 	"asset_state":        {"check(asset_index>=0)", "check(metadata_nilin(0,1))"},
 	"observation_state":  {"check(observation_index>=0)", "check(metadata_nilin(0,1))", "check(consumers_nilin(0,1))"},
 	"relationship_state": {"check(relationship_index>=0)"},
@@ -515,6 +522,7 @@ var requiredIndexFingerprints = map[string][]string{
 	"incidents":          {"pk:1:finding_id"},
 	"analyzer_facts":     {"pk:1:scan_id,fact_id", "u:1:scan_id,fact_index"},
 	"analyzer_coverage":  {"pk:1:scan_id"},
+	"quarantine_records": {"pk:1:id"},
 }
 
 func verifyIndices(db *sql.DB) error {
