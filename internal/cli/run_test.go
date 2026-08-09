@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -37,6 +39,39 @@ func TestRunVersion(t *testing.T) {
 	}
 	if got["product"] != "SSC Init" || got["command"] != "ssc-init" {
 		t.Fatalf("got=%v", got)
+	}
+}
+
+func TestPolicyInitWritesStarterOnceWithPrivatePermissions(t *testing.T) {
+	home := t.TempDir()
+	policyPath := filepath.Join(home, "Library", "Application Support", "SSC Init", "policy.json")
+	app := App{PolicyPath: policyPath, Home: home}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"policy", "init"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	info, err := os.Stat(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o", info.Mode().Perm())
+	}
+	if strings.Contains(out.String(), home) || !strings.Contains(out.String(), "$HOME") {
+		t.Fatalf("location was not redacted: %q", out.String())
+	}
+	before, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"policy", "init"}, &out, &errOut); code != 1 {
+		t.Fatalf("overwrite code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	after, err := os.ReadFile(policyPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("existing policy changed: %v", err)
 	}
 }
 

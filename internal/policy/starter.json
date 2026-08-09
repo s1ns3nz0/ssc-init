@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "ssc-init.policy.v1",
+  "rules": [
+    {
+      "id": "pin-mismatch",
+      "family": "pin",
+      "enabled": false,
+      "description": "A pinned asset hashes differently than approved at the same identity and version."
+    },
+    {
+      "id": "unpinned",
+      "family": "pin",
+      "enabled": false,
+      "description": "An asset with a trusted content digest has no approved pin for that evidence subject."
+    },
+    {
+      "id": "mcp-shell-command",
+      "family": "shape",
+      "enabled": false,
+      "description": "An MCP server records a shell as its command; this describes configuration shape, not behavior.",
+      "match": {
+        "assetType": ["mcp-server"],
+        "metadataEquals": {"command": ["sh", "bash", "zsh", "dash", "ksh"]}
+      }
+    },
+    {
+      "id": "mutable-version",
+      "family": "shape",
+      "enabled": false,
+      "description": "An asset records latest, an unspecified version, or another mutable version selector.",
+      "match": {"assetVersion": ["latest", "*", "main", "master", "HEAD", ""]}
+    },
+    {
+      "id": "remote-script-execution",
+      "family": "shape",
+      "enabled": false,
+      "description": "An MCP argument pipes downloaded material directly into a shell without a separate verification step.",
+      "match": {
+        "assetType": ["mcp-server"],
+        "metadataContains": {"args": ["| sh", "|sh", "| bash", "|bash"]}
+      }
+    }
+  ]
+}

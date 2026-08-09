@@ -29,6 +29,21 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsPolicyInitAndOverride(t *testing.T) {
+	got, err := ParseOptions([]string{"policy", "init", "--policy", "$HOME/team/policy.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Command != "policy" || got.PolicyCommand != "init" || got.PolicyPath != "$HOME/team/policy.json" {
+		t.Fatalf("options=%+v", got)
+	}
+	for _, args := range [][]string{{"policy"}, {"policy", "init", "--policy", "../escape"}, {"policy", "init", "--policy", "/tmp/a", "--policy", "/tmp/b"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid policy options: %v", args)
+		}
+	}
+}
+
 func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 	tests := []struct {
 		args []string

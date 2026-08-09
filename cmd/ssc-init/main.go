@@ -131,6 +131,15 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		manager.Health = coreHealthCheck
 		app.Installer = coreInstaller{manager: manager}
 		return app.RunOptions(ctx, options, stdout, stderr)
+	case "policy":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.Home = home
+		app.PolicyPath = paths.Install().PolicyFile
+		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
 		home, paths, ok := hostPathsForRun()
 		if !ok {
@@ -293,7 +302,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "doctor", "hook", "install", "rollback", "scan", "status":
+	case "doctor", "hook", "install", "policy", "rollback", "scan", "status":
 		return true
 	default:
 		return false

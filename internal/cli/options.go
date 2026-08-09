@@ -26,6 +26,10 @@ type Options struct {
 	InstallSource  string
 	InstallVersion string
 	InstallDigest  string
+
+	PolicyCommand string
+	PolicyPath    string
+	PolicyAssetID string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -65,6 +69,10 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, ErrInvalidOptions
 		}
 		options.JSON = true
+	case "policy":
+		if err := parsePolicyOptions(args[1:], &options); err != nil {
+			return Options{}, err
+		}
 	case "hook":
 		if len(args) != 1 {
 			return Options{}, ErrInvalidOptions
@@ -73,6 +81,38 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, ErrInvalidOptions
 	}
 	return options, nil
+}
+
+func parsePolicyOptions(args []string, options *Options) error {
+	if len(args) == 0 {
+		return ErrInvalidOptions
+	}
+	options.PolicyCommand = args[0]
+	if options.PolicyCommand != "init" {
+		return ErrInvalidOptions
+	}
+	for index := 1; index < len(args); index++ {
+		if args[index] != "--policy" || options.PolicyPath != "" || index+1 == len(args) {
+			return ErrInvalidOptions
+		}
+		index++
+		if !validPolicyPath(args[index]) {
+			return ErrInvalidOptions
+		}
+		options.PolicyPath = args[index]
+	}
+	return nil
+}
+
+func validPolicyPath(value string) bool {
+	if value == "" || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	if strings.HasPrefix(value, "$HOME/") {
+		relative := strings.TrimPrefix(value, "$HOME/")
+		return relative != "" && relative == filepath.Clean(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	return filepath.IsAbs(value) && value == filepath.Clean(value)
 }
 
 func parseScanOptions(args []string, options *Options) error {

@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 )
 
@@ -79,6 +84,8 @@ type App struct {
 	StatusReader    StatusReader
 	Doctor          Doctor
 	Installer       Installer
+	Home            string
+	PolicyPath      string
 }
 
 // Run executes the CLI with the development version.
@@ -231,6 +238,39 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to write "+options.Command+" output")
 			return 1
 		}
+		return 0
+	case "policy":
+		if options.PolicyCommand != "init" {
+			fmt.Fprintln(stderr, "invalid command arguments")
+			return 2
+		}
+		path := a.PolicyPath
+		if options.PolicyPath != "" {
+			path = options.PolicyPath
+			if strings.HasPrefix(path, "$HOME/") {
+				path = filepath.Join(a.Home, strings.TrimPrefix(path, "$HOME/"))
+			}
+		}
+		if path == "" || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+			fmt.Fprintln(stderr, "failed to initialize policy")
+			return 1
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			fmt.Fprintln(stderr, "policy document already exists or cannot be created")
+			return 1
+		}
+		writeErr := func() error {
+			defer file.Close()
+			_, err := file.Write(policy.Starter())
+			return err
+		}()
+		if writeErr != nil {
+			_ = os.Remove(path)
+			fmt.Fprintln(stderr, "failed to write policy document")
+			return 1
+		}
+		fmt.Fprintf(stdout, "ssc-init: wrote policy to %s\n", platform.SafeLocationRef(a.Home, path, "policy"))
 		return 0
 	case "hook":
 		if a.BaselineScanner == nil {

@@ -60,6 +60,7 @@ type InstallLayout struct {
 	BundlesDir    string // <DataDir>/bundles — TI and policy bundles
 	ReportsDir    string // <DataDir>/reports
 	QuarantineDir string // <DataDir>/quarantine
+	PolicyFile    string // <DataDir>/policy.json — local levels 4 and 5
 }
 
 // Install returns the shared installation layout for these paths.
@@ -76,6 +77,7 @@ func (p Paths) Install() InstallLayout {
 		BundlesDir:    filepath.Join(p.DataDir, "bundles"),
 		ReportsDir:    filepath.Join(p.DataDir, "reports"),
 		QuarantineDir: filepath.Join(p.DataDir, "quarantine"),
+		PolicyFile:    filepath.Join(p.DataDir, "policy.json"),
 	}
 }
 
