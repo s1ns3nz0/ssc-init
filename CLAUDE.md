@@ -24,17 +24,18 @@ The release build script disables network/toolchain downloads and requires a cle
 The reproducible release set is the two architecture slices, universal binary,
 `checksums.txt`, CycloneDX SBOM, and provenance statement. Developer ID signing
 and `.dmg` notarization/stapling are separate because Apple's secure timestamp
-makes signed bytes non-reproducible. The final shipping artifact is the stapled
-`ssc-init-darwin.dmg`; see `docs/release-runbook.md`.
+makes signed bytes non-reproducible. The current GitHub artifact may remain the
+reproducible unsigned universal binary. A stapled `ssc-init-darwin.dmg` is a
+later optional hardening artifact; see `docs/release-runbook.md`.
 
 ## Architecture
 
 Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` orchestration → collectors → graph normalization (`internal/inventory`) → local evidence engine (`internal/evidence`) → delta/report (`internal/report`) → atomic SQLite snapshot (`internal/store`).
 
-- `internal/collector/{agents,ide,mcp,packages,projects}` — closed-catalog discovery: Claude/Codex/Cursor plugins and skills, VS Code-family and JetBrains extensions, MCP configurations, project manifests/lockfiles, and (only with `--external-probes`) package/Docker command probes. Collectors additionally issue sealed runtime-only `LocalEvidenceTarget` values (`json:"-"`, never persisted).
+- `internal/collector/{agents,ide,mcp,packages,projects,surfaces,runtime}` — closed-catalog discovery: Claude/Codex/Cursor plugins and skills, VS Code-family and JetBrains extensions, MCP configurations, project manifests/lockfiles, shell startup files, Git credential-helper declarations, project hooks/launch configuration, and (only with `--external-probes`) package/Docker plus point-in-time process/listener command probes. Collectors additionally issue sealed runtime-only `LocalEvidenceTarget` values (`json:"-"`, never persisted).
 - `internal/evidence` — validates sealed targets against the normalized graph (issuer seal, graph binding, path validation), then performs descriptor-anchored file/tree hashing and secret-free semantic MCP hashing. Discovery-time identity anchors are re-verified before and after every read; mismatch yields `unavailable/identity_changed`.
 - `internal/platform` — descriptor-rooted, no-follow filesystem primitives (`os.Root`-based), file identity fingerprints, and bounded macOS `codesign` inspection.
-- `internal/model` — public v4 data model: assets with closed signature/provenance facts, observations, relationships, and `ContentEvidence` with closed kind/subject/status/error/metadata vocabularies.
+- `internal/model` — public v5 data model: assets with closed signature/provenance and developer-surface facts, observations, relationships, and `ContentEvidence` with closed kind/subject/status/error/metadata vocabularies.
 - `internal/provenance` — bounded, network-free npm/Cargo/Go lockfile parsing; Go `h1` remains a source-specific integrity fact and is never mislabeled SHA-256.
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
@@ -79,6 +80,8 @@ The doctor JSON contract is `ssc-init.doctor.v2`; its `install` object reports
 managed-install integrity and rollback availability without paths.
 
 Program D adds full local Docker SHA-256 identity evidence, bounded macOS signature facts for verified external-probe executables, npm/Cargo/Go lockfile provenance, and a closed deterministic relationship vocabulary. It adds no verdict, safety claim, network lookup, or enforcement. Real Developer ID signing/notarization remains a release-time `[APPLE]` step awaiting credentials.
+
+Program I adds bounded shell startup, Git credential-helper, project Git-hook and VS Code launch-config inventory. With explicit `--external-probes`, it also records a point-in-time process/listener snapshot containing only PID, executable basename, protocol, and local port. It is not continuous monitoring, and default scans still execute no process. Apple signing/notarization remains deferred and is not a Program I dependency.
 
 Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include package payload hashing, TI, behavior analysis, verified organization bundles, warnings, blocking, and host adapters.
 

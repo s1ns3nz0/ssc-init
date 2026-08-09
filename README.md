@@ -17,10 +17,12 @@ The baseline collector inventories and, where a bounded local implementation exi
 - global developer package ecosystems and Docker only when command probes are explicitly enabled; exact full Docker SHA-256 image IDs become complete container-identity evidence, while truncated or missing IDs and ordinary package payloads remain explicit `unsupported` evidence;
 - bounded npm, Cargo, and Go lockfile provenance from configured project roots. npm/Cargo SHA-256 facts are immutable; Go `h1` is retained as a source-specific fact rather than being mislabeled as SHA-256. Package-to-lockfile and package-to-probe relationships use a closed graph vocabulary;
 - macOS signature facts for verified probe executables when external probes are enabled. The result is a closed `valid`, `invalid`, `unsigned`, `unavailable`, or `unsupported` fact, not a safety verdict; signer diagnostics and certificate chains are discarded.
+- the exact six supported shell startup files, the two user Git configuration files, declared global Git credential-helper names (arguments and URL-scoped values are discarded), project Git hooks, and `.vscode/launch.json`, all without executing discovered content;
+- a point-in-time process and local TCP-listener snapshot only with `--external-probes`. It retains PID, executable basename, protocol, and local port only; command arguments, hostnames, remote endpoints, and continuous monitoring are out of scope.
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Package payload hashing, threat intelligence (TI), behavior analysis, Git-managed organization policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs. Real release signing/notarization also remains a release-time step requiring Apple Developer credentials; it is separate from local signature inspection.
+Package payload hashing, threat intelligence (TI), behavior analysis, Git-managed organization policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
 
 ## Commands
 
@@ -42,7 +44,7 @@ ssc-init policy check
 ssc-init policy check --pretty
 ```
 
-`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
+`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
 
 `hook` is an advisory session hook: it runs one default baseline scan and
 prints one line per changed asset (asset types, names, hosts, versions, and
@@ -113,21 +115,22 @@ Pruning frees pages for reuse, but those pages return to the filesystem only whe
 
 ## Download and verify
 
-The user-facing release artifact is the signed, notarized, stapled Universal
-Binary disk image `ssc-init-darwin.dmg`, accompanied by
-`checksums-notarized.txt`. Verify both the bytes and Apple's attached ticket
-before mounting it:
+The current GitHub distribution can publish the reproducible unsigned
+Universal Binary `ssc-init-darwin-universal` with `checksums.txt`,
+`sbom.cdx.json`, and `provenance.json`. Apple Developer membership is not
+needed to build or publish those files. Verify the downloaded bytes before
+running them:
 
 ```sh
-shasum -a 256 -c checksums-notarized.txt
-codesign --verify --strict --verbose=2 ssc-init-darwin.dmg
-xcrun stapler validate ssc-init-darwin.dmg
-spctl --assess -vvv --type open --context context:primary-signature ssc-init-darwin.dmg
+shasum -a 256 -c checksums.txt
 ```
 
-The disk image contains one `ssc-init` executable supporting both Apple silicon
-and Intel Macs. The complete release ordering and adapter verification steps
-are in [the release runbook](docs/release-runbook.md).
+Because that binary is unsigned and unnotarized, macOS may block a downloaded
+copy or require explicit user approval. Developer ID signing and notarization
+are an optional later release hardening step that removes that friction; they
+are not a Mac App Store requirement and this project does not use the Mac App
+Store. The unsigned GitHub flow and deferred Apple hardening flow are separated
+in [the release runbook](docs/release-runbook.md).
 
 ## Build from source
 

@@ -13,7 +13,7 @@ implementation exists.
 | Foundation requirement | State | Current evidence | Missing evidence/work |
 |---|---|---|---|
 | §5.1 Claude/Codex/Cursor adapters | Missing | No adapter/package directories exist | Three native host packages, common structured invocation, capability declarations, bootstrap verification, contract tests |
-| §5.2.1 collectors | Partial | `internal/collector/{agents,ide,mcp,packages,projects}` and isolated-home acceptance suite; full local Docker SHA-256 identity behind external probes | Process/listener snapshots, broader package managers and recent-workspace discovery |
+| §5.2.1 collectors | Partial | `internal/collector/{agents,ide,mcp,packages,projects,surfaces,runtime}` and isolated-home acceptance suite; bounded developer files plus full local Docker identity and point-in-time process/listener facts behind external probes | Broader package managers and recent-workspace discovery |
 | §5.2.2 inventory graph | Partial | Canonical assets, observations and relationships in `internal/model`; normalization in `internal/inventory` | Executable/package/repository/service/permission dependency edges across all collectors |
 | §5.2.3 analyzers | Partial | Bounded hashes, semantic MCP digest, closed macOS signature facts, local npm/Cargo/Go provenance and version diff | Dependency extraction beyond supported lockfiles, entropy/obfuscation, dangerous APIs and source-to-sink flows |
 | §5.2.4 decision engine | Partial | Deterministic local shape/change/pin policy in `internal/policy` | TI evidence, behavior findings, signed organization policy and final verdict correlation |
@@ -23,7 +23,7 @@ implementation exists.
 | §5.2.8 reporters | Partial | Scan/status/doctor/install/policy JSON and human hook/pretty output | Finding JSON, SARIF 2.1.0, inventory CycloneDX, HTTPS webhook and complete local evidence report |
 | §5.3 shared installation | Partial | Universal build, versioned stage/activate/rollback, doctor v2, signed/notarized/stapled-DMG scripts and runbook | Real Developer ID signing/notary execution; adapter bootstrap; TI/policy/report/quarantine lifecycle |
 | §5.4 scheduling | Missing | No launchd module or command | Explicit opt-in preview, one shared job, logs/removal instructions, idempotence tests |
-| §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance and explicit coverage gaps | TI, suspicious forms and dangerous-token/obfuscation facts |
+| §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance, bounded shell/Git-hook/credential-helper/launch surfaces, optional process/listener facts, and explicit coverage gaps | TI, suspicious forms and dangerous-token/obfuscation facts |
 | §6.2 deep scan | Missing | No deep-analysis package or promotion scheduler | Bounded decoding, bundled dependencies, static flows, semantic version differences, WASM/native metadata |
 | §6.3 mutable dependencies | Partial | Local policy can match exact recorded metadata and pin digest changes | Proven registry integrity, normalized mutable-reference facts, warning/finding decisions, organization default deny |
 | §7 intelligence | Missing | None; level 1 is explicitly inert | Licensed source ingestion, normalized records, signed distribution, freshness, verdict matching and campaign provenance |
@@ -45,16 +45,18 @@ implementation exists.
 - Program A implementation and fail-closed release automation. Real Apple
   signing/notarization remains externally unverified because credentials are
   absent.
+- Program D: Docker identity, macOS signature inspection, supported lockfile
+  provenance and closed graph relationships.
+- Program I: bounded developer-file surfaces and opt-in point-in-time
+  process/listener inventory. This is snapshot collection, not monitoring.
 
 ## Remaining dependency order
 
-1. Program D — immutable/platform/package evidence and real graph edges.
-2. Program I — bounded developer-surface and process/listener collectors.
-3. Program E — signed TI and organization-policy bundle lifecycle.
-4. Program F — findings, verdict correlation and reporters.
-5. Program G1/G2 — vulnerability and bounded static/deep analyzers.
-6. Program H — adapters, enforcement, remediation, quarantine and scheduling.
-7. Final §13 acceptance matrix, Apple release execution, clean arm64/Intel
+1. Program E — signed TI and organization-policy bundle lifecycle.
+2. Program F — findings, verdict correlation and reporters.
+3. Program G1/G2 — vulnerability and bounded static/deep analyzers.
+4. Program H — adapters, enforcement, remediation, quarantine and scheduling.
+5. Final §13 acceptance matrix, deferred Apple release execution, clean arm64/Intel
    smoke tests and hosted CI evidence.
 
 The order keeps facts below decisions, decisions below enforcement, and avoids

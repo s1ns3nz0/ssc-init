@@ -27,7 +27,24 @@ This produces `dist/ssc-init-darwin-amd64`,
 `dist/checksums.txt`, `dist/sbom.cdx.json`, and `dist/provenance.json`. A second
 run must produce byte-identical files; the script tests verify that property.
 
-## 3. Developer ID signing
+## 3. Publish the current unsigned GitHub release
+
+Apple Developer credentials are not required for the current GitHub channel.
+Publish the reproducible universal binary with its verification material:
+
+- `ssc-init-darwin-universal`;
+- `checksums.txt`;
+- `sbom.cdx.json`;
+- `provenance.json`.
+
+The release notes must call the binary unsigned and unnotarized and state that
+macOS may require explicit user approval. Do not describe this channel as a Mac
+App Store release or as Gatekeeper-notarized.
+
+The remaining sections are a deferred optional hardening track. They are not a
+prerequisite for compiling, testing, or publishing the GitHub files above.
+
+## 4. Deferred Developer ID signing `[APPLE]`
 
 This step requires an active Apple Developer Program membership and a
 `Developer ID Application` certificate plus its private key in the signing
@@ -47,7 +64,7 @@ the reproducible build because Apple's timestamp makes signed bytes
 non-reproducible. `checksums.txt` describes the reproducible unsigned build;
 `checksums-signed.txt` describes the signed universal binary.
 
-## 4. Notarization and stapling
+## 5. Deferred notarization and stapling `[APPLE]`
 
 Store credentials once, then create, sign, submit, and staple the shipping
 disk image:
@@ -68,7 +85,7 @@ accepted Notarized Developer ID source. The ticket is stapled to the `.dmg`,
 which permits offline first-run verification. A bare Mach-O cannot carry a
 stapled ticket and is therefore not the shipping container.
 
-## 5. Publish
+## 6. Publish the hardened artifact `[APPLE]`
 
 Publish these release assets:
 
@@ -81,7 +98,7 @@ Publish these release assets:
 The thin arm64/amd64 binaries and bare universal binary are build and
 diagnostic artifacts, not user-facing downloads.
 
-## 6. Consumer verification
+## 7. Hardened-artifact consumer verification `[APPLE]`
 
 Before trusting the download, verify the final container and its attached
 ticket:
@@ -97,7 +114,7 @@ After mounting the disk image, an adapter additionally verifies the extracted
 core against `checksums-signed.txt` and with `codesign --verify --strict
 --verbose=2` before handing its absolute path to the installed core.
 
-## 7. Install and rollback
+## 8. Install and rollback
 
 ```sh
 ssc-init install --from <absolute-path> --version vX.Y.Z --sha256 <digest> --json
@@ -114,7 +131,7 @@ adapter must never remove `state.db`, intelligence or policy bundles, reports,
 or quarantine contents. Neither `install` nor `rollback` touches that shared
 state.
 
-## 8. Known external gaps
+## 9. Known external gaps
 
 - No git remote is configured, so `.github/workflows/ci.yml` has not executed
   on a hosted runner. Creating a remote and pushing the repository unblocks it.
