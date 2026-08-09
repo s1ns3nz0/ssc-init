@@ -49,6 +49,10 @@ ssc-init bundle rollback --family ti --json
 ssc-init findings --json
 ssc-init findings --pretty
 ssc-init findings --json --webhook https://security.example.invalid/ssc-init
+ssc-init quarantine preview --asset-id <canonical-id> --observation-id <canonical-id> --evidence-id <canonical-id> --json
+ssc-init quarantine apply --asset-id <canonical-id> --observation-id <canonical-id> --evidence-id <canonical-id> --approval-id <preview-approval-id> --json
+ssc-init quarantine restore-preview --record-id <quarantine-record-id> --json
+ssc-init quarantine restore-apply --record-id <quarantine-record-id> --approval-id <preview-approval-id> --json
 ```
 
 `doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
@@ -57,8 +61,9 @@ ssc-init findings --json --webhook https://security.example.invalid/ssc-init
 prints one line per changed asset (asset types, names, hosts, versions, and
 counts only), each tagged `NEW`, `CHANGED`, `UNVERIFIED`, `UPGRADED`, or
 `REMOVED`. These tags describe what changed and how well it could be verified,
-never whether anything is safe: this build performs no content analysis and has
-no threat intelligence, so it issues no verdicts. The hook stays completely
+never whether anything is safe. Findings may use active verified intelligence,
+organization policy, and bounded analyzer facts, but the hook itself remains
+advisory and never claims host enforcement. The hook stays completely
 silent when nothing changed, and
 a first run reports an initial baseline count instead of tagging every
 discovered asset. It always exits zero — including on scan failure, and except
@@ -74,6 +79,15 @@ startup. Claude Code example (`~/.claude/settings.json`):
   }
 }
 ```
+
+Quarantine is always preview-first. `preview` accepts only an exact persisted
+`complete` file SHA-256 whose observation is the same tokenized `$HOME` file;
+tree, semantic, package, partial, and inferred entrypoint evidence is rejected.
+The returned approval ID is bound to the action, canonical IDs, digest, and
+current file mode. `apply` re-reads and re-verifies all of them, so a changed
+file requires a new preview. Restore follows the same two-step rule and never
+overwrites an existing destination. Quarantine is reversible and never deletes
+its managed copy automatically.
 
 State is local-first and stored at:
 

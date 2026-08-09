@@ -20,6 +20,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
+	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 )
 
@@ -79,6 +80,17 @@ type WebhookDeliverer interface {
 	Deliver(context.Context, string, []byte) error
 }
 
+type QuarantineManager interface {
+	Preview(context.Context, model.Inventory, quarantine.Selection) (quarantine.Proposal, error)
+	Apply(context.Context, model.Inventory, quarantine.Selection, string) (quarantine.Record, error)
+	PreviewRestore(quarantine.Record) (quarantine.Proposal, error)
+	ApplyRestore(context.Context, quarantine.Record, string) (quarantine.Record, error)
+}
+
+type QuarantineReader interface {
+	QuarantineRecords(context.Context) ([]quarantine.Record, error)
+}
+
 // Install and rollback failure sentinels. They are the classification an
 // adapter acts on; the messages below are the only thing ever printed, so no
 // supplied path, version, or digest can be echoed back.
@@ -107,23 +119,25 @@ const (
 
 // App holds CLI configuration.
 type App struct {
-	Version         string
-	BaselineScanner BaselineScanner
-	StatusReader    StatusReader
-	Doctor          Doctor
-	Installer       Installer
-	Home            string
-	PolicyPath      string
-	PolicyStore     PolicyStore
-	PolicySources   policy.Sources
-	PolicyDocument  policy.Document
-	PolicyLoadError error
-	Now             func() time.Time
-	BundleManagers  map[bundle.Family]BundleManager
-	FindingService  FindingService
-	DeviceID        string
-	Webhook         WebhookDeliverer
-	AdapterInput    io.Reader
+	Version          string
+	BaselineScanner  BaselineScanner
+	StatusReader     StatusReader
+	Doctor           Doctor
+	Installer        Installer
+	Home             string
+	PolicyPath       string
+	PolicyStore      PolicyStore
+	PolicySources    policy.Sources
+	PolicyDocument   policy.Document
+	PolicyLoadError  error
+	Now              func() time.Time
+	BundleManagers   map[bundle.Family]BundleManager
+	FindingService   FindingService
+	DeviceID         string
+	Webhook          WebhookDeliverer
+	AdapterInput     io.Reader
+	Quarantine       QuarantineManager
+	QuarantineReader QuarantineReader
 }
 
 // Run executes the CLI with the development version.
@@ -288,9 +302,54 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "adapter evaluation failed")
 			return 1
 		}
-		evaluation, err := adapter.Evaluate(invocation, result)
+		evaluation, err := adapter.EvaluateInventory(invocation, result, snapshot.Inventory)
 		if err != nil || writeJSON(stdout, evaluation) != nil {
 			fmt.Fprintln(stderr, "adapter evaluation failed")
+			return 1
+		}
+		return 0
+	case "quarantine":
+		if a.Quarantine == nil || a.QuarantineReader == nil {
+			fmt.Fprintln(stderr, "quarantine operation failed")
+			return 1
+		}
+		var output any
+		var operationErr error
+		if options.QuarantineCommand == "preview" || options.QuarantineCommand == "apply" {
+			if a.StatusReader == nil {
+				fmt.Fprintln(stderr, "quarantine operation failed")
+				return 1
+			}
+			snapshot, initialized, loadErr := a.StatusReader.LatestSnapshot(ctx)
+			if loadErr != nil || !initialized {
+				fmt.Fprintln(stderr, "quarantine operation failed")
+				return 1
+			}
+			selection := quarantine.Selection{AssetID: options.QuarantineAssetID, ObservationID: options.QuarantineObservationID, EvidenceID: options.QuarantineEvidenceID}
+			if options.QuarantineCommand == "preview" {
+				output, operationErr = a.Quarantine.Preview(ctx, snapshot.Inventory, selection)
+			} else {
+				output, operationErr = a.Quarantine.Apply(ctx, snapshot.Inventory, selection, options.QuarantineApprovalID)
+			}
+		} else {
+			records, loadErr := a.QuarantineReader.QuarantineRecords(ctx)
+			if loadErr != nil {
+				fmt.Fprintln(stderr, "quarantine operation failed")
+				return 1
+			}
+			record, found := quarantineRecordByID(records, options.QuarantineRecordID)
+			if !found {
+				fmt.Fprintln(stderr, "quarantine operation failed")
+				return 1
+			}
+			if options.QuarantineCommand == "restore-preview" {
+				output, operationErr = a.Quarantine.PreviewRestore(record)
+			} else {
+				output, operationErr = a.Quarantine.ApplyRestore(ctx, record, options.QuarantineApprovalID)
+			}
+		}
+		if operationErr != nil || writeJSON(stdout, output) != nil {
+			fmt.Fprintln(stderr, "quarantine operation failed")
 			return 1
 		}
 		return 0
@@ -491,6 +550,15 @@ func decodeAdapterInvocation(input io.Reader) (adapter.Invocation, error) {
 		return adapter.Invocation{}, errors.New("invalid adapter input")
 	}
 	return invocation, nil
+}
+
+func quarantineRecordByID(records []quarantine.Record, id string) (quarantine.Record, bool) {
+	for _, record := range records {
+		if record.ID == id {
+			return record, true
+		}
+	}
+	return quarantine.Record{}, false
 }
 
 func (a App) evaluatePolicy(ctx context.Context, inventory model.Inventory, delta model.Delta) (policy.Result, error) {

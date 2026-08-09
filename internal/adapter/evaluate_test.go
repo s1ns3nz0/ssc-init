@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,25 @@ func TestEvaluateLimitsOutputToExplicitCanonicalAssets(t *testing.T) {
 	got, err := Evaluate(Invocation{SchemaVersion: SchemaV1, Host: HostCursor, Event: EventPreExecution, Capability: CapabilityAdvisory, AssetIDs: []string{"asset:one"}}, input)
 	if err != nil || len(got.Findings) != 1 || got.Findings[0].AssetID != "asset:one" {
 		t.Fatalf("evaluation=%+v err=%v", got, err)
+	}
+}
+
+func TestEvaluateOffersQuarantineOnlyForExactEligibleFileEvidence(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	item := adapterFinding("finding:bad", "asset:bad", model.SeverityCritical, model.VerdictKnownMalicious, model.ActionBlocked, now)
+	inventory := model.Inventory{
+		Observations: []model.Observation{{ID: "observation:bad", AssetID: item.AssetID, Scope: model.ScopeUser, LocationRef: "$HOME/tool"}},
+		Evidence:     []model.ContentEvidence{{ID: "evidence:bad", AssetID: item.AssetID, ObservationID: "observation:bad", Kind: model.EvidenceFileSHA256, Subject: model.EvidenceSubjectManifest, Status: model.EvidenceComplete, Algorithm: "sha256", Digest: strings.Repeat("a", 64)}},
+	}
+	invocation := Invocation{SchemaVersion: SchemaV1, Host: HostClaude, Event: EventPostExecution, Capability: CapabilityAdvisory}
+	got, err := EvaluateInventory(invocation, finding.Result{Intelligence: "fresh", Policy: "inactive", Findings: []model.Finding{item}}, inventory)
+	if err != nil || len(got.Findings) != 1 || !reflect.DeepEqual(got.Findings[0].Choices, []RemediationChoice{ChoiceInspectReport, ChoiceQuarantine}) || len(got.Findings[0].QuarantineTargets) != 1 {
+		t.Fatalf("evaluation=%+v err=%v", got, err)
+	}
+	inventory.Evidence[0].Kind = model.EvidenceTreeSHA256
+	got, err = EvaluateInventory(invocation, finding.Result{Intelligence: "fresh", Policy: "inactive", Findings: []model.Finding{item}}, inventory)
+	if err != nil || !reflect.DeepEqual(got.Findings[0].Choices, []RemediationChoice{ChoiceInspectReport}) || len(got.Findings[0].QuarantineTargets) != 0 {
+		t.Fatalf("ineligible evaluation=%+v err=%v", got, err)
 	}
 }
 

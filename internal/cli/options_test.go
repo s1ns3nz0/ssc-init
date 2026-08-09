@@ -245,3 +245,28 @@ func TestParseAdapterEvaluateOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestParseQuarantinePreviewApplyAndRestoreOptions(t *testing.T) {
+	valid := [][]string{
+		{"quarantine", "preview", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--json"},
+		{"quarantine", "apply", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--approval-id", "approval:a", "--json"},
+		{"quarantine", "restore-preview", "--record-id", "quarantine:a", "--json"},
+		{"quarantine", "restore-apply", "--record-id", "quarantine:a", "--approval-id", "approval:a", "--json"},
+	}
+	for _, args := range valid {
+		if got, err := ParseOptions(args); err != nil || got.Command != "quarantine" {
+			t.Fatalf("args=%q options=%+v err=%v", args, got, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"quarantine", "preview", "--asset-id", "tool:a", "--json"},
+		{"quarantine", "apply", "--asset-id", "tool:a", "--observation-id", "observation:a", "--evidence-id", "evidence:a", "--json"},
+		{"quarantine", "restore-preview", "--record-id", "quarantine:a", "--approval-id", "approval:a", "--json"},
+		{"quarantine", "restore-apply", "--record-id", "quarantine:a", "--approval-id", "approval:a"},
+		{"quarantine", "unknown", "--json"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}

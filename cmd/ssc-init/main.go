@@ -31,6 +31,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
+	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
 	"github.com/s1ns3nz0/ssc-init/internal/webhook"
@@ -144,6 +145,29 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			return 1
 		}
 		app.Webhook = webhook.Deliverer{}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "quarantine":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		defer snapshots.Close()
+		statusReader, statusOK := snapshots.(cli.StatusReader)
+		recordReader, recordOK := snapshots.(cli.QuarantineReader)
+		recorder, recorderOK := snapshots.(quarantine.Recorder)
+		if !statusOK || !recordOK || !recorderOK {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.StatusReader = statusReader
+		app.QuarantineReader = recordReader
+		app.Quarantine = &quarantine.Manager{Home: home, Recorder: recorder}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()
@@ -428,7 +452,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "adapter", "bundle", "doctor", "findings", "hook", "install", "policy", "rollback", "scan", "status":
+	case "adapter", "bundle", "doctor", "findings", "hook", "install", "policy", "quarantine", "rollback", "scan", "status":
 		return true
 	default:
 		return false

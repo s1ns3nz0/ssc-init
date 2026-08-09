@@ -32,12 +32,18 @@ type Options struct {
 	PolicyPath    string
 	PolicyAssetID string
 
-	BundleCommand   string
-	BundleFamily    string
-	BundleSource    string
-	BundleSignature string
-	WebhookURL      string
-	AdapterCommand  string
+	BundleCommand           string
+	BundleFamily            string
+	BundleSource            string
+	BundleSignature         string
+	WebhookURL              string
+	AdapterCommand          string
+	QuarantineCommand       string
+	QuarantineAssetID       string
+	QuarantineObservationID string
+	QuarantineEvidenceID    string
+	QuarantineRecordID      string
+	QuarantineApprovalID    string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -116,6 +122,10 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, ErrInvalidOptions
 		}
 		options.AdapterCommand = args[1]
+	case "quarantine":
+		if err := parseQuarantineOptions(args[1:], &options); err != nil {
+			return Options{}, err
+		}
 	case "hook":
 		if len(args) != 1 {
 			return Options{}, ErrInvalidOptions
@@ -124,6 +134,82 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, ErrInvalidOptions
 	}
 	return options, nil
+}
+
+func parseQuarantineOptions(args []string, options *Options) error {
+	if len(args) == 0 {
+		return ErrInvalidOptions
+	}
+	options.QuarantineCommand = args[0]
+	if options.QuarantineCommand != "preview" && options.QuarantineCommand != "apply" && options.QuarantineCommand != "restore-preview" && options.QuarantineCommand != "restore-apply" {
+		return ErrInvalidOptions
+	}
+	for index := 1; index < len(args); index++ {
+		flag := args[index]
+		if flag == "--json" {
+			if options.JSON {
+				return ErrInvalidOptions
+			}
+			options.JSON = true
+			continue
+		}
+		index++
+		if index == len(args) || args[index] == "" || strings.ContainsRune(args[index], '\x00') || len(args[index]) > 512 {
+			return ErrInvalidOptions
+		}
+		value := args[index]
+		switch flag {
+		case "--asset-id":
+			if options.QuarantineAssetID != "" {
+				return ErrInvalidOptions
+			}
+			options.QuarantineAssetID = value
+		case "--observation-id":
+			if options.QuarantineObservationID != "" {
+				return ErrInvalidOptions
+			}
+			options.QuarantineObservationID = value
+		case "--evidence-id":
+			if options.QuarantineEvidenceID != "" {
+				return ErrInvalidOptions
+			}
+			options.QuarantineEvidenceID = value
+		case "--record-id":
+			if options.QuarantineRecordID != "" {
+				return ErrInvalidOptions
+			}
+			options.QuarantineRecordID = value
+		case "--approval-id":
+			if options.QuarantineApprovalID != "" {
+				return ErrInvalidOptions
+			}
+			options.QuarantineApprovalID = value
+		default:
+			return ErrInvalidOptions
+		}
+	}
+	if !options.JSON {
+		return ErrInvalidOptions
+	}
+	selection := options.QuarantineAssetID != "" && options.QuarantineObservationID != "" && options.QuarantineEvidenceID != "" && options.QuarantineRecordID == ""
+	restore := options.QuarantineRecordID != "" && options.QuarantineAssetID == "" && options.QuarantineObservationID == "" && options.QuarantineEvidenceID == ""
+	switch options.QuarantineCommand {
+	case "preview":
+		return requireQuarantineForm(selection && options.QuarantineApprovalID == "")
+	case "apply":
+		return requireQuarantineForm(selection && options.QuarantineApprovalID != "")
+	case "restore-preview":
+		return requireQuarantineForm(restore && options.QuarantineApprovalID == "")
+	default:
+		return requireQuarantineForm(restore && options.QuarantineApprovalID != "")
+	}
+}
+
+func requireQuarantineForm(valid bool) error {
+	if !valid {
+		return ErrInvalidOptions
+	}
+	return nil
 }
 
 func validWebhookURL(value string) bool {

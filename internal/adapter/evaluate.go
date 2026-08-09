@@ -7,6 +7,7 @@ import (
 
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 )
 
 const EvaluationSchemaV1 = "ssc-init.adapter-evaluation.v1"
@@ -19,18 +20,19 @@ const (
 )
 
 type FindingView struct {
-	ID         string              `json:"id"`
-	AssetID    string              `json:"assetId"`
-	AssetType  model.AssetType     `json:"assetType"`
-	Verdict    model.Verdict       `json:"verdict"`
-	Severity   model.Severity      `json:"severity"`
-	Confidence model.Confidence    `json:"confidence"`
-	Level      int                 `json:"level"`
-	RuleIDs    []string            `json:"ruleIds,omitempty"`
-	DetectedAt time.Time           `json:"detectedAt"`
-	Action     model.FindingAction `json:"action"`
-	Reason     string              `json:"reason"`
-	Choices    []RemediationChoice `json:"choices"`
+	ID                string                 `json:"id"`
+	AssetID           string                 `json:"assetId"`
+	AssetType         model.AssetType        `json:"assetType"`
+	Verdict           model.Verdict          `json:"verdict"`
+	Severity          model.Severity         `json:"severity"`
+	Confidence        model.Confidence       `json:"confidence"`
+	Level             int                    `json:"level"`
+	RuleIDs           []string               `json:"ruleIds,omitempty"`
+	DetectedAt        time.Time              `json:"detectedAt"`
+	Action            model.FindingAction    `json:"action"`
+	Reason            string                 `json:"reason"`
+	Choices           []RemediationChoice    `json:"choices"`
+	QuarantineTargets []quarantine.Selection `json:"quarantineTargets,omitempty"`
 }
 
 type Evaluation struct {
@@ -44,6 +46,10 @@ type Evaluation struct {
 }
 
 func Evaluate(invocation Invocation, result finding.Result) (Evaluation, error) {
+	return EvaluateInventory(invocation, result, model.Inventory{})
+}
+
+func EvaluateInventory(invocation Invocation, result finding.Result, inventory model.Inventory) (Evaluation, error) {
 	if !invocation.Valid() {
 		return Evaluation{}, errors.New("invalid adapter invocation")
 	}
@@ -85,13 +91,16 @@ func Evaluate(invocation Invocation, result finding.Result) (Evaluation, error) 
 	}
 	for _, item := range selected {
 		choices := []RemediationChoice{ChoiceInspectReport}
-		if item.Verdict == model.VerdictKnownMalicious || item.Verdict == model.VerdictBehaviorMalicious {
+		targets := quarantine.EligibleSelections(inventory, item.AssetID)
+		if len(targets) > 0 && (item.Verdict == model.VerdictKnownMalicious || item.Verdict == model.VerdictBehaviorMalicious) {
 			choices = append(choices, ChoiceQuarantine)
+		} else {
+			targets = nil
 		}
 		evaluation.Findings = append(evaluation.Findings, FindingView{
 			ID: item.ID, AssetID: item.AssetID, AssetType: item.AssetType, Verdict: item.Verdict, Severity: item.Severity,
 			Confidence: item.Confidence, Level: item.Level, RuleIDs: append([]string(nil), item.RuleIDs...), DetectedAt: item.DetectedAt,
-			Action: item.Action, Reason: verdictReason(item.Verdict), Choices: choices,
+			Action: item.Action, Reason: verdictReason(item.Verdict), Choices: choices, QuarantineTargets: targets,
 		})
 	}
 	return evaluation, nil
@@ -130,8 +139,22 @@ func validFindingView(value FindingView) bool {
 	if !validAdapterFinding(probe) || value.Choices[0] != ChoiceInspectReport {
 		return false
 	}
-	wantQuarantine := value.Verdict == model.VerdictKnownMalicious || value.Verdict == model.VerdictBehaviorMalicious
-	return len(value.Choices) == 2 == wantQuarantine && (len(value.Choices) < 2 || value.Choices[1] == ChoiceQuarantine)
+	wantQuarantine := len(value.QuarantineTargets) > 0 && (value.Verdict == model.VerdictKnownMalicious || value.Verdict == model.VerdictBehaviorMalicious)
+	if len(value.QuarantineTargets) > 64 || (len(value.Choices) == 2) != wantQuarantine || len(value.Choices) == 2 && value.Choices[1] != ChoiceQuarantine {
+		return false
+	}
+	for index, target := range value.QuarantineTargets {
+		if target.AssetID != value.AssetID || !validCanonicalID(target.ObservationID) || !validCanonicalID(target.EvidenceID) {
+			return false
+		}
+		if index > 0 {
+			previous := value.QuarantineTargets[index-1]
+			if previous.ObservationID > target.ObservationID || previous.ObservationID == target.ObservationID && previous.EvidenceID >= target.EvidenceID {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func findingViewBefore(left, right FindingView) bool {
