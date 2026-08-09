@@ -52,8 +52,44 @@ func (Scanner) Analyze(ctx context.Context, content evidence.SealedContent) ([]m
 		digest := sha256.Sum256([]byte("ssc-init.analyzer.fact.v1\x00" + content.AssetID() + "\x00" + content.EvidenceID() + "\x00" + ruleID))
 		facts = append(facts, model.AnalyzerFact{ID: fmt.Sprintf("analyzer:sha256:%x", digest), AssetID: content.AssetID(), EvidenceID: content.EvidenceID(), RuleID: ruleID, Category: model.AnalyzerObfuscation, Confidence: model.ConfidenceMedium, Occurrences: min(occurrences, 10_000)})
 	}
+	if occurrences := credentialEgressOccurrences(masked); occurrences > 0 {
+		ruleID := "ssc-init/flow/credential-egress"
+		digest := sha256.Sum256([]byte("ssc-init.analyzer.fact.v1\x00" + content.AssetID() + "\x00" + content.EvidenceID() + "\x00" + ruleID))
+		facts = append(facts, model.AnalyzerFact{ID: fmt.Sprintf("analyzer:sha256:%x", digest), AssetID: content.AssetID(), EvidenceID: content.EvidenceID(), RuleID: ruleID, Category: model.AnalyzerCredentialEgress, Confidence: model.ConfidenceHigh, Occurrences: min(occurrences, 10_000)})
+	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
 	return facts, nil
+}
+
+func credentialEgressOccurrences(masked string) int {
+	sources := tokenPositions(masked, []string{"process.env", "os.getenv(", "os.environ", "keychain", "credential"})
+	sinks := tokenPositions(masked, []string{"fetch(", "http.newrequest", "requests.", "urllib.", "axios.", "xmlhttprequest"})
+	count := 0
+	for _, source := range sources {
+		for _, sink := range sinks {
+			if sink > source && sink-source <= 4096 {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+func tokenPositions(value string, tokens []string) []int {
+	var positions []int
+	for _, token := range tokens {
+		for offset := 0; offset < len(value); {
+			index := strings.Index(value[offset:], token)
+			if index < 0 {
+				break
+			}
+			positions = append(positions, offset+index)
+			offset += index + len(token)
+		}
+	}
+	sort.Ints(positions)
+	return positions
 }
 
 func errorsNewAnalyzer() error { return fmt.Errorf("analyzer input unavailable") }
