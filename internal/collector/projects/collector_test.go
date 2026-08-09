@@ -71,10 +71,42 @@ func TestProjectCollectorDiscoversOnlyClosedGitHooksAndVSCodeLaunchConfig(t *tes
 	if subjects[model.EvidenceSubjectGitHook] != 1 || subjects[model.EvidenceSubjectLaunchConfig] != 1 || len(result.LocalEvidenceTargets) != 2 {
 		t.Fatalf("subjects=%v targets=%+v", subjects, result.LocalEvidenceTargets)
 	}
+	assetTypes := make(map[model.AssetType]int)
+	for _, asset := range result.Assets {
+		assetTypes[asset.Type]++
+	}
+	if assetTypes[model.AssetGitHook] != 1 || assetTypes[model.AssetLaunchConfig] != 1 || len(result.Relationships) != 2 {
+		t.Fatalf("assetTypes=%v relationships=%+v", assetTypes, result.Relationships)
+	}
+	assetIDs := make(map[string]struct{}, len(result.Assets))
+	for _, asset := range result.Assets {
+		assetIDs[asset.ID] = struct{}{}
+	}
 	for _, target := range result.LocalEvidenceTargets {
 		if strings.HasSuffix(target.RelativePath, ".sample") || strings.HasSuffix(target.RelativePath, "private-hook") || target.RelativePath == "app/launch.json" {
 			t.Fatalf("unexpected target=%+v", target)
 		}
+		if _, ok := assetIDs[target.AssetID]; !ok {
+			t.Fatalf("target has no asset endpoint: %+v", target)
+		}
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 2 || collection.Coverage.Status != model.CoverageComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
+func TestMalformedLaunchConfigKeepsHashEvidenceAndMarksOnlyProjectPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeProjectFile(t, filepath.Join(root, "app", ".vscode", "launch.json"), `{"configurations":[`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "launch_malformed" {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete || collection.Evidence[0].Subject != model.EvidenceSubjectLaunchConfig {
+		t.Fatalf("collection=%+v", collection)
 	}
 }
 
