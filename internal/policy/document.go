@@ -39,7 +39,6 @@ type Document struct {
 	SchemaVersion string      `json:"schemaVersion"`
 	Rules         []Rule      `json:"rules"`
 	Exceptions    []Exception `json:"exceptions,omitempty"`
-	Retention     *Retention  `json:"retention,omitempty"`
 }
 
 // Rule is one policy rule. A disabled rule is still parsed and still reported
@@ -82,11 +81,4 @@ type Exception struct {
 	ProjectID string    `json:"projectId,omitempty"`
 	Reason    string    `json:"reason"`
 	ExpiresAt time.Time `json:"expiresAt"`
-}
-
-// Retention configures the design §10 windows. Declared here for the same
-// reason as Exception; Task 12 owns its validation.
-type Retention struct {
-	SnapshotDays     int `json:"snapshotDays,omitempty"`
-	AssetHistoryDays int `json:"assetHistoryDays,omitempty"`
 }

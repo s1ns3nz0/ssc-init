@@ -64,11 +64,10 @@ func Load(source []byte) (Document, error) {
 var ruleID = regexp.MustCompile(`\A[a-z][a-z0-9-]{0,31}\z`)
 
 var (
-	documentKeys  = keySet("schemaVersion", "rules", "exceptions", "retention")
+	documentKeys  = keySet("schemaVersion", "rules", "exceptions")
 	ruleKeys      = keySet("id", "family", "enabled", "description", "match")
 	matchKeys     = keySet("assetType", "assetName", "assetVersion", "host", "observationSource", "metadataEquals", "metadataContains", "evidenceStatus", "rungs")
 	exceptionKeys = keySet("ruleId", "scope", "assetId", "digest", "projectId", "reason", "expiresAt")
-	retentionKeys = keySet("snapshotDays", "assetHistoryDays")
 
 	families   = keySet(string(FamilyShape), string(FamilyChange), string(FamilyPin))
 	rungs      = keySet("NEW", "CHANGED", "UPGRADED", "REMOVED", "UNVERIFIED")
@@ -104,8 +103,6 @@ func allowedKeys(shape string) (map[string]bool, bool) {
 		return matchKeys, false
 	case "exceptions[]":
 		return exceptionKeys, false
-	case "retention":
-		return retentionKeys, false
 	}
 	return nil, true
 }

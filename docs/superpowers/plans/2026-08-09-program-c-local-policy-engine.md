@@ -174,7 +174,6 @@ type Document struct {
 	SchemaVersion string      `json:"schemaVersion"`
 	Rules         []Rule      `json:"rules"`
 	Exceptions    []Exception `json:"exceptions,omitempty"`
-	Retention     *Retention  `json:"retention,omitempty"`
 }
 
 // Rule is one policy rule. A disabled rule is still parsed and still reported
@@ -214,7 +213,7 @@ type Match struct {
 - Validate: `SchemaVersion == SchemaVersion` else `errors.New("schemaVersion: unsupported policy schema version")`; each rule's `ID` matches `\A[a-z][a-z0-9-]{0,31}\z`; each `Family` is one of the three; `Description` non-empty; `Match` required for `shape` and `change`, and **forbidden** for `pin` (a pin rule matches by the presence or absence of a pin, not by facts); `Rungs` only on `change`; every other `Match` field only on `shape`; `Rungs` values ∈ `{NEW, CHANGED, UPGRADED, REMOVED, UNVERIFIED}`; `EvidenceStatus` values ∈ the `model.EvidenceStatus` vocabulary; `AssetType` values ∈ the `model.AssetType` vocabulary; rule IDs unique.
 - Every error is `fmt.Errorf("rules[%d].%s: %s", index, field, reason)`.
 
-Keep `Exception` and `Retention` as declared-but-unvalidated types for now — Tasks 7 and 12 own them. Declaring them here keeps the document shape stable so a starter file written by Task 9 never needs a schema bump.
+Keep `Exception` as a declared-but-unvalidated type for now — Task 7 owns it. Local level-5 documents deliberately have no retention field: foundation §10 reserves retention configuration for signed organization policy `[BUNDLE]`.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -1410,44 +1409,22 @@ git commit -m "feat: report policy violations in the hook"
 
 ---
 
-### Task 13: Wire policy into the `store.Options` retention seam
+### Task 13: Preserve the signed-policy retention seam
 
 **Files:**
 - Modify: `internal/policy/document.go`, `internal/policy/parse.go`, `internal/policy/parse_test.go`
 - Modify: `cmd/ssc-init/main.go`, `cmd/ssc-init/main_test.go`
 - Modify: `internal/doctor/doctor.go` (comment only), `internal/store/snapshots.go` (comment only)
 
-Program B added `store.Options` explicitly as the in-process seam policy would later wire into: "Design §10 makes organization retention configurable through signed policy, which does not exist yet, so this is the in-process seam policy will be wired into: no configuration file, environment variable, or flag reads it today." This task makes the document read it.
-
-Under an organization bundle, retention is org-controlled `[BUNDLE]`. Locally it is user configuration in the level-5 document, which is honest: the user owns their own disk.
+Program B added `store.Options` as the in-process seam a future verified organization bundle will use. Foundation §10 explicitly scopes retention configuration to signed policy, so a local level-5 document must not read this seam. This task documents and tests that boundary without adding local configuration.
 
 - [ ] **Step 1: Write the failing test**
 
 ```go
-func TestRetentionFromTheDocumentReachesTheStore(t *testing.T) {
-	document, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[],
-		"retention":{"snapshotDays":7,"assetHistoryDays":45}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := policy.StoreOptions(document)
-	if options.SnapshotRetention != 7*24*time.Hour || options.AssetHistoryRetention != 45*24*time.Hour {
-		t.Fatalf("unexpected options: %+v", options)
-	}
-	if zero := policy.StoreOptions(policy.Document{}); zero != (store.Options{}) {
-		t.Fatalf("an absent retention block must select the documented defaults, got %+v", zero)
-	}
-}
-
-func TestRetentionRejectsNonPositiveAndAbsurdWindows(t *testing.T) {
-	for _, source := range []string{
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":0}}`,
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":-1}}`,
-		`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"assetHistoryDays":100000}}`,
-	} {
-		if _, err := policy.Load([]byte(source)); err == nil {
-			t.Fatalf("Load accepted an invalid retention window")
-		}
+func TestLocalPolicyCannotConfigureRetention(t *testing.T) {
+	_, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":7}}`))
+	if err == nil {
+		t.Fatal("local policy accepted signed-policy-only retention configuration")
 	}
 }
 ```
@@ -1458,26 +1435,11 @@ Note the direction: `internal/policy` may import `internal/store` for the `Optio
 
 Run: `go test ./internal/policy -run Retention -count=1`
 
-Expected: FAIL — `undefined: policy.StoreOptions`.
+Expected: FAIL until `retention` is removed from the local document shape.
 
 - [ ] **Step 3: Implement**
 
-```go
-// Retention configures the design §10 windows. Zero and negative values are
-// refused at load rather than silently defaulted: "retain nothing" is never
-// what a caller meant, and a document that says 0 must be corrected, not
-// quietly reinterpreted.
-type Retention struct {
-	SnapshotDays     int `json:"snapshotDays,omitempty"`
-	AssetHistoryDays int `json:"assetHistoryDays,omitempty"`
-}
-```
-
-Validate `1 ≤ days ≤ 3650`. `StoreOptions` maps a nil `Retention` to the zero `store.Options`, which already selects the documented 30/90-day defaults.
-
-`cmd/ssc-init` loads the document before opening the store for `scan`, `hook`, `status`, and `policy`, and calls `store.OpenWithOptions(path, policy.StoreOptions(document))`. A document that fails to load must not silently fall back to defaults for `scan` — it exits 2 the same way an invalid argument does; for `hook` it warns and uses defaults, because the hook never fails a session.
-
-Update the two stale comments in `internal/store/snapshots.go` and `internal/doctor/doctor.go` that say policy does not read this seam yet.
+Remove `Retention` from `policy.Document` and reject `retention` as an unknown top-level field. Keep `store.Options` unchanged as the in-process seam for the future verified-bundle loader. Update comments in `internal/store/snapshots.go` and `internal/doctor/doctor.go` to say the seam is reserved for signed organization policy.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -1487,7 +1449,7 @@ Run: `go test ./internal/policy ./internal/store ./internal/doctor ./cmd/ssc-ini
 
 ```bash
 git add internal/policy internal/store internal/doctor cmd/ssc-init
-git commit -m "feat: let the policy document set retention windows"
+git commit -m "docs: reserve retention controls for signed policy"
 ```
 
 ---

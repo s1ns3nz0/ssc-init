@@ -104,6 +104,16 @@ func TestLoadRejectsUnknownFieldsAndDuplicateKeys(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsLocalRetentionConfiguration(t *testing.T) {
+	_, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[],"retention":{"snapshotDays":7}}`))
+	if err == nil {
+		t.Fatal("Load accepted retention outside a signed organization policy bundle")
+	}
+	if strings.Contains(err.Error(), "snapshotDays") || strings.Contains(err.Error(), "7") {
+		t.Fatalf("retention error leaked the rejected value: %v", err)
+	}
+}
+
 func TestLoadErrorsNameALocationAndNeverAValue(t *testing.T) {
 	_, err := policy.Load([]byte(`{"schemaVersion":"ssc-init.policy.v1","rules":[
 		{"id":"a","family":"shape","enabled":false,"description":"d","match":{"assetType":["mcp-server"]}},
