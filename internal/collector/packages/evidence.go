@@ -17,7 +17,7 @@ const dockerProbeTargetID = "packages.docker"
 // never touches the filesystem or a command runner to resolve it. Binding is
 // deliberately reentrant so every package in one collector result shares the
 // result's issuer while retaining an independent proof.
-func issuePackageArtifactEvidence(ctx context.Context, result *model.CollectorResult, probe commandProbe, observation model.Observation) error {
+func issuePackageArtifactEvidence(ctx context.Context, result *model.CollectorResult, probe commandProbe, observation model.Observation, asset model.Asset) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -34,6 +34,11 @@ func issuePackageArtifactEvidence(ctx context.Context, result *model.CollectorRe
 		target.TargetID = dockerProbeTargetID + ".container-identity"
 		target.Kind = model.EvidenceContainerIdentity
 		target.Subject = model.EvidenceSubjectContainerImage
+		if digest, ok := fullDockerImageID("sha256:" + asset.SHA256); ok {
+			target.PresetStatus = model.EvidenceComplete
+			target.PresetAlgorithm = "sha256"
+			target.PresetDigest = digest
+		}
 	}
 	result.LocalEvidenceTargets = append(result.LocalEvidenceTargets, issuer.Issue(target, evidence.Anchor{}))
 	return ctx.Err()

@@ -32,8 +32,15 @@ func TestPackageObservationsIssueVisibleUnsupportedEvidence(t *testing.T) {
 		}
 		packages++
 		target, ok := byObservation[observation.ID]
-		if !ok || target.PresetStatus != model.EvidenceUnsupported || target.RootPath != "" || target.RelativePath != "" {
+		wantStatus := model.EvidenceUnsupported
+		if observation.Source == dockerProbeTargetID {
+			wantStatus = model.EvidenceComplete
+		}
+		if !ok || target.PresetStatus != wantStatus || target.RootPath != "" || target.RelativePath != "" {
 			t.Fatalf("observation=%+v target=%+v present=%v", observation, target, ok)
+		}
+		if wantStatus == model.EvidenceComplete && (target.PresetAlgorithm != "sha256" || target.PresetDigest != assets[observation.AssetID].SHA256) {
+			t.Fatalf("docker asset=%+v target=%+v", assets[observation.AssetID], target)
 		}
 	}
 	if packages == 0 {
@@ -41,6 +48,23 @@ func TestPackageObservationsIssueVisibleUnsupportedEvidence(t *testing.T) {
 	}
 	if len(byObservation) != len(got.LocalEvidenceTargets) || len(got.LocalEvidenceTargets) != packages {
 		t.Fatalf("targets=%d observations=%d packages=%d", len(got.LocalEvidenceTargets), len(byObservation), packages)
+	}
+}
+
+func TestDockerEvidenceWithoutAFullSHA256RemainsUnsupported(t *testing.T) {
+	result := model.CollectorResult{Collector: "packages"}
+	probe := commandProbe{targetID: dockerProbeTargetID, ecosystem: "docker"}
+	observation := model.Observation{ID: "observation:test", AssetID: "pkg:docker/alpine@3.20"}
+
+	if err := issuePackageArtifactEvidence(context.Background(), &result, probe, observation, model.Asset{ID: observation.AssetID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.LocalEvidenceTargets) != 1 {
+		t.Fatalf("targets=%+v", result.LocalEvidenceTargets)
+	}
+	target := result.LocalEvidenceTargets[0]
+	if target.PresetStatus != model.EvidenceUnsupported || target.PresetAlgorithm != "" || target.PresetDigest != "" {
+		t.Fatalf("target=%+v", target)
 	}
 }
 
@@ -128,7 +152,15 @@ func TestPackageEvidenceCollectsAsTerminalUnsupportedWithoutHostAccess(t *testin
 	if len(collection.Evidence) != wantTargets || len(collection.Coverage.Targets) != wantTargets {
 		t.Fatalf("records=%d coverage=%d want=%d", len(collection.Evidence), len(collection.Coverage.Targets), wantTargets)
 	}
+	complete := 0
 	for _, record := range collection.Evidence {
+		if record.Kind == model.EvidenceContainerIdentity {
+			complete++
+			if record.Status != model.EvidenceComplete || record.Algorithm != "sha256" || record.Digest != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+				t.Fatalf("container record=%+v", record)
+			}
+			continue
+		}
 		if record.Status != model.EvidenceUnsupported || record.ID == "" || record.Algorithm != "" || record.Digest != "" ||
 			record.Size != 0 || record.Files != 0 || record.Directories != 0 || record.Symlinks != 0 ||
 			len(record.Metadata) != 0 || len(record.Errors) != 0 {
@@ -138,8 +170,11 @@ func TestPackageEvidenceCollectsAsTerminalUnsupportedWithoutHostAccess(t *testin
 			t.Fatalf("record=%+v", record)
 		}
 	}
+	if complete != 1 {
+		t.Fatalf("complete container identities=%d evidence=%+v", complete, collection.Evidence)
+	}
 	for _, result := range collection.Coverage.Targets {
-		if result.Status != model.EvidenceUnsupported || len(result.Errors) != 0 {
+		if result.Status != model.EvidenceUnsupported && result.Status != model.EvidenceComplete || len(result.Errors) != 0 {
 			t.Fatalf("coverage target=%+v", result)
 		}
 	}

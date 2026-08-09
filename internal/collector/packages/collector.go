@@ -259,7 +259,7 @@ func appendPackageEvidence(ctx context.Context, result *model.CollectorResult, t
 	if candidate.Type != model.AssetPackage {
 		return nil
 	}
-	return issuePackageArtifactEvidence(ctx, result, probe, observation)
+	return issuePackageArtifactEvidence(ctx, result, probe, observation, candidate)
 }
 
 func validExecutableEvidence(probe commandProbe, evidence platform.ExecutableEvidence) bool {
