@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	versionanalyzer "github.com/s1ns3nz0/ssc-init/internal/analyzer/version"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
@@ -20,7 +21,7 @@ func Correlate(inventory model.Inventory, active bundle.ActiveBundle, now time.T
 	}
 	records := make(map[string][]bundle.TIRecord)
 	for _, record := range active.Verified.Envelope.TI.Records {
-		if record.Withdrawn || record.AssetID == "" || record.VersionRange != "" && record.SHA256 == "" {
+		if record.Withdrawn || record.AssetID == "" {
 			continue
 		}
 		records[record.AssetID] = append(records[record.AssetID], record)
@@ -36,7 +37,11 @@ func Correlate(inventory model.Inventory, active bundle.ActiveBundle, now time.T
 	for _, asset := range inventory.Assets {
 		var matches []bundle.TIRecord
 		for _, record := range records[asset.ID] {
-			if record.SHA256 == "" || strings.EqualFold(record.SHA256, asset.SHA256) {
+			matchesRecord := record.SHA256 == "" || strings.EqualFold(record.SHA256, asset.SHA256)
+			if matchesRecord && record.SHA256 == "" && record.VersionRange != "" {
+				matchesRecord, _ = versionanalyzer.Match(asset.ID, asset.Version, record.VersionRange)
+			}
+			if matchesRecord {
 				matches = append(matches, record)
 			}
 		}

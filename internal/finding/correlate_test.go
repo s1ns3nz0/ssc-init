@@ -29,10 +29,23 @@ func TestCorrelateRejectsHashMismatchWithdrawnAndRangeOnlyRecords(t *testing.T) 
 	records := []bundle.TIRecord{
 		{ID: "hash-mismatch", AssetID: asset.ID, SHA256: strings.Repeat("b", 64), Verdict: "known-malicious", Confidence: "high"},
 		{ID: "withdrawn", AssetID: asset.ID, SHA256: asset.SHA256, Verdict: "known-malicious", Confidence: "high", Withdrawn: true},
-		{ID: "range-only", AssetID: asset.ID, VersionRange: ">=1.0.0", Verdict: "suspicious", Confidence: "medium"},
+		{ID: "range-only", AssetID: asset.ID, VersionRange: "not a range", Verdict: "suspicious", Confidence: "medium"},
 	}
 	if got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, activeTI(records), time.Now().UTC()); len(got) != 0 {
 		t.Fatalf("unsupported records matched: %+v", got)
+	}
+}
+
+func TestCorrelateMatchesSupportedVersionRangeWithoutHash(t *testing.T) {
+	asset := model.Asset{ID: "pkg:npm/example@1.5.0", Type: model.AssetPackage, Name: "example", Version: "1.5.0"}
+	active := activeTI([]bundle.TIRecord{{ID: "range-advisory", AssetID: asset.ID, VersionRange: ">=1.0.0 <2.0.0", Verdict: "known-malicious", Confidence: "high"}})
+	got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC())
+	if len(got) != 1 || got[0].IntelligenceIDs[0] != "range-advisory" {
+		t.Fatalf("findings=%+v", got)
+	}
+	asset.Version = "2.1.0"
+	if got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC()); len(got) != 0 {
+		t.Fatalf("out-of-range matched: %+v", got)
 	}
 }
 
