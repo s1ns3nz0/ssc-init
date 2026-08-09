@@ -56,6 +56,11 @@ func (m Manager) Install(ctx context.Context, bundlePath, signaturePath string) 
 		return Verified{}, ErrInstall
 	}
 	defer root.Close()
+	unlock, err := lockBundleRoot(root)
+	if err != nil {
+		return Verified{}, ErrInstall
+	}
+	defer unlock()
 	sequence := strconv.FormatUint(verified.Envelope.Sequence, 10)
 	if highWater, highWaterErr := readSequencePointer(root, "highest-sequence"); highWaterErr == nil {
 		highest, _ := strconv.ParseUint(highWater, 10, 64)
@@ -126,6 +131,11 @@ func (m Manager) Rollback(ctx context.Context) error {
 		return ErrRollback
 	}
 	defer root.Close()
+	unlock, err := lockBundleRoot(root)
+	if err != nil {
+		return ErrRollback
+	}
+	defer unlock()
 	current, currentErr := readSequencePointer(root, "current")
 	previous, previousErr := readSequencePointer(root, "previous")
 	if currentErr != nil || previousErr != nil || current == previous {
@@ -199,4 +209,19 @@ func writeSequencePointer(root *os.Root, name, sequence string) error {
 		return ErrInstall
 	}
 	return nil
+}
+
+func lockBundleRoot(root *os.Root) (func(), error) {
+	file, err := root.OpenFile(".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, ErrInstall
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, ErrInstall
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }

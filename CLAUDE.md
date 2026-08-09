@@ -39,9 +39,10 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - `internal/provenance` — bounded, network-free npm/Cargo/Go lockfile parsing; Go `h1` remains a source-specific integrity fact and is never mislabeled SHA-256.
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
-- `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state.
+- `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state. Rebuildable `bundle_index` and bounded `bundle_audit` tables have no `scan_id`; verified files remain the bundle activation source of truth.
 - `internal/install` — the only default product path that executes a supplied binary, solely for a bounded doctor health check; it is never reachable from scanning. The current-version pointer is a regular file, never a symlink, and every read re-validates it.
 - `internal/policy` — pure evaluation over already-recorded inventory facts. It must not read the host, run processes, open sockets, or import `internal/report`.
+- `internal/bundle` — closed TI/organization schemas, family-scoped Ed25519 verification, monotonic sequence protection, atomic stage/activate/rollback, and freshness state. It never fetches a bundle; production trust roots are an explicit reviewed input.
 - `internal/inventory` — owns both inventory diffing and the shared change-ladder classifier; report code only renders its result.
 - `internal/acceptance` — isolated-home end-to-end fixtures.
 
@@ -82,6 +83,8 @@ managed-install integrity and rollback availability without paths.
 Program D adds full local Docker SHA-256 identity evidence, bounded macOS signature facts for verified external-probe executables, npm/Cargo/Go lockfile provenance, and a closed deterministic relationship vocabulary. It adds no verdict, safety claim, network lookup, or enforcement. Real Developer ID signing/notarization remains a release-time `[APPLE]` step awaiting credentials.
 
 Program I adds bounded shell startup, Git credential-helper, project Git-hook and VS Code launch-config inventory. With explicit `--external-probes`, it also records a point-in-time process/listener snapshot containing only PID, executable basename, protocol, and local port. It is not continuous monitoring, and default scans still execute no process. Apple signing/notarization remains deferred and is not a Program I dependency.
+
+Program E adds the network-free verified-bundle core: closed TI and organization-policy payloads, family-scoped Ed25519 signatures, hardened local staging, last-known-good activation/rollback, high-water rollback protection, freshness reporting, CLI commands, rebuildable store indexes, publisher tooling, schemas, and CI gates. The production key registry is deliberately empty pending reviewed public keys; actual publication and scheduled retrieval remain external evidence. Program E does not yet correlate TI into findings or activate organization precedence in policy decisions—Program F owns that decision/reporting layer.
 
 Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical — spec-conformant per design §6.1, disclosed in the validation doc); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include package payload hashing, TI, behavior analysis, verified organization bundles, warnings, blocking, and host adapters.
 

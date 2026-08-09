@@ -133,6 +133,10 @@ state.
 
 ## 9. Known external gaps
 
+- Production TI and organization-policy public keys have not been reviewed or
+  committed, and no signed bundle has been published. The runtime registry is
+  therefore empty and bundle installation fails closed. CI accepts the two
+  family-specific signing seeds only through GitHub Actions secrets.
 - No git remote is configured, so `.github/workflows/ci.yml` has not executed
   on a hosted runner. Creating a remote and pushing the repository unblocks it.
 - No Developer ID certificate/private key is available in this environment, so

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -137,6 +138,39 @@ func TestManagerRejectsDifferentBytesAtAcceptedSequence(t *testing.T) {
 	stored, err := os.ReadFile(filepath.Join(layout.VersionDir(7), "bundle.json"))
 	if err != nil || string(stored) != string(raw) {
 		t.Fatalf("accepted sequence was replaced: err=%v", err)
+	}
+}
+
+func TestManagerRefusesConcurrentWriterAndRemovesPlantedPointerSymlink(t *testing.T) {
+	home := t.TempDir()
+	publicKey, privateKey := deterministicKey(t, "concurrency fixture")
+	manager := testManager(t, home, publicKey)
+	raw := validTIBundleBytes("ti-key")
+	bundlePath, signaturePath := writeSignedBundleFixture(t, raw, privateKey)
+	if err := manager.Layout.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(manager.Layout.Root, ".lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil || syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		t.Fatalf("lock err=%v", err)
+	}
+	if _, err := manager.Install(context.Background(), bundlePath, signaturePath); err != ErrInstall {
+		t.Fatalf("competing install err=%v", err)
+	}
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_ = lock.Close()
+	outside := filepath.Join(t.TempDir(), "must-not-change")
+	if err := os.WriteFile(outside, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(manager.Layout.Root, "current.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Install(context.Background(), bundlePath, signaturePath); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "original" {
+		t.Fatalf("planted pointer target changed: %q err=%v", got, err)
 	}
 }
 
