@@ -119,6 +119,7 @@ func Evaluate(input Input) Result {
 		}
 	}
 	result.Violations = append(result.Violations, evaluatePins(input.Sources.Document, input.Inventory, input.Pins)...)
+	result.Violations, result.Applied, result.Expired = applyExceptions(input, result.Violations)
 	sort.Slice(result.Violations, func(i, j int) bool {
 		left, right := result.Violations[i], result.Violations[j]
 		if left.RuleID != right.RuleID {

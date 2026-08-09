@@ -57,6 +57,9 @@ func Load(source []byte) (Document, error) {
 	if err := validate(document, present); err != nil {
 		return Document{}, err
 	}
+	if err := validateExceptions(document); err != nil {
+		return Document{}, err
+	}
 	return document, nil
 }
 
