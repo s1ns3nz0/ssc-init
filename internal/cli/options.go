@@ -30,6 +30,11 @@ type Options struct {
 	PolicyCommand string
 	PolicyPath    string
 	PolicyAssetID string
+
+	BundleCommand   string
+	BundleFamily    string
+	BundleSource    string
+	BundleSignature string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -73,6 +78,10 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parsePolicyOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
+	case "bundle":
+		if err := parseBundleOptions(args[1:], &options); err != nil {
+			return Options{}, err
+		}
 	case "hook":
 		if len(args) != 1 {
 			return Options{}, ErrInvalidOptions
@@ -81,6 +90,61 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, ErrInvalidOptions
 	}
 	return options, nil
+}
+
+func parseBundleOptions(args []string, options *Options) error {
+	if len(args) == 0 {
+		return ErrInvalidOptions
+	}
+	options.BundleCommand = args[0]
+	if options.BundleCommand != "install" && options.BundleCommand != "status" && options.BundleCommand != "rollback" {
+		return ErrInvalidOptions
+	}
+	for index := 1; index < len(args); index++ {
+		flag := args[index]
+		if flag == "--json" {
+			if options.JSON {
+				return ErrInvalidOptions
+			}
+			options.JSON = true
+			continue
+		}
+		index++
+		if index == len(args) {
+			return ErrInvalidOptions
+		}
+		value := args[index]
+		switch flag {
+		case "--family":
+			if options.BundleFamily != "" || value != "ti" && value != "policy" {
+				return ErrInvalidOptions
+			}
+			options.BundleFamily = value
+		case "--from":
+			if options.BundleCommand != "install" || options.BundleSource != "" || !validInstallSource(value) {
+				return ErrInvalidOptions
+			}
+			options.BundleSource = value
+		case "--signature":
+			if options.BundleCommand != "install" || options.BundleSignature != "" || !validInstallSource(value) {
+				return ErrInvalidOptions
+			}
+			options.BundleSignature = value
+		default:
+			return ErrInvalidOptions
+		}
+	}
+	if !options.JSON || options.BundleFamily == "" {
+		return ErrInvalidOptions
+	}
+	if options.BundleCommand == "install" {
+		if options.BundleSource == "" || options.BundleSignature == "" {
+			return ErrInvalidOptions
+		}
+	} else if options.BundleSource != "" || options.BundleSignature != "" {
+		return ErrInvalidOptions
+	}
+	return nil
 }
 
 func parsePolicyOptions(args []string, options *Options) error {

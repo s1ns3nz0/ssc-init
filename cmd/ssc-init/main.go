@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/agents"
@@ -46,7 +47,8 @@ var (
 	// The local-policy build always opens the store with documented retention
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
-	openStoreForRun = func(path string) (applicationStore, error) { return store.Open(path) }
+	openStoreForRun  = func(path string) (applicationStore, error) { return store.Open(path) }
+	bundleKeysForRun = bundle.KeyRegistry{}
 )
 
 func main() {
@@ -192,6 +194,23 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			app.StatusReader = snapshots
 			app.PolicyStore = policyStore
 			app.Now = time.Now
+		}
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "bundle":
+		home, _, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.BundleManagers = make(map[bundle.Family]cli.BundleManager, 2)
+		for _, family := range []bundle.Family{bundle.FamilyTI, bundle.FamilyPolicy} {
+			layout, err := bundle.LayoutFor(home, family)
+			if err != nil {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
+			manager := &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
+			app.BundleManagers[family] = manager
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
@@ -356,7 +375,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "doctor", "hook", "install", "policy", "rollback", "scan", "status":
+	case "bundle", "doctor", "hook", "install", "policy", "rollback", "scan", "status":
 		return true
 	default:
 		return false

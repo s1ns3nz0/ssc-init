@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
@@ -60,6 +61,12 @@ type Installer interface {
 	Rollback(ctx context.Context) (InstallOutcome, error)
 }
 
+type BundleManager interface {
+	Install(context.Context, string, string) (bundle.Verified, error)
+	Status(context.Context) (bundle.Status, error)
+	Rollback(context.Context) error
+}
+
 // Install and rollback failure sentinels. They are the classification an
 // adapter acts on; the messages below are the only thing ever printed, so no
 // supplied path, version, or digest can be echoed back.
@@ -100,6 +107,7 @@ type App struct {
 	PolicyDocument  policy.Document
 	PolicyLoadError error
 	Now             func() time.Time
+	BundleManagers  map[bundle.Family]BundleManager
 }
 
 // Run executes the CLI with the development version.
@@ -291,6 +299,41 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		fmt.Fprintf(stdout, "ssc-init: wrote policy to %s\n", platform.SafeLocationRef(a.Home, path, "policy"))
+		return 0
+	case "bundle":
+		family := bundle.Family(options.BundleFamily)
+		manager := a.BundleManagers[family]
+		if manager == nil {
+			fmt.Fprintln(stderr, "bundle state is unavailable")
+			return 1
+		}
+		var status bundle.Status
+		var err error
+		switch options.BundleCommand {
+		case "install":
+			_, err = manager.Install(ctx, options.BundleSource, options.BundleSignature)
+			if err == nil {
+				status, err = manager.Status(ctx)
+			}
+		case "status":
+			status, err = manager.Status(ctx)
+		case "rollback":
+			err = manager.Rollback(ctx)
+			if err == nil {
+				status, err = manager.Status(ctx)
+			}
+		default:
+			fmt.Fprintln(stderr, "invalid command arguments")
+			return 2
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "bundle "+options.BundleCommand+" failed")
+			return 1
+		}
+		if err := writeJSON(stdout, bundlePayload{SchemaVersion: "ssc-init.bundle-status.v1", Command: options.BundleCommand, Status: status}); err != nil {
+			fmt.Fprintln(stderr, "failed to write bundle output")
+			return 1
+		}
 		return 0
 	case "hook":
 		if a.BaselineScanner == nil {
@@ -507,6 +550,12 @@ type installPayload struct {
 	Version           string `json:"version"`
 	PreviousVersion   string `json:"previousVersion"`
 	RollbackAvailable bool   `json:"rollbackAvailable"`
+}
+
+type bundlePayload struct {
+	SchemaVersion string        `json:"schemaVersion"`
+	Command       string        `json:"command"`
+	Status        bundle.Status `json:"status"`
 }
 
 type statusPayload struct {

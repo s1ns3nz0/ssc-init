@@ -128,6 +128,34 @@ func TestParseOptionsAcceptsInstallAndRollback(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsOnlyExplicitLocalBundleCommands(t *testing.T) {
+	got, err := ParseOptions([]string{"bundle", "install", "--family", "ti", "--from", "/tmp/bundle.json", "--signature", "/tmp/bundle.sig", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Options{Command: "bundle", BundleCommand: "install", BundleFamily: "ti", BundleSource: "/tmp/bundle.json", BundleSignature: "/tmp/bundle.sig", JSON: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("options=%+v want=%+v", got, want)
+	}
+	for _, args := range [][]string{
+		{"bundle", "status", "--family", "policy", "--json"},
+		{"bundle", "rollback", "--family", "ti", "--json"},
+	} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"bundle", "install", "--family", "ti", "--from", "https://example.invalid/bundle", "--signature", "/tmp/sig", "--json"},
+		{"bundle", "install", "--family", "other", "--from", "/tmp/b", "--signature", "/tmp/s", "--json"},
+		{"bundle", "status", "--family", "ti", "--from", "/tmp/b", "--json"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid bundle command: %v", args)
+		}
+	}
+}
+
 func TestParseOptionsRejectsUndocumentedInstallForms(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	for _, invalid := range [][]string{

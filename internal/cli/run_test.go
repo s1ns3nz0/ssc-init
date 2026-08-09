@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -22,6 +23,33 @@ import (
 type failingWriter struct {
 	err error
 }
+
+func TestRunBundleCommandsUseLocalManagerAndEmitPathFreeStatus(t *testing.T) {
+	manager := &fakeBundleManager{status: bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 9, Version: "2026.08.10"}}
+	app := App{BundleManagers: map[bundle.Family]BundleManager{bundle.FamilyTI: manager}}
+	privateBundle, privateSignature := "/Users/private/bundle.json", "/Users/private/bundle.sig"
+	var out, errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{"bundle", "install", "--family", "ti", "--from", privateBundle, "--signature", privateSignature, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || manager.source != privateBundle || manager.signature != privateSignature {
+		t.Fatalf("code=%d stdout=%q stderr=%q manager=%+v", code, out.String(), errOut.String(), manager)
+	}
+	if strings.Contains(out.String(), "/Users/private") || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.bundle-status.v1"`) || !strings.Contains(out.String(), `"freshness":"fresh"`) {
+		t.Fatalf("bundle output=%q", out.String())
+	}
+}
+
+type fakeBundleManager struct {
+	status            bundle.Status
+	source, signature string
+}
+
+func (m *fakeBundleManager) Install(_ context.Context, source, signature string) (bundle.Verified, error) {
+	m.source, m.signature = source, signature
+	return bundle.Verified{}, nil
+}
+
+func (m *fakeBundleManager) Status(context.Context) (bundle.Status, error) { return m.status, nil }
+func (m *fakeBundleManager) Rollback(context.Context) error                { return nil }
 
 func (w failingWriter) Write([]byte) (int, error) {
 	return 0, w.err
