@@ -48,7 +48,7 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parseScanOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
-	case "status":
+	case "status", "findings":
 		if len(args) != 2 {
 			return Options{}, ErrInvalidOptions
 		}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
@@ -67,6 +68,10 @@ type BundleManager interface {
 	Rollback(context.Context) error
 }
 
+type FindingService interface {
+	Evaluate(context.Context, model.Inventory) (finding.Result, error)
+}
+
 // Install and rollback failure sentinels. They are the classification an
 // adapter acts on; the messages below are the only thing ever printed, so no
 // supplied path, version, or digest can be echoed back.
@@ -108,6 +113,7 @@ type App struct {
 	PolicyLoadError error
 	Now             func() time.Time
 	BundleManagers  map[bundle.Family]BundleManager
+	FindingService  FindingService
 }
 
 // Run executes the CLI with the development version.
@@ -208,6 +214,45 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		return 0
+	case "findings":
+		if a.StatusReader == nil || a.FindingService == nil {
+			fmt.Fprintln(stderr, "findings are unavailable")
+			return 1
+		}
+		snapshot, initialized, err := a.StatusReader.LatestSnapshot(ctx)
+		if err != nil || !initialized {
+			fmt.Fprintln(stderr, "failed to evaluate findings")
+			return 1
+		}
+		result, err := a.FindingService.Evaluate(ctx, snapshot.Inventory)
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to evaluate findings")
+			return 1
+		}
+		payload := map[string]any{"schemaVersion": "ssc-init.findings.v1", "intelligence": result.Intelligence, "policy": result.Policy, "findings": result.Findings}
+		var writeErr error
+		if options.Pretty {
+			encoder := json.NewEncoder(stdout)
+			encoder.SetEscapeHTML(false)
+			encoder.SetIndent("", "  ")
+			writeErr = encoder.Encode(payload)
+		} else {
+			writeErr = writeJSON(stdout, payload)
+		}
+		if writeErr != nil {
+			fmt.Fprintln(stderr, "failed to write findings output")
+			return 1
+		}
+		code := 0
+		for _, item := range result.Findings {
+			if item.Action == model.ActionAdvisory || item.Action == model.ActionBlocked || item.Action == model.ActionPaused {
+				code = 3
+			}
+			if item.Verdict == model.VerdictKnownMalicious || item.Level == 2 {
+				return 4
+			}
+		}
+		return code
 	case "doctor":
 		if a.Doctor == nil {
 			fmt.Fprintln(stderr, "doctor is unavailable")

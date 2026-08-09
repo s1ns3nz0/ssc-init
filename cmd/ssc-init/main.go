@@ -24,6 +24,7 @@ import (
 	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
+	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/install"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
@@ -103,6 +104,33 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		defer snapshots.Close()
 		app.StatusReader = snapshots
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "findings":
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		defer snapshots.Close()
+		statusReader, ok := snapshots.(cli.StatusReader)
+		if !ok {
+			return 1
+		}
+		managers := make(map[bundle.Family]*bundle.Manager, 2)
+		for _, family := range []bundle.Family{bundle.FamilyTI, bundle.FamilyPolicy} {
+			layout, layoutErr := bundle.LayoutFor(home, family)
+			if layoutErr != nil {
+				return 1
+			}
+			managers[family] = &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
+		}
+		app.StatusReader = statusReader
+		app.FindingService = finding.Service{TI: managers[bundle.FamilyTI], Policy: managers[bundle.FamilyPolicy], Now: time.Now}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()
@@ -375,7 +403,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "bundle", "doctor", "hook", "install", "policy", "rollback", "scan", "status":
+	case "bundle", "doctor", "findings", "hook", "install", "policy", "rollback", "scan", "status":
 		return true
 	default:
 		return false
