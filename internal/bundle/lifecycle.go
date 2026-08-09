@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-var ErrInstall = errors.New("bundle installation failed")
+var (
+	ErrInstall  = errors.New("bundle installation failed")
+	ErrRollback = errors.New("bundle rollback was refused")
+)
 
 type Manager struct {
 	Layout   Layout
@@ -54,6 +57,21 @@ func (m Manager) Install(ctx context.Context, bundlePath, signaturePath string) 
 	}
 	defer root.Close()
 	sequence := strconv.FormatUint(verified.Envelope.Sequence, 10)
+	if highWater, highWaterErr := readSequencePointer(root, "highest-sequence"); highWaterErr == nil {
+		highest, _ := strconv.ParseUint(highWater, 10, 64)
+		if verified.Envelope.Sequence < highest {
+			return Verified{}, ErrRollback
+		}
+		if verified.Envelope.Sequence == highest {
+			acceptedPath := path.Join("versions", sequence)
+			acceptedRaw, rawErr := root.ReadFile(path.Join(acceptedPath, "bundle.json"))
+			acceptedSignature, signatureErr := root.ReadFile(path.Join(acceptedPath, "bundle.sig"))
+			accepted, verifyErr := m.Verifier.Verify(acceptedRaw, acceptedSignature, m.Now())
+			if rawErr != nil || signatureErr != nil || verifyErr != nil || accepted.Digest != verified.Digest {
+				return Verified{}, ErrRollback
+			}
+		}
+	}
 	staging := path.Join("staging", sequence)
 	installed := path.Join("versions", sequence)
 	if err := root.RemoveAll(staging); err != nil || root.MkdirAll(staging, 0o700) != nil {
@@ -81,6 +99,9 @@ func (m Manager) Install(ctx context.Context, bundlePath, signaturePath string) 
 	if err := root.RemoveAll(installed); err != nil || root.Rename(staging, installed) != nil {
 		return discard(ErrInstall)
 	}
+	if err := writeSequencePointer(root, "highest-sequence", sequence); err != nil {
+		return Verified{}, ErrInstall
+	}
 	current, currentErr := readSequencePointer(root, "current")
 	if currentErr == nil && current != sequence {
 		if err := writeSequencePointer(root, "previous", current); err != nil {
@@ -91,6 +112,39 @@ func (m Manager) Install(ctx context.Context, bundlePath, signaturePath string) 
 		return Verified{}, ErrInstall
 	}
 	return staged, nil
+}
+
+func (m Manager) Rollback(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.Now == nil || !validFamily(m.Family) || m.Layout.Initialize() != nil {
+		return ErrRollback
+	}
+	root, err := os.OpenRoot(m.Layout.Root)
+	if err != nil {
+		return ErrRollback
+	}
+	defer root.Close()
+	current, currentErr := readSequencePointer(root, "current")
+	previous, previousErr := readSequencePointer(root, "previous")
+	if currentErr != nil || previousErr != nil || current == previous {
+		return ErrRollback
+	}
+	previousPath := path.Join("versions", previous)
+	raw, rawErr := root.ReadFile(path.Join(previousPath, "bundle.json"))
+	signature, signatureErr := root.ReadFile(path.Join(previousPath, "bundle.sig"))
+	verified, verifyErr := m.Verifier.Verify(raw, signature, m.Now())
+	if rawErr != nil || signatureErr != nil || verifyErr != nil || strconv.FormatUint(verified.Envelope.Sequence, 10) != previous || verified.Envelope.Family != m.Family {
+		return ErrRollback
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if writeSequencePointer(root, "previous", current) != nil || writeSequencePointer(root, "current", previous) != nil {
+		return ErrRollback
+	}
+	return nil
 }
 
 func readRegularBounded(filePath string, maximum int64) ([]byte, error) {

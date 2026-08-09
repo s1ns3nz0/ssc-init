@@ -3,6 +3,7 @@ package bundle
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,11 @@ func deterministicKey(t *testing.T, label string) (ed25519.PublicKey, ed25519.Pr
 }
 
 func validTIBundleBytes(keyID string) []byte {
-	return []byte(`{"schemaVersion":"ssc-init.bundle.v1","family":"ti","version":"2026.08.10","sequence":7,"keyId":"` + keyID + `","generatedAt":"2026-08-10T00:00:00Z","validFrom":"2026-08-10T00:00:00Z","validUntil":"2026-08-20T00:00:00Z","payload":{"records":[]}}`)
+	return validTIBundleSequenceBytes(keyID, 7)
+}
+
+func validTIBundleSequenceBytes(keyID string, sequence uint64) []byte {
+	return []byte(`{"schemaVersion":"ssc-init.bundle.v1","family":"ti","version":"2026.08.10","sequence":` + strconv.FormatUint(sequence, 10) + `,"keyId":"` + keyID + `","generatedAt":"2026-08-10T00:00:00Z","validFrom":"2026-08-10T00:00:00Z","validUntil":"2026-08-20T00:00:00Z","payload":{"records":[]}}`)
 }
 
 func testBundleNow() time.Time { return time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC) }

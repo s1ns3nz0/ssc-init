@@ -86,6 +86,60 @@ func TestManagerRejectsSymlinkSourcesAndCancellationWithoutState(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsSequenceRollbackAndPreservesHighWaterAcrossRollback(t *testing.T) {
+	home := t.TempDir()
+	publicKey, privateKey := deterministicKey(t, "rollback fixture")
+	manager := testManager(t, home, publicKey)
+	for _, sequence := range []uint64{7, 8} {
+		raw := validTIBundleSequenceBytes("ti-key", sequence)
+		bundlePath, signaturePath := writeSignedBundleFixture(t, raw, privateKey)
+		if _, err := manager.Install(context.Background(), bundlePath, signaturePath); err != nil {
+			t.Fatalf("install sequence %d: %v", sequence, err)
+		}
+	}
+	layout, _ := LayoutFor(home, FamilyTI)
+	if got := readLifecycleFile(t, layout.HighWaterFile); got != "8" {
+		t.Fatalf("high water=%q", got)
+	}
+	older, olderSignature := writeSignedBundleFixture(t, validTIBundleSequenceBytes("ti-key", 6), privateKey)
+	if _, err := manager.Install(context.Background(), older, olderSignature); err != ErrRollback {
+		t.Fatalf("downgrade install err=%v", err)
+	}
+	if got := readLifecycleFile(t, layout.CurrentFile); got != "8" {
+		t.Fatalf("downgrade changed current=%q", got)
+	}
+	if err := manager.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLifecycleFile(t, layout.CurrentFile); got != "7" {
+		t.Fatalf("rollback current=%q", got)
+	}
+	if got := readLifecycleFile(t, layout.HighWaterFile); got != "8" {
+		t.Fatalf("rollback lowered high water=%q", got)
+	}
+}
+
+func TestManagerRejectsDifferentBytesAtAcceptedSequence(t *testing.T) {
+	home := t.TempDir()
+	publicKey, privateKey := deterministicKey(t, "sequence collision fixture")
+	manager := testManager(t, home, publicKey)
+	raw := validTIBundleBytes("ti-key")
+	bundlePath, signaturePath := writeSignedBundleFixture(t, raw, privateKey)
+	if _, err := manager.Install(context.Background(), bundlePath, signaturePath); err != nil {
+		t.Fatal(err)
+	}
+	changed := []byte(strings.Replace(string(raw), `"version":"2026.08.10"`, `"version":"2026.08.10-repacked"`, 1))
+	changedPath, changedSignature := writeSignedBundleFixture(t, changed, privateKey)
+	if _, err := manager.Install(context.Background(), changedPath, changedSignature); err != ErrRollback {
+		t.Fatalf("sequence collision err=%v", err)
+	}
+	layout, _ := LayoutFor(home, FamilyTI)
+	stored, err := os.ReadFile(filepath.Join(layout.VersionDir(7), "bundle.json"))
+	if err != nil || string(stored) != string(raw) {
+		t.Fatalf("accepted sequence was replaced: err=%v", err)
+	}
+}
+
 func testManager(t *testing.T, home string, publicKey ed25519.PublicKey) Manager {
 	t.Helper()
 	layout, err := LayoutFor(home, FamilyTI)
