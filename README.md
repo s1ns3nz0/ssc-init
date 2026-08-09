@@ -19,11 +19,11 @@ The baseline collector inventories and, where a bounded local implementation exi
 - macOS signature facts for verified probe executables when external probes are enabled. The result is a closed `valid`, `invalid`, `unsigned`, `unavailable`, or `unsupported` fact, not a safety verdict; signer diagnostics and certificate chains are discarded.
 - the exact six supported shell startup files, the two user Git configuration files, declared global Git credential-helper names (arguments and URL-scoped values are discarded), project Git hooks, and `.vscode/launch.json`, all without executing discovered content;
 - a point-in-time process and local TCP-listener snapshot only with `--external-probes`. It retains PID, executable basename, protocol, and local port only; command arguments, hostnames, remote endpoints, and continuous monitoring are out of scope.
-- locally supplied TI and organization-policy bundles with closed JSON schemas, family-scoped Ed25519 signatures, monotonic rollback protection, atomic activation/rollback, and explicit freshness state. Bundle ingestion never downloads a file and does not yet turn TI records into findings.
+- locally supplied TI and organization-policy bundles with closed JSON schemas, family-scoped Ed25519 signatures, monotonic rollback protection, atomic activation/rollback, explicit freshness state, exact TI correlation, and five-level organization decisions. Bundle ingestion never downloads a file.
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Package payload hashing, threat intelligence (TI), behavior analysis, Git-managed organization policy, organization integrations, host adapters, warnings, and blocking remain unimplemented later programs. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
+Broader package payload hashing, behavior analysis, Git-managed policy compilation, host adapters, warnings, and blocking remain later programs. Finding JSON, privacy-safe SARIF, inventory CycloneDX, and explicit HTTPS webhook delivery are implemented; no command claims host enforcement. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
 
 ## Commands
 
@@ -46,6 +46,9 @@ ssc-init policy check --pretty
 ssc-init bundle status --family ti --json
 ssc-init bundle install --family ti --from /absolute/bundle.json --signature /absolute/bundle.sig --json
 ssc-init bundle rollback --family ti --json
+ssc-init findings --json
+ssc-init findings --pretty
+ssc-init findings --json --webhook https://security.example.invalid/ssc-init
 ```
 
 `doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. The default project scope is `$HOME/Projects`; repeat `--project-root` to add explicitly configured roots. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
