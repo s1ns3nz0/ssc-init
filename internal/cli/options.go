@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -35,6 +36,7 @@ type Options struct {
 	BundleFamily    string
 	BundleSource    string
 	BundleSignature string
+	WebhookURL      string
 }
 
 // ParseOptions accepts only documented, command-aware argument forms.
@@ -48,7 +50,7 @@ func ParseOptions(args []string) (Options, error) {
 		if err := parseScanOptions(args[1:], &options); err != nil {
 			return Options{}, err
 		}
-	case "status", "findings":
+	case "status":
 		if len(args) != 2 {
 			return Options{}, ErrInvalidOptions
 		}
@@ -58,6 +60,32 @@ func ParseOptions(args []string) (Options, error) {
 		case "--pretty":
 			options.Pretty = true
 		default:
+			return Options{}, ErrInvalidOptions
+		}
+	case "findings":
+		for index := 1; index < len(args); index++ {
+			switch args[index] {
+			case "--json":
+				if options.JSON || options.Pretty {
+					return Options{}, ErrInvalidOptions
+				}
+				options.JSON = true
+			case "--pretty":
+				if options.JSON || options.Pretty {
+					return Options{}, ErrInvalidOptions
+				}
+				options.Pretty = true
+			case "--webhook":
+				index++
+				if index == len(args) || options.WebhookURL != "" || !validWebhookURL(args[index]) {
+					return Options{}, ErrInvalidOptions
+				}
+				options.WebhookURL = args[index]
+			default:
+				return Options{}, ErrInvalidOptions
+			}
+		}
+		if !options.JSON && !options.Pretty {
 			return Options{}, ErrInvalidOptions
 		}
 	case "doctor", "version":
@@ -90,6 +118,11 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, ErrInvalidOptions
 	}
 	return options, nil
+}
+
+func validWebhookURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
 }
 
 func parseBundleOptions(args []string, options *Options) error {

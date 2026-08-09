@@ -33,6 +33,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
+	"github.com/s1ns3nz0/ssc-init/internal/webhook"
 )
 
 var version = "dev"
@@ -137,6 +138,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		if err != nil {
 			return 1
 		}
+		app.Webhook = webhook.Deliverer{}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "scan":
 		home, paths, ok := hostPathsForRun()

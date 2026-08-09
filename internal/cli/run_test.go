@@ -31,6 +31,17 @@ func (f fakeFindingService) Evaluate(context.Context, model.Inventory) (finding.
 	return f.result, nil
 }
 
+type fakeWebhook struct {
+	destination string
+	body        []byte
+}
+
+func (f *fakeWebhook) Deliver(_ context.Context, destination string, body []byte) error {
+	f.destination = destination
+	f.body = append([]byte(nil), body...)
+	return nil
+}
+
 func TestRunFindingsUsesLatestSnapshotAndClosedExitCodes(t *testing.T) {
 	asset := model.Asset{ID: "tool:bad", Type: model.AssetTool, Name: "bad"}
 	item := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"ti:test"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory, Bundles: []model.BundleReference{{Family: "ti", Sequence: 1, Digest: strings.Repeat("a", 64)}}}
@@ -38,6 +49,15 @@ func TestRunFindingsUsesLatestSnapshotAndClosedExitCodes(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"findings", "--json"}, &out, &errOut); code != 4 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.findings.v1"`) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunFindingsWebhookIsExplicitAndReceivesCanonicalPayload(t *testing.T) {
+	delivery := &fakeWebhook{}
+	app := App{DeviceID: "device:sha256:" + strings.Repeat("b", 64), StatusReader: &cliMemorySnapshots{latest: model.Snapshot{}, hasLatest: true}, FindingService: fakeFindingService{result: finding.Result{Intelligence: "unavailable", Policy: "inactive", Findings: []model.Finding{}}}, Webhook: delivery}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"findings", "--json", "--webhook", "https://example.com/hook"}, &out, &errOut); code != 0 || delivery.destination == "" || !bytes.Equal(delivery.body, out.Bytes()) {
+		t.Fatalf("code=%d destination=%q body=%q out=%q err=%q", code, delivery.destination, delivery.body, out.Bytes(), errOut.String())
 	}
 }
 

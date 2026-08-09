@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,10 @@ type FindingService interface {
 	Evaluate(context.Context, model.Inventory) (finding.Result, error)
 }
 
+type WebhookDeliverer interface {
+	Deliver(context.Context, string, []byte) error
+}
+
 // Install and rollback failure sentinels. They are the classification an
 // adapter acts on; the messages below are the only thing ever printed, so no
 // supplied path, version, or digest can be echoed back.
@@ -115,6 +120,7 @@ type App struct {
 	BundleManagers  map[bundle.Family]BundleManager
 	FindingService  FindingService
 	DeviceID        string
+	Webhook         WebhookDeliverer
 }
 
 // Run executes the CLI with the development version.
@@ -230,7 +236,19 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to evaluate findings")
 			return 1
 		}
-		writeErr := report.WriteFindingsJSON(stdout, report.FindingData{DeviceID: a.DeviceID, Intelligence: result.Intelligence, Policy: result.Policy, Findings: result.Findings}, options.Pretty)
+		data := report.FindingData{DeviceID: a.DeviceID, Intelligence: result.Intelligence, Policy: result.Policy, Findings: result.Findings}
+		if options.WebhookURL != "" {
+			if a.Webhook == nil {
+				fmt.Fprintln(stderr, "webhook delivery is unavailable")
+				return 1
+			}
+			var body bytes.Buffer
+			if report.WriteFindingsJSON(&body, data, false) != nil || a.Webhook.Deliver(ctx, options.WebhookURL, body.Bytes()) != nil {
+				fmt.Fprintln(stderr, "webhook delivery failed")
+				return 1
+			}
+		}
+		writeErr := report.WriteFindingsJSON(stdout, data, options.Pretty)
 		if writeErr != nil {
 			fmt.Fprintln(stderr, "failed to write findings output")
 			return 1
