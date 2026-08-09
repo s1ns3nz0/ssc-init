@@ -27,9 +27,16 @@ var evidenceCatalog = map[string]projectEvidenceDefinition{
 	"Cargo.toml":          {basename: "Cargo.toml", subject: "project-manifest:Cargo.toml", maxBytes: maxProjectEvidenceBytes},
 	"Cargo.lock":          {basename: "Cargo.lock", subject: "project-lockfile:Cargo.lock", maxBytes: maxProjectEvidenceBytes},
 	"Brewfile":            {basename: "Brewfile", subject: "project-manifest:Brewfile", maxBytes: maxProjectEvidenceBytes},
+	"launch.json":         {basename: "launch.json", subject: "launch-config", maxBytes: maxProjectEvidenceBytes},
 }
 
 func (definition projectEvidenceDefinition) targetID() string {
+	if definition.subject == "launch-config" {
+		return "projects.launch.vscode"
+	}
+	if definition.subject == "git-hook" {
+		return "projects.git-hook." + definition.basename
+	}
 	if len(definition.subject) >= len("project-lockfile:") && definition.subject[:len("project-lockfile:")] == "project-lockfile:" {
 		return "projects.lockfile." + definition.basename
 	}

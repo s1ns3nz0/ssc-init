@@ -50,6 +50,34 @@ func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T)
 	}
 }
 
+func TestProjectCollectorDiscoversOnlyClosedGitHooksAndVSCodeLaunchConfig(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	project := filepath.Join(root, "app")
+	for relative, contents := range map[string]string{
+		filepath.Join(".git", "hooks", "pre-commit"):        "#!/bin/sh\nexit 0\n",
+		filepath.Join(".git", "hooks", "pre-commit.sample"): "sample",
+		filepath.Join(".git", "hooks", "private-hook"):      "private",
+		filepath.Join(".vscode", "launch.json"):             `{"version":"0.2.0","configurations":[]}`,
+		"launch.json":                                       `{"must":"not be collected"}`,
+	} {
+		writeProjectFile(t, filepath.Join(project, relative), contents)
+	}
+	result := collectProjectsAt(t, home, root)
+	subjects := make(map[string]int)
+	for _, target := range result.LocalEvidenceTargets {
+		subjects[target.Subject]++
+	}
+	if subjects[model.EvidenceSubjectGitHook] != 1 || subjects[model.EvidenceSubjectLaunchConfig] != 1 || len(result.LocalEvidenceTargets) != 2 {
+		t.Fatalf("subjects=%v targets=%+v", subjects, result.LocalEvidenceTargets)
+	}
+	for _, target := range result.LocalEvidenceTargets {
+		if strings.HasSuffix(target.RelativePath, ".sample") || strings.HasSuffix(target.RelativePath, "private-hook") || target.RelativePath == "app/launch.json" {
+			t.Fatalf("unexpected target=%+v", target)
+		}
+	}
+}
+
 func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
