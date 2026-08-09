@@ -57,7 +57,7 @@ func validEvidenceStatus(status model.EvidenceStatus) bool {
 
 func validEvidenceSubject(subject string) bool {
 	switch subject {
-	case model.EvidenceSubjectManifest, model.EvidenceSubjectSkillDocument, model.EvidenceSubjectEntrypointMain, model.EvidenceSubjectEntrypointBrowser, model.EvidenceSubjectPayloadTree, model.EvidenceSubjectMCPDeclaration, model.EvidenceSubjectPackageContent, model.EvidenceSubjectContainerImage:
+	case model.EvidenceSubjectManifest, model.EvidenceSubjectSkillDocument, model.EvidenceSubjectEntrypointMain, model.EvidenceSubjectEntrypointBrowser, model.EvidenceSubjectPayloadTree, model.EvidenceSubjectMCPDeclaration, model.EvidenceSubjectPackageContent, model.EvidenceSubjectContainerImage, model.EvidenceSubjectShellStartup, model.EvidenceSubjectGitHook, model.EvidenceSubjectLaunchConfig, model.EvidenceSubjectCredentialConfig:
 		return true
 	default:
 		return model.ProjectEvidenceSubject(subject)

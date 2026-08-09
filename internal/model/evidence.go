@@ -30,6 +30,10 @@ const (
 	EvidenceSubjectMCPDeclaration    = "mcp-declaration"
 	EvidenceSubjectPackageContent    = "package-content"
 	EvidenceSubjectContainerImage    = "container-image"
+	EvidenceSubjectShellStartup      = "shell-startup"
+	EvidenceSubjectGitHook           = "git-hook"
+	EvidenceSubjectLaunchConfig      = "launch-config"
+	EvidenceSubjectCredentialConfig  = "credential-config"
 )
 
 // ProjectEvidenceSubject reports whether subject is one of the closed project
