@@ -21,9 +21,10 @@ The reproducible GitHub release set is closed to:
 
 - `ssc-init-darwin-universal`;
 - the Claude, Codex, and Cursor native adapter ZIP files;
-- `checksums.txt` covering every shipped binary and adapter archive;
+- `checksums.txt` covering the Universal Binary, adapter archives, and SBOM;
 - `sbom.cdx.json` in CycloneDX format; and
-- `provenance.json` describing the reproducible build inputs and subjects.
+- `provenance.json` describing the reproducible build inputs and checksum
+  subjects.
 
 The arm64 and amd64 binaries remain build intermediates and diagnostic aids.
 They are not separate shipping products. A release contains no signed copy,
@@ -97,7 +98,7 @@ removed so repository search does not present them as actionable guidance.
 
 A release fails closed when the tree is dirty, the version is not an exact
 annotated tag, an expected artifact is missing, a checksum subject is missing
-or extra, the SBOM or provenance subject set differs from the release set, an
+or extra, the provenance subject set differs from the checksum subject set, an
 adapter archive contains a core executable, or a repeat build is not
 byte-identical.
 
@@ -118,7 +119,8 @@ The redesign is complete when:
 4. release fixtures prove the exact unsigned artifact set and reject obsolete
    Apple release surfaces;
 5. two clean builds from the same tag are byte-identical;
-6. `checksums.txt`, SBOM, and provenance cover the intended shipping subjects;
+6. `checksums.txt` and provenance cover the exact checksum subject set, and the
+   SBOM accompanies that set;
 7. managed install, doctor, rollback, adapter packaging, and passive local
    signature inspection continue to pass their existing tests;
 8. the full race, vet, module, formatting, diff, build-script, and acceptance

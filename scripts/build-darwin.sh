@@ -117,8 +117,6 @@ shasum -a 256 \
 	dist/ssc-init-adapter-codex.zip \
 	dist/ssc-init-adapter-cursor.zip \
 	dist/sbom.cdx.json \
-	dist/ssc-init-darwin-amd64 \
-	dist/ssc-init-darwin-arm64 \
 	dist/ssc-init-darwin-universal | sort -k 2 > "$DIST_DIR/checksums.txt"
 
 # Unsigned in-toto Statement wrapping a SLSA v1 provenance predicate: it names

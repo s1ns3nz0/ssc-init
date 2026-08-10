@@ -13,7 +13,7 @@
 - Preserve bounded `/usr/bin/codesign` inspection in `internal/platform`; it is passive external-probe evidence, not release signing.
 - Preserve caller-supplied SHA-256 verification, Universal Mach-O verification, bounded doctor execution, atomic activation, and rollback.
 - Do not add a Gatekeeper bypass, quarantine-removal command, alternative signing service, new key, or new secret.
-- The official release set is the Universal Binary, three adapter ZIPs, `checksums.txt`, `sbom.cdx.json`, and `provenance.json`; thin binaries remain build intermediates covered by checksums/provenance.
+- The official release set is the Universal Binary, three adapter ZIPs, `checksums.txt`, `sbom.cdx.json`, and `provenance.json`; thin binaries remain build intermediates excluded from checksum and provenance subjects.
 - Historical documents may retain only a concise supersession notice and must not retain actionable Apple credential, signing, notarization, stapling, or DMG instructions.
 - Default scans remain process-free and network-free; no new runtime dependency is permitted.
 
