@@ -133,7 +133,7 @@ func TestCIWorkflowTakesItsGoVersionFromGoMod(t *testing.T) {
 	}
 }
 
-func TestCIWorkflowIsLeastPrivilegeAndUsesOnlyTheBundlePublicationSecret(t *testing.T) {
+func TestCIWorkflowIsLeastPrivilegeAndUsesOnlyBundlePublicationSecrets(t *testing.T) {
 	workflow := readCIWorkflow(t)
 	if !strings.Contains("\n"+workflow, "\npermissions:\n  contents: read\n") {
 		t.Error("ci workflow has no read-only top-level permissions block")
@@ -152,7 +152,7 @@ func TestCIWorkflowIsLeastPrivilegeAndUsesOnlyTheBundlePublicationSecret(t *test
 	}
 	for _, forbidden := range []string{"APPLE_ID", "NOTARY", "SIGNING_IDENTITY", "DEVELOPER_ID"} {
 		if strings.Contains(workflow, forbidden) {
-			t.Fatalf("ci workflow unexpectedly wires deferred Apple credential %q", forbidden)
+			t.Fatalf("ci workflow unexpectedly wires obsolete Apple release credential %q", forbidden)
 		}
 	}
 }
