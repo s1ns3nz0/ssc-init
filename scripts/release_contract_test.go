@@ -17,10 +17,11 @@ func TestRepositoryHasNoAppleReleasePipeline(t *testing.T) {
 
 func TestAppleReleaseContractRejectsReintroductionMutations(t *testing.T) {
 	mutations := []struct {
-		name    string
-		path    string
-		mode    os.FileMode
-		content string
+		name     string
+		path     string
+		mode     os.FileMode
+		content  string
+		workflow string
 	}{
 		{
 			name:    "active Darwin build signs output",
@@ -35,6 +36,20 @@ func TestAppleReleaseContractRejectsReintroductionMutations(t *testing.T) {
 			content: "#!/bin/sh\nxcrun notarytool submit dist/release.zip\n",
 		},
 		{
+			name:     "workflow invokes non-executable shell release helper",
+			path:     "scripts/publish-release.sh",
+			mode:     0o644,
+			content:  "#!/bin/sh\n/usr/bin/codesign --sign release dist/ssc-init-darwin-universal\n",
+			workflow: "jobs:\n  release:\n    steps:\n      - run: sh scripts/publish-release.sh\n",
+		},
+		{
+			name:     "workflow invokes non-executable Go release helper",
+			path:     "scripts/publish-release.go",
+			mode:     0o644,
+			content:  "package main\n\nconst releaseTool = \"notarytool\"\n",
+			workflow: "jobs:\n  release:\n    steps:\n      - run: go run ./scripts/publish-release.go\n",
+		},
+		{
 			name:    "workflow staples output",
 			path:    ".github/workflows/ci.yml",
 			mode:    0o644,
@@ -45,6 +60,9 @@ func TestAppleReleaseContractRejectsReintroductionMutations(t *testing.T) {
 		t.Run(mutation.name, func(t *testing.T) {
 			root := newAppleReleaseContractFixture(t)
 			writeContractFixtureFile(t, root, mutation.path, mutation.content, mutation.mode)
+			if mutation.workflow != "" {
+				writeContractFixtureFile(t, root, ".github/workflows/ci.yml", mutation.workflow, 0o644)
+			}
 			if violations := appleReleaseSurfaceViolations(root); len(violations) == 0 {
 				t.Fatalf("release contract accepted mutation in %s", mutation.path)
 			}
@@ -57,6 +75,14 @@ func TestAppleReleaseContractAllowsPassivePlatformSignatureInspection(t *testing
 	writeContractFixtureFile(t, root, "internal/platform/signature.go", "package platform\n\nconst codesign = \"/usr/bin/codesign\"\n", 0o644)
 	if violations := appleReleaseSurfaceViolations(root); len(violations) != 0 {
 		t.Fatalf("passive platform inspection was rejected: %s", strings.Join(violations, "; "))
+	}
+}
+
+func TestAppleReleaseContractAllowsNegativeTestFixtureLiterals(t *testing.T) {
+	root := newAppleReleaseContractFixture(t)
+	writeContractFixtureFile(t, root, "scripts/release_contract_test.go", "package scripts_test\n\nconst forbiddenFixture = \"codesign --sign\"\n", 0o644)
+	if violations := appleReleaseSurfaceViolations(root); len(violations) != 0 {
+		t.Fatalf("negative test fixture was rejected: %s", strings.Join(violations, "; "))
 	}
 }
 
@@ -141,10 +167,12 @@ func appleReleaseSurfaceViolations(root string) []string {
 		}
 	}
 	scanExecutionTree(".github/workflows", func(string, fs.FileInfo) bool { return true })
-	scanExecutionTree("scripts", func(name string, info fs.FileInfo) bool {
-		return name == "scripts/build-darwin.sh" ||
-			name == "scripts/package-adapters.go" ||
-			info.Mode().Perm()&0o111 != 0
+	scanExecutionTree("scripts", func(name string, _ fs.FileInfo) bool {
+		// Go test sources contain the forbidden literals used by mutation
+		// fixtures, but are never release helpers. Every other regular file is
+		// scanned regardless of mode because workflows can invoke 0644 shell
+		// and Go sources through `sh` and `go run`.
+		return !strings.HasSuffix(name, "_test.go")
 	})
 	return violations
 }
