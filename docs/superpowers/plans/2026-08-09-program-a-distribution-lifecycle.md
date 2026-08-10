@@ -42,7 +42,7 @@ Verified facts this task depends on:
 - `/usr/bin/lipo` ships with the Command Line Tools; no Xcode.app required.
 - `lipo -create` is deterministic: two runs one second apart over identical inputs produced the same SHA-256.
 - `go version -m` works on the fat Mach-O, so the version and VCS assertions extend to it.
-- `lipo -create` **drops the ad-hoc linker signature** — `codesign -v` on the fat file reports `code object is not signed at all`, while `codesign -dv --arch arm64` still shows the arm64 slice's `adhoc,linker-signed` code directory. The universal artifact still executes and prints the correct version. Do **not** ad-hoc re-sign to "fix" this: ad-hoc `codesign` is non-deterministic (two runs produced digests `14415f75…` and `9b4efff2…`), which would break reproducibility. Task 10 gives it a real signature.
+- `lipo -create` **drops the ad-hoc linker signature** — `codesign -v` on the fat file reports `code object is not signed at all`, while `codesign -dv --arch arm64` still shows the arm64 slice's `adhoc,linker-signed` code directory. The universal artifact still executes and prints the correct version. Do **not** ad-hoc re-sign to "fix" this: ad-hoc `codesign` is non-deterministic (two runs produced digests `14415f75…` and `9b4efff2…`), which would break reproducibility. Under the approved distribution contract, the Universal artifact intentionally remains unsigned.
 
 The fixtures build with a fake `go` that writes the text `fake-arm64` / `fake-amd64`. Real `lipo` rejects those, so `TestBuildScriptAllowsIgnoredEntries` and `TestBuildScriptVersionsFromExactTag` would fail. The fixture gets a fake `lipo` on the same `PATH` shim directory.
 

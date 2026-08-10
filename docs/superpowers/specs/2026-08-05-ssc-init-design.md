@@ -114,7 +114,7 @@ All adapters use one installation under `~/Library/Application Support/SSC Init/
 
 The first adapter atomically installs a verified compatible core. Later adapters reuse it. Updates stage a new version, run integrity and doctor checks, and switch only on success. At least one previous known-good version remains available for rollback. Removing an adapter does not silently remove shared data or quarantine contents.
 
-Claude can bundle the executable in its plugin `bin/` directory. Other channels may bundle it or automatically bootstrap a pinned release after checksum, project-signature, and macOS code-signing verification. Users never run `pip install`, `npm install`, `brew install`, or compile source.
+Claude can bundle the executable in its plugin `bin/` directory. Other channels may bundle it or supply a pinned release to the managed installer. Before activation, SSC Init verifies the complete file against the caller-supplied SHA-256 digest and expected Universal Mach-O structure, stages without following symlinks, and runs a bounded doctor health check only on the staged core. Source installation options remain available under the current distribution contract.
 
 ### 5.4 Scheduling
 
