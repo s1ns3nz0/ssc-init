@@ -20,9 +20,11 @@ import (
 type Format string
 
 const (
-	FormatNPM   Format = "npm"
-	FormatCargo Format = "cargo"
-	FormatGoSum Format = "go.sum"
+	FormatNPM          Format = "npm"
+	FormatCargo        Format = "cargo"
+	FormatGoSum        Format = "go.sum"
+	FormatRequirements Format = "requirements.txt"
+	FormatPipfile      Format = "Pipfile.lock"
 )
 
 var (
@@ -69,6 +71,10 @@ func Parse(ctx context.Context, format Format, source io.Reader, maxBytes int64)
 		records, err = parseCargo(contents)
 	case FormatGoSum:
 		records, err = parseGoSum(contents)
+	case FormatRequirements:
+		records, err = parseRequirements(contents)
+	case FormatPipfile:
+		records, err = parsePipfile(contents)
 	default:
 		err = ErrMalformed
 	}

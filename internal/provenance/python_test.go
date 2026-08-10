@@ -1,11 +1,154 @@
 package provenance
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
+
+func TestParseRequirementsNormalizesAndRedactsInput(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	input := "Foo_Bar==1.2.3 ; python_version >= \"3.11\" \\\n+    --hash=sha256:" + digest + "\n" +
+		"--index-url https://user:secret@example.invalid/simple\n" +
+		"-r private-requirements.txt\n"
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	record := records[0]
+	if record.Ecosystem != "pypi" || record.Name != "foo-bar" || record.Version != "1.2.3" ||
+		record.Provenance.Status != model.ProvenanceImmutable || record.Provenance.Integrity != "sha256:"+digest {
+		t.Fatalf("record=%+v", record)
+	}
+	formatted := record.Name + "@" + record.Version + " " + record.Provenance.Integrity + " " + errString(err)
+	for _, secret := range []string{"https://", "secret", "python_version", "private-requirements"} {
+		if strings.Contains(formatted, secret) {
+			t.Fatalf("sensitive input retained in %q", formatted)
+		}
+	}
+}
+
+func TestParseRequirementsClassifiesHashesAndMutableReferences(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("b", 64)
+	input := "hashless==1.0.0\n" +
+		"multi==2.0 --hash=sha256:" + a + " --hash=sha256:" + b + "\n" +
+		"direct @ https://user:secret@example.invalid/direct.whl\n" +
+		"--editable=git+https://user:secret@example.invalid/editable.git#egg=editable\n" +
+		"ranged>=1.0\n" +
+		"../private-package\n" +
+		"hashless==1.0.0\n"
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	want := map[string]model.ProvenanceStatus{
+		"hashless\x001.0.0": model.ProvenanceUnknown,
+		"multi\x002.0":      model.ProvenanceUnknown,
+		"direct\x00":        model.ProvenanceMutable,
+		"editable\x00":      model.ProvenanceMutable,
+		"ranged\x00":        model.ProvenanceMutable,
+	}
+	for _, record := range records {
+		key := record.Name + "\x00" + record.Version
+		status, found := want[key]
+		if !found || record.Provenance.Status != status || record.Provenance.Integrity != "" {
+			t.Fatalf("record=%+v want=%v", record, want)
+		}
+		if strings.Contains(record.Version, "secret") {
+			t.Fatalf("mutable source retained: %+v", record)
+		}
+	}
+}
+
+func TestParseRequirementsRejectsUnsafeOrConflictingEntries(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, input := range []string{
+		"demo==1.0 --hash=sha256:" + strings.Repeat("a", 63) + "\n",
+		"demo==1.0\ndemo==1.0 --hash=sha256:" + digest + "\n",
+		"--no-binary demo\n",
+	} {
+		if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("accepted %q: %v", input, err)
+		}
+	}
+}
+
+func TestParseRequirementsHandlesCRLFBoundsAndCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Parse(ctx, FormatRequirements, strings.NewReader("demo==1.0\r\n"), 100); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation err=%v", err)
+	}
+	if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader("demo==1.0\r\n"), 5); !errors.Is(err, ErrOversize) {
+		t.Fatalf("oversize err=%v", err)
+	}
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader("demo==1.0\r\n"), 100)
+	if err != nil || len(records) != 1 || records[0].Name != "demo" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParsePipfileCombinesSectionsAndSorts(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	input := `{
+  "_meta": {"sources": [{"url": "https://user:secret@example.invalid/simple"}]},
+  "develop": {"Zoo": {"version": "==3.0.0"}},
+  "default": {
+    "Foo_Bar": {"version": "==1.2.3", "hashes": ["sha256:` + digest + `"]},
+    "direct": {"version": "==9.0.0", "file": "https://user:secret@example.invalid/direct.whl"}
+  }
+}`
+	records, err := Parse(context.Background(), FormatPipfile, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if records[0].Name != "direct" || records[0].Version != "" || records[0].Provenance.Status != model.ProvenanceMutable ||
+		records[1].Name != "foo-bar" || records[1].Version != "1.2.3" || records[1].Provenance.Integrity != "sha256:"+digest ||
+		records[2].Name != "zoo" || records[2].Version != "3.0.0" {
+		t.Fatalf("records=%+v", records)
+	}
+	if strings.Contains(records[0].Version, "secret") {
+		t.Fatalf("mutable source retained: %+v", records[0])
+	}
+}
+
+func TestParsePipfileClassifiesAndRejectsInvalidShapes(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("b", 64)
+	valid := `{"default":{"hashless":{"version":"==1.0"},"multi":{"version":"==2.0","hashes":["sha256:` + a + `","sha256:` + b + `"]},"git":{"git":"https://example.invalid/repo.git","editable":true},"path":{"path":"../private-package"},"range":{"version":">=3"}},"develop":{}}`
+	records, err := Parse(context.Background(), FormatPipfile, strings.NewReader(valid), 1<<20)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	for _, record := range records {
+		if record.Name == "hashless" || record.Name == "multi" {
+			if record.Provenance.Status != model.ProvenanceUnknown {
+				t.Fatalf("record=%+v", record)
+			}
+		} else if record.Provenance.Status != model.ProvenanceMutable {
+			t.Fatalf("record=%+v", record)
+		}
+	}
+	for _, input := range []string{
+		`{"default":[]}`, `{"default":{"demo":"==1.0"}}`, `{"default":{"demo":{"version":"==1.0","hashes":["sha256:` + strings.Repeat("a", 63) + `"]}}}`,
+		`{"default":{"Foo":{"version":"==1.0"},"foo":{"version":"==1.0","hashes":["sha256:` + a + `"]}}}`, `{"default":{"demo":{"version":"==1.0"}},"default":{}}`, `{"default":{}} trailing`,
+	} {
+		if _, err := Parse(context.Background(), FormatPipfile, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("accepted %q: %v", input, err)
+		}
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
 
 func TestPythonRecordClassifiesIntegrityConservatively(t *testing.T) {
 	a := strings.Repeat("a", 64)
