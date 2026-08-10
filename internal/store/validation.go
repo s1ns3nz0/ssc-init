@@ -329,7 +329,7 @@ func supplyChainToken(value string, maximum int, uppercaseOnly bool) bool {
 
 func validProvenanceEcosystem(value string) bool {
 	switch value {
-	case "docker", "npm", "pnpm", "yarn", "bun", "pip", "pipx", "uv", "cargo", "go", "homebrew":
+	case "docker", "npm", "pnpm", "yarn", "bun", "pypi", "pip", "pipx", "uv", "cargo", "go", "homebrew":
 		return true
 	default:
 		return false

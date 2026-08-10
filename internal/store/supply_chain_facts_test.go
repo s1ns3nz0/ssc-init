@@ -72,6 +72,19 @@ func TestValidateAssetAcceptsClosedSupplyChainFacts(t *testing.T) {
 	}
 }
 
+func TestValidateAssetAcceptsPyPILockfileProvenance(t *testing.T) {
+	asset := model.Asset{
+		ID: "pkg:pypi/example@1.0.0", Type: model.AssetPackage, Name: "example", Version: "1.0.0",
+		Provenance: &model.Provenance{
+			Status: model.ProvenanceImmutable, Ecosystem: "pypi", Source: "lockfile",
+			Integrity: "sha256:" + strings.Repeat("a", 64),
+		},
+	}
+	if err := validateAsset(asset); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStoreAcceptsOnlyCompleteSHA256ContainerIdentity(t *testing.T) {
 	valid := model.ContentEvidence{
 		ID: "evidence:sha256:" + strings.Repeat("b", 64), AssetID: "container", ObservationID: "observation:sha256:" + strings.Repeat("c", 64),
