@@ -21,7 +21,7 @@ implementation exists.
 | §5.2.6 policy manager | Partial | Local policy plus verified signed organization deny, digest-bound allow and scoped exception precedence | Git-managed YAML compiler and production trust root/publication |
 | §5.2.7 local store | Partial | Atomic snapshots, retention, asset history, policy/bundle state, v7 analyzer coverage/facts, findings, independent critical/high incidents, and privacy-validated quarantine records | Signed organization retention controls |
 | §5.2.8 reporters | Partial | Finding JSON, privacy-safe SARIF 2.1.0, inventory CycloneDX, explicit HTTPS webhook and existing local formats | Complete local evidence report and downstream connector modules |
-| §5.3 shared installation | Partial | Universal build, versioned stage/activate/rollback, doctor v2, signed/notarized/stapled-DMG scripts and runbook | Real Developer ID signing/notary execution; adapter bootstrap; TI/policy/report/quarantine lifecycle |
+| §5.3 shared installation | Partial | Universal build plus digest/Mach-O verified stage/activate/rollback and doctor v2 | Adapter bootstrap; TI/policy/report/quarantine lifecycle |
 | §5.4 scheduling | Proved | Exact preview plus explicit install/remove, one stable private launchd plist, tokenized logs/removal instructions, atomic publication, rollback, and process/thread concurrency tests | None for the designed opt-in local scheduler |
 | §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance, bounded developer surfaces, optional process/listener facts, dangerous-API/obfuscation facts and explicit coverage gaps | Broader package and language coverage |
 | §6.2 deep scan | Partial | Two-layer bounded decoding and narrow within-file credential-egress flow | Bundled dependencies, cross-file semantic flows, WASM/native metadata and promotion scheduler |
@@ -33,7 +33,7 @@ implementation exists.
 | §11 failure behavior | Partial | Complete/partial status, bounded collectors, atomic core and verified-bundle update/rollback, last-known-good and explicit bundle freshness | Scan stale/blocked reachability and remote retrieval failure behavior |
 | §12 performance | Partial | Ten-minute baseline budget, store cap accounting, optional performance harness | 60-second incremental gate, 500 ms pre-execution cache gate, 3-second metadata preflight/progress, full 500 MB product-footprint gate |
 | §13 acceptance cases | Partial | Inventory/evidence/adversarial coverage, local exception expiry, TI/organization failure behavior, analyzer twins, cross-host verdict parity, quarantine drift/collision recovery, and scheduler idempotence | Automatic enforcement cases remain intentionally unimplemented |
-| §14 release model | Partial | Universal binary, three deterministic native adapter ZIPs, checksums, SBOM, provenance, CI definition and DMG release scripts | Hosted CI execution, production bundle publication, and optional real Apple signing/notarization |
+| §14 release model | Partial | Closed reproducible artifact set: Universal Binary, three deterministic native adapter ZIPs, checksums, SBOM, provenance, and CI definition | Hosted CI execution and physical arm64/Intel smoke evidence |
 
 ## Verified completed programs
 
@@ -42,9 +42,7 @@ implementation exists.
 - Program B: status vocabulary, retention, budgets and store diagnostics.
 - Program C `[NOW]`: local advisory policy, pins, exceptions, audit decisions,
   policy check and hook integration.
-- Program A implementation and fail-closed release automation. Real Apple
-  signing/notarization remains externally unverified because credentials are
-  absent.
+- Program A implementation and fail-closed reproducible release automation.
 - Program D: Docker identity, macOS signature inspection, supported lockfile
   provenance and closed graph relationships.
 - Program I: bounded developer-file surfaces and opt-in point-in-time
@@ -68,8 +66,8 @@ implementation exists.
 ## Remaining dependency order
 
 1. Final automatic-enforcement acceptance cases and broader collector/analyzer coverage.
-2. Production bundle publication, deferred optional Apple release execution,
-   clean physical arm64/Intel smoke tests, and hosted CI evidence.
+2. Production bundle publication, clean physical arm64/Intel smoke tests, and
+   hosted CI evidence.
 
 The order keeps facts below decisions, decisions below enforcement, and avoids
 an adapter inventing a verdict that the shared core cannot yet produce.

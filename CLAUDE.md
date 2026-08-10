@@ -21,12 +21,10 @@ go mod download && sh scripts/build-darwin.sh          # release build → dist/
 
 The release build script disables network/toolchain downloads and requires a clean tracked worktree; binaries report the exact `v*` tag when HEAD is tagged, else `dev+git.<full-commit>` from committed HEAD.
 
-The reproducible release set is the two architecture slices, universal binary,
-three native adapter ZIPs, `checksums.txt`, CycloneDX SBOM, and provenance statement. Developer ID signing
-and `.dmg` notarization/stapling are separate because Apple's secure timestamp
-makes signed bytes non-reproducible. The current GitHub artifact may remain the
-reproducible unsigned universal binary. A stapled `ssc-init-darwin.dmg` is a
-later optional hardening artifact; see `docs/release-runbook.md`.
+The reproducible unsigned release set is the Universal Binary, three native
+adapter ZIPs, `checksums.txt`, CycloneDX SBOM, and provenance statement. The
+thin architecture binaries are build intermediates. See
+`docs/release-runbook.md` for the release contract.
 
 ## Architecture
 
@@ -84,13 +82,13 @@ Program C adds the local advisory policy engine: an inert starter document, five
 The doctor JSON contract is `ssc-init.doctor.v2`; its `install` object reports
 managed-install integrity and rollback availability without paths.
 
-Program D adds full local Docker SHA-256 identity evidence, bounded macOS signature facts for verified external-probe executables, npm/Cargo/Go lockfile provenance, and a closed deterministic relationship vocabulary. It adds no verdict, safety claim, network lookup, or enforcement. Real Developer ID signing/notarization remains a release-time `[APPLE]` step awaiting credentials.
+Program D adds full local Docker SHA-256 identity evidence, bounded macOS signature facts for verified external-probe executables, npm/Cargo/Go lockfile provenance, and a closed deterministic relationship vocabulary. It adds no verdict, safety claim, network lookup, or enforcement. Release signing is not a product roadmap item; local signature inspection must not be conflated with artifact publication.
 
-Program I adds bounded shell startup, Git credential-helper, project Git-hook and VS Code launch-config inventory. With explicit `--external-probes`, it also records a point-in-time process/listener snapshot containing only PID, executable basename, protocol, and local port. It is not continuous monitoring, and default scans still execute no process. Apple signing/notarization remains deferred and is not a Program I dependency.
+Program I adds bounded shell startup, Git credential-helper, project Git-hook and VS Code launch-config inventory. With explicit `--external-probes`, it also records a point-in-time process/listener snapshot containing only PID, executable basename, protocol, and local port. It is not continuous monitoring, and default scans still execute no process.
 
 Program E adds the network-free verified-bundle core: closed TI and organization-policy payloads, family-scoped Ed25519 signatures, hardened local staging, last-known-good activation/rollback, high-water rollback protection, freshness reporting, CLI commands, rebuildable store indexes, publisher tooling, schemas, and CI gates. The production key registry is deliberately empty pending reviewed public keys; actual publication and scheduled retrieval remain external evidence. Program E does not yet correlate TI into findings or activate organization precedence in policy decisions—Program F owns that decision/reporting layer.
 
-Programs F/G/H add shared finding verdicts, bounded analyzers, advisory host packages, reversible quarantine, and explicit launchd scheduling. Native adapters use the installed core and never bundle an unsigned executable or maintain separate state. Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include broader package/language coverage, production bundle publication, automatic host blocking, and optional Apple signing/notarization.
+Programs F/G/H add shared finding verdicts, bounded analyzers, advisory host packages, reversible quarantine, and explicit launchd scheduling. Native adapters use the installed core and never bundle an unsigned executable or maintain separate state. Known accepted behaviors: the first cache-warm rescan emits a one-time benign `changed` delta for payload-tree evidence (cache metadata miss→hit; digests identical); default scans are overall `partial` because the packages collector is skipped without `--external-probes`. Remaining boundaries include broader package/language coverage, production bundle publication, and automatic host blocking.
 
 Development follows strict TDD: observe the named test fail, add the minimum implementation, run the focused package, then the stated regression set. For multi-task plans, SDD conventions apply: controller never edits product code; fresh implementer + separate read-only reviewer per task; ledger lines follow `Task N: dispatched (base <sha>)` / `Task N complete: commits …; task review clean`; review fixes need a reproducing failing test first; adversarial/race-prone suites re-verified with `-count=50`.
 

@@ -23,7 +23,7 @@ The baseline collector inventories and, where a bounded local implementation exi
 
 Target status distinguishes `not_present`, `skipped`, `unsupported`, `unavailable`, and `partial`. A target is `complete` only when its bounded catalog read and parsing completed. Every content-evidence target likewise receives exactly one terminal status (`complete`, `partial`, `oversize`, `unavailable`, `unsupported`, or `skipped`), and only `complete` evidence is a trusted content digest. Evidence collection is passive, descriptor-anchored, and never follows symbolic links; reports and the local database retain digests and aggregate counts only — no file bytes, tree leaf names, link targets, secrets, or raw absolute paths.
 
-Broader package payload hashing, Git-managed policy compilation, and automatic blocking remain later programs. Bounded version ranges, mutable-reference signals, dangerous-API/obfuscation facts, and narrow credential-to-network flows are implemented over sealed content; they retain only closed facts and explicit coverage, never source bytes or paths. Finding JSON, privacy-safe SARIF, inventory CycloneDX, explicit HTTPS webhook delivery, advisory Claude/Codex/Cursor packages, reversible quarantine, and one opt-in daily schedule are implemented. Real release signing/notarization is deferred: it requires Apple Developer credentials and is separate from both the product implementation and local signature inspection.
+Broader package payload hashing, Git-managed policy compilation, and automatic blocking remain later programs. Bounded version ranges, mutable-reference signals, dangerous-API/obfuscation facts, and narrow credential-to-network flows are implemented over sealed content; they retain only closed facts and explicit coverage, never source bytes or paths. Finding JSON, privacy-safe SARIF, inventory CycloneDX, explicit HTTPS webhook delivery, advisory Claude/Codex/Cursor packages, reversible quarantine, and one opt-in daily schedule are implemented. Release artifacts are reproducible and unsigned; local signature inspection is separate from artifact publication.
 
 ## Commands
 
@@ -160,20 +160,19 @@ Pruning frees pages for reuse, but those pages return to the filesystem only whe
 
 The current GitHub distribution can publish the reproducible unsigned
 Universal Binary `ssc-init-darwin-universal`, three native adapter ZIPs,
-`checksums.txt`, `sbom.cdx.json`, and `provenance.json`. Apple Developer membership is not
-needed to build or publish those files. Verify the downloaded bytes before
-running them:
+`checksums.txt`, `sbom.cdx.json`, and `provenance.json`. Verify the downloaded
+bytes before running them:
 
 ```sh
 shasum -a 256 -c checksums.txt
 ```
 
-Because that binary is unsigned and unnotarized, macOS may block a downloaded
-copy or require explicit user approval. Developer ID signing and notarization
-are an optional later release hardening step that removes that friction; they
-are not a Mac App Store requirement and this project does not use the Mac App
-Store. The unsigned GitHub flow and deferred Apple hardening flow are separated
-in [the release runbook](docs/release-runbook.md).
+The prebuilt binary is intentionally unsigned. macOS may block a downloaded
+copy or require explicit approval. SSC Init does not instruct users to remove
+quarantine metadata or weaken Gatekeeper; users who require a locally produced
+binary can install with `go install` or build from the tagged source. See
+[the release runbook](docs/release-runbook.md) for the complete artifact and
+verification contract.
 
 ## Build from source
 
