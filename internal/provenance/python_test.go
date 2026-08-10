@@ -97,6 +97,18 @@ func TestPythonRecordMarksSelectorsAndSourcesMutable(t *testing.T) {
 	}
 }
 
+func TestPythonRecordDoesNotRetainMutableSourceText(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, version := range []string{"https://example.test/demo.whl", "git+https://example.test/demo.git", "../demo", "workspace:*"} {
+		t.Run(version, func(t *testing.T) {
+			got, ok := pythonRecord("demo", version, false, []string{"sha256:" + digest})
+			if !ok || got.Version != "" || got.Provenance.Status != model.ProvenanceMutable || got.Provenance.Integrity != "" {
+				t.Fatalf("record=%+v ok=%v", got, ok)
+			}
+		})
+	}
+}
+
 func TestNormalizePyPIName(t *testing.T) {
 	tests := []struct {
 		input string

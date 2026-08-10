@@ -18,7 +18,11 @@ func pythonRecord(name, version string, mutable bool, hashes []string) (Record, 
 	if !ok {
 		return Record{}, false
 	}
-	if mutable || !exactPythonVersion(version) {
+	exactVersion := exactPythonVersion(version)
+	if mutable || !exactVersion {
+		if !exactVersion {
+			record.Version = ""
+		}
 		record.Provenance.Status = model.ProvenanceMutable
 		record.Provenance.Integrity = ""
 		return record, true
