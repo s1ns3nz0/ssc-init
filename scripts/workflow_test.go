@@ -114,6 +114,19 @@ func TestCIWorkflowRunsTheReleaseGatesOnMacOS(t *testing.T) {
 	}
 }
 
+func TestCIWorkflowRunsExplicitReleaseModeOnlyForVersionTags(t *testing.T) {
+	workflow := readCIWorkflow(t)
+	want := `      - name: Tagged release build
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SSC_INIT_RELEASE: "1"
+        run: sh scripts/build-darwin.sh
+`
+	if !strings.Contains(workflow, want) {
+		t.Fatalf("ci workflow does not run the fail-closed release contract on version tags")
+	}
+}
+
 // The workflow must not hardcode a toolchain version that can drift away from
 // the module's own; it reads go.mod instead.
 func TestCIWorkflowTakesItsGoVersionFromGoMod(t *testing.T) {

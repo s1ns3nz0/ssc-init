@@ -14,6 +14,9 @@
 - Preserve caller-supplied SHA-256 verification, Universal Mach-O verification, bounded doctor execution, atomic activation, and rollback.
 - Do not add a Gatekeeper bypass, quarantine-removal command, alternative signing service, new key, or new secret.
 - The official release set is the Universal Binary, three adapter ZIPs, `checksums.txt`, `sbom.cdx.json`, and `provenance.json`; thin binaries remain build intermediates excluded from checksum and provenance subjects.
+- `SSC_INIT_RELEASE=1` is the only release mode; it requires a clean committed
+  tree at an exact annotated `v*` tag. An invocation without it remains a
+  distinct developer build.
 - Historical documents may retain only a concise supersession notice and must not retain actionable Apple credential, signing, notarization, stapling, or DMG instructions.
 - Default scans remain process-free and network-free; no new runtime dependency is permitted.
 
@@ -149,8 +152,8 @@ git commit -m "test: remove apple release pipeline"
 
 Replace `docs/release-runbook.md` with these sections in order:
 
-1. Preconditions: clean tree, `go mod verify`, full race gate, annotated tag before build.
-2. Reproducible build: `go mod download`, `sh scripts/build-darwin.sh`, checksum verification, `go test ./scripts -count=1`.
+1. Preconditions: clean committed tree, `go mod verify`, full race gate, exact annotated `v*` tag before build.
+2. Reproducible build: `go mod download`, `SSC_INIT_RELEASE=1 sh scripts/build-darwin.sh`, `(cd dist && shasum -a 256 -c checksums.txt)`, `go test ./scripts -count=1`.
 3. Publish: Universal Binary, three adapter ZIPs, `checksums.txt`, `sbom.cdx.json`, `provenance.json`; thin binaries are intermediates.
 4. Consumer verification: download the complete checksum subject set into one directory and run `shasum -a 256 -c checksums.txt`; inspect SBOM/provenance; make no signed/notarized claim.
 5. Install and rollback: retain the exact `install`, `doctor`, and `rollback` commands and shared-state guarantees.

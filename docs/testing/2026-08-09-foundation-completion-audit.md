@@ -21,7 +21,7 @@ implementation exists.
 | §5.2.6 policy manager | Partial | Local policy plus verified signed organization deny, digest-bound allow and scoped exception precedence | Git-managed YAML compiler and production trust root/publication |
 | §5.2.7 local store | Partial | Atomic snapshots, retention, asset history, policy/bundle state, v7 analyzer coverage/facts, findings, independent critical/high incidents, and privacy-validated quarantine records | Signed organization retention controls |
 | §5.2.8 reporters | Partial | Finding JSON, privacy-safe SARIF 2.1.0, inventory CycloneDX, explicit HTTPS webhook and existing local formats | Complete local evidence report and downstream connector modules |
-| §5.3 shared installation | Partial | Universal build plus digest/Mach-O verified stage/activate/rollback and doctor v2 | Adapter bootstrap; TI/policy/report/quarantine lifecycle |
+| §5.3 shared installation | Partial | Separately installed Universal core plus digest/Mach-O verified stage/activate/rollback and doctor v2; adapter ZIPs contain no executable | TI/policy/report/quarantine lifecycle |
 | §5.4 scheduling | Proved | Exact preview plus explicit install/remove, one stable private launchd plist, tokenized logs/removal instructions, atomic publication, rollback, and process/thread concurrency tests | None for the designed opt-in local scheduler |
 | §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance, bounded developer surfaces, optional process/listener facts, dangerous-API/obfuscation facts and explicit coverage gaps | Broader package and language coverage |
 | §6.2 deep scan | Partial | Two-layer bounded decoding and narrow within-file credential-egress flow | Bundled dependencies, cross-file semantic flows, WASM/native metadata and promotion scheduler |
@@ -42,7 +42,10 @@ implementation exists.
 - Program B: status vocabulary, retention, budgets and store diagnostics.
 - Program C `[NOW]`: local advisory policy, pins, exceptions, audit decisions,
   policy check and hook integration.
-- Program A implementation and fail-closed reproducible release automation.
+- Program A managed install lifecycle and explicit reproducible release mode.
+  Isolated repository tests prove clean-source rejection, exact annotated `v*`
+  tag enforcement, and repeat-build identity without blocking untagged
+  developer builds.
 - Program D: Docker identity, macOS signature inspection, supported lockfile
   provenance and closed graph relationships.
 - Program I: bounded developer-file surfaces and opt-in point-in-time

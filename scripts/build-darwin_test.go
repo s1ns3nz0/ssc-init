@@ -97,11 +97,11 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(string(checksums)), "\n")
 	wantChecksumFiles := []string{
-		"dist/sbom.cdx.json",
-		"dist/ssc-init-adapter-claude.zip",
-		"dist/ssc-init-adapter-codex.zip",
-		"dist/ssc-init-adapter-cursor.zip",
-		"dist/ssc-init-darwin-universal",
+		"sbom.cdx.json",
+		"ssc-init-adapter-claude.zip",
+		"ssc-init-adapter-codex.zip",
+		"ssc-init-adapter-cursor.zip",
+		"ssc-init-darwin-universal",
 	}
 	if len(lines) != len(wantChecksumFiles) {
 		t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
@@ -110,6 +110,66 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		if !strings.HasSuffix(lines[index], "  "+name) {
 			t.Fatalf("checksums are not deterministically sorted:\n%s", checksums)
 		}
+	}
+}
+
+func TestBuildScriptPublishesConsumerVerifiableBasenameSubjects(t *testing.T) {
+	root, script, environment := newIsolatedReleaseRepository(t)
+	command := exec.Command("sh", script)
+	command.Dir = t.TempDir()
+	command.Env = environment
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, output)
+	}
+
+	distribution := filepath.Join(root, "dist")
+	checksums, err := os.ReadFile(filepath.Join(distribution, "checksums.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := []string{
+		"sbom.cdx.json",
+		"ssc-init-adapter-claude.zip",
+		"ssc-init-adapter-codex.zip",
+		"ssc-init-adapter-cursor.zip",
+		"ssc-init-darwin-universal",
+	}
+	gotNames := make([]string, 0, len(wantNames))
+	for _, line := range strings.Split(strings.TrimSpace(string(checksums)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("unexpected checksum line %q", line)
+		}
+		gotNames = append(gotNames, fields[1])
+	}
+	if fmt.Sprint(gotNames) != fmt.Sprint(wantNames) {
+		t.Fatalf("checksum subjects=%v, want published basenames %v", gotNames, wantNames)
+	}
+
+	verify := exec.Command("shasum", "-a", "256", "-c", "checksums.txt")
+	verify.Dir = distribution
+	if output, err := verify.CombinedOutput(); err != nil {
+		t.Fatalf("consumer checksum verification failed: %v\n%s", err, output)
+	}
+
+	provenance, err := os.ReadFile(filepath.Join(distribution, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statement struct {
+		Subject []struct {
+			Name string `json:"name"`
+		} `json:"subject"`
+	}
+	if err := json.Unmarshal(provenance, &statement); err != nil {
+		t.Fatalf("decode provenance: %v", err)
+	}
+	gotNames = gotNames[:0]
+	for _, subject := range statement.Subject {
+		gotNames = append(gotNames, subject.Name)
+	}
+	if fmt.Sprint(gotNames) != fmt.Sprint(wantNames) {
+		t.Fatalf("provenance subjects=%v, want checksum basenames %v", gotNames, wantNames)
 	}
 }
 
@@ -212,7 +272,7 @@ func TestBuildScriptEmitsProvenanceMatchingChecksums(t *testing.T) {
 		if len(fields) != 2 {
 			t.Fatalf("unexpected checksum line %q", line)
 		}
-		recorded[filepath.Base(fields[1])] = fields[0]
+		recorded[fields[1]] = fields[0]
 	}
 	if len(statement.Subject) != len(recorded) {
 		t.Fatalf("provenance covers %d subjects, checksums cover %d", len(statement.Subject), len(recorded))
@@ -431,6 +491,90 @@ func TestBuildScriptRejectsInvalidRevision(t *testing.T) {
 	}
 }
 
+func TestReleaseModeRejectsAnythingButAnExactAnnotatedVersionTag(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name:  "untagged commit",
+			setup: func(*testing.T, string) {},
+		},
+		{
+			name: "lightweight version tag",
+			setup: func(t *testing.T, root string) {
+				runGit(t, root, "tag", "v9.9.9")
+			},
+		},
+		{
+			name: "annotated non-version tag",
+			setup: func(t *testing.T, root string) {
+				runGit(t, root, "tag", "-a", "experiment", "-m", "experiment")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, script, environment := newIsolatedReleaseRepository(t)
+			test.setup(t, root)
+			command := exec.Command("sh", script)
+			command.Dir = t.TempDir()
+			command.Env = environmentWithValue(environment, "SSC_INIT_RELEASE", "1")
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("release mode accepted %s:\n%s", test.name, output)
+			}
+			if got := strings.TrimSpace(string(output)); got != "release build requires an exact annotated v* tag" {
+				t.Fatalf("unexpected release-mode rejection %q", got)
+			}
+			if _, err := os.Stat(filepath.Join(root, "dist")); !os.IsNotExist(err) {
+				t.Fatalf("dist was created before tag rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseModeReproducesFromExactAnnotatedVersionTag(t *testing.T) {
+	root, script, environment := newVersionRecordingReleaseRepository(t)
+	runGit(t, root, "tag", "-a", "v9.9.9", "-m", "v9.9.9")
+	environment = environmentWithValue(environment, "SSC_INIT_RELEASE", "1")
+
+	runBuild := func() map[string][32]byte {
+		t.Helper()
+		command := exec.Command("sh", script)
+		command.Dir = t.TempDir()
+		command.Env = environment
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("release build failed: %v\n%s", err, output)
+		}
+		digests := make(map[string][32]byte, len(releaseArtifactNames))
+		for _, name := range releaseArtifactNames {
+			content, err := os.ReadFile(filepath.Join(root, "dist", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			digests[name] = sha256.Sum256(content)
+		}
+		return digests
+	}
+
+	first := runBuild()
+	second := runBuild()
+	for name, firstDigest := range first {
+		if second[name] != firstDigest {
+			t.Errorf("%s changed between release builds: %x != %x", name, firstDigest, second[name])
+		}
+	}
+	recorded, err := os.ReadFile(filepath.Join(root, "dist", "ssc-init-darwin-arm64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(recorded), "-X main.version=v9.9.9") {
+		t.Fatalf("release binary does not carry annotated tag version:\n%s", recorded)
+	}
+}
+
 func TestBuildScriptVersionsFromExactTag(t *testing.T) {
 	tests := []struct {
 		name string
@@ -584,9 +728,13 @@ func runGit(t *testing.T, root string, arguments ...string) {
 }
 
 func environmentWith(name, value string) []string {
+	return environmentWithValue(os.Environ(), name, value)
+}
+
+func environmentWithValue(base []string, name, value string) []string {
 	prefix := name + "="
-	environment := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
+	environment := make([]string, 0, len(base)+1)
+	for _, entry := range base {
 		if !strings.HasPrefix(entry, prefix) {
 			environment = append(environment, entry)
 		}

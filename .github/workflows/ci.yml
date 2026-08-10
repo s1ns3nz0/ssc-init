@@ -58,3 +58,9 @@ jobs:
         run: |
           git status --porcelain
           go test -count=1 ./scripts
+
+      - name: Tagged release build
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SSC_INIT_RELEASE: "1"
+        run: sh scripts/build-darwin.sh

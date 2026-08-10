@@ -21,6 +21,20 @@ require_clean_worktree() {
 	exit 1
 }
 
+require_annotated_version_tag() {
+	echo "release build requires an exact annotated v* tag" >&2
+	exit 1
+}
+
+RELEASE_MODE=${SSC_INIT_RELEASE:-0}
+case "$RELEASE_MODE" in
+	0 | 1) ;;
+	*)
+		echo "SSC_INIT_RELEASE must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+
 git -C "$REPOSITORY_ROOT" diff --quiet -- 2>/dev/null || require_clean_worktree
 git -C "$REPOSITORY_ROOT" diff --cached --quiet -- 2>/dev/null || require_clean_worktree
 UNTRACKED_ENTRIES=$(git -C "$REPOSITORY_ROOT" ls-files --others --exclude-standard 2>/dev/null) || require_clean_worktree
@@ -45,14 +59,28 @@ fi
 
 VERSION="dev+git.$REVISION"
 EXACT_TAG=$(git -C "$REPOSITORY_ROOT" describe --tags --exact-match 2>/dev/null) || EXACT_TAG=
-case "$EXACT_TAG" in
-	v[0-9]*)
-		case "$EXACT_TAG" in
-			*[!0-9A-Za-z.+-]*) ;;
-			*) VERSION="$EXACT_TAG" ;;
-		esac
-		;;
-esac
+if [ "$RELEASE_MODE" = 1 ]; then
+	EXACT_TAG=$(git -C "$REPOSITORY_ROOT" describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null) || require_annotated_version_tag
+	case "$EXACT_TAG" in
+		v[0-9]*[!0-9A-Za-z.+-]* | "") require_annotated_version_tag ;;
+		v[0-9]*) ;;
+		*) require_annotated_version_tag ;;
+	esac
+	TAG_OBJECT_TYPE=$(git -C "$REPOSITORY_ROOT" cat-file -t "refs/tags/$EXACT_TAG" 2>/dev/null) || require_annotated_version_tag
+	if [ "$TAG_OBJECT_TYPE" != tag ]; then
+		require_annotated_version_tag
+	fi
+	VERSION="$EXACT_TAG"
+else
+	case "$EXACT_TAG" in
+		v[0-9]*)
+			case "$EXACT_TAG" in
+				*[!0-9A-Za-z.+-]*) ;;
+				*) VERSION="$EXACT_TAG" ;;
+			esac
+			;;
+	esac
+fi
 LINKER_FLAGS="-s -w -buildid= -X main.version=$VERSION"
 
 mkdir -p "$DIST_DIR"
@@ -112,12 +140,15 @@ printf '%s\n' "$EMBEDDED_MODULES" |
 			printf "]\n}\n"
 		}' > "$DIST_DIR/sbom.cdx.json"
 
-shasum -a 256 \
-	dist/ssc-init-adapter-claude.zip \
-	dist/ssc-init-adapter-codex.zip \
-	dist/ssc-init-adapter-cursor.zip \
-	dist/sbom.cdx.json \
-	dist/ssc-init-darwin-universal | sort -k 2 > "$DIST_DIR/checksums.txt"
+(
+	cd "$DIST_DIR"
+	shasum -a 256 \
+		ssc-init-adapter-claude.zip \
+		ssc-init-adapter-codex.zip \
+		ssc-init-adapter-cursor.zip \
+		sbom.cdx.json \
+		ssc-init-darwin-universal | sort -k 2 > checksums.txt
+)
 
 # Unsigned in-toto Statement wrapping a SLSA v1 provenance predicate: it names
 # the commit, toolchain and flags that produced the digests, so a third party
@@ -142,7 +173,6 @@ awk -v version="$VERSION" \
 	}
 	NF == 2 {
 		name = $2
-		sub(/^.*\//, "", name)
 		if (count++) printf ","
 		printf "\n    {\"name\": \"%s\", \"digest\": {\"sha256\": \"%s\"}}", name, $1
 	}

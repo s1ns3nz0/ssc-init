@@ -37,6 +37,12 @@ identify the exact tag and commit. The release workflow must not accept or
 reference Apple signing identities, keychain profiles, Apple IDs, team IDs, or
 notarization secrets.
 
+`SSC_INIT_RELEASE=1` is the explicit release mode used by the release runbook
+and tagged CI path. It fails before creating artifacts unless the worktree is
+clean and committed at an exact annotated `v*` tag. An invocation without that
+mode is a clearly distinct developer build and may use a `dev+git.<commit>`
+version on an untagged commit.
+
 ## 3. Consumer trust and installation
 
 Users and adapters verify downloaded artifacts against the published
@@ -96,11 +102,13 @@ removed so repository search does not present them as actionable guidance.
 
 ## 6. Failure behavior
 
-A release fails closed when the tree is dirty, the version is not an exact
-annotated tag, an expected artifact is missing, a checksum subject is missing
-or extra, the provenance subject set differs from the checksum subject set, an
-adapter archive contains a core executable, or a repeat build is not
-byte-identical.
+A release fails closed when explicit release mode is absent from the release
+path, the tree is dirty, the version is not an exact annotated `v*` tag, an
+expected artifact is missing, a checksum subject is missing or extra, the
+provenance subject set differs from the checksum subject set, an adapter archive
+contains a core executable, or a repeat build is not byte-identical. Checksum
+and provenance subjects use the exact downloaded basenames so verification
+works with all subjects and `checksums.txt` in one directory.
 
 Unsigned status is not itself a build failure; it is the selected release
 contract. Conversely, the pipeline must not label artifacts as signed,
@@ -118,9 +126,12 @@ The redesign is complete when:
    the old direction must be mentioned;
 4. release fixtures prove the exact unsigned artifact set and reject obsolete
    Apple release surfaces;
-5. two clean builds from the same tag are byte-identical;
-6. `checksums.txt` and provenance cover the exact checksum subject set, and the
-   SBOM accompanies that set;
+5. isolated repositories reject untagged, lightweight-tagged, and non-`v*`
+   release attempts while two clean builds from the same annotated `v*` tag are
+   byte-identical;
+6. `checksums.txt` and provenance cover the same exact basename subject set,
+   the one-directory consumer verification command succeeds, and the SBOM
+   accompanies that set;
 7. managed install, doctor, rollback, adapter packaging, and passive local
    signature inspection continue to pass their existing tests;
 8. the full race, vet, module, formatting, diff, build-script, and acceptance

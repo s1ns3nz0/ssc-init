@@ -182,10 +182,15 @@ Building requires the Go version declared in `go.mod`. Fetch the pinned modules 
 go mod download
 sh scripts/build-darwin.sh
 file dist/ssc-init-darwin-*
-shasum -a 256 -c dist/checksums.txt
+(cd dist && shasum -a 256 -c checksums.txt)
 ```
 
-The script can be invoked from any working directory and produces CGO-free, self-contained Darwin arm64 and amd64 executables under `dist/`, with no separately installed runtime required. Each executable reports the exact `v*` release tag when the committed HEAD is tagged, and `dev+git.<full-commit>` otherwise. Dirty tracked changes are not represented in that version, so release artifacts must be built from a clean tracked worktree.
+The script can be invoked from any working directory and produces CGO-free,
+self-contained Darwin arm64 and amd64 executables under `dist/`, with no
+separately installed runtime required. A normal invocation is a developer build
+and reports the exact safe `v*` tag when present or `dev+git.<full-commit>`
+otherwise. Official releases use `SSC_INIT_RELEASE=1`, which requires a clean
+committed worktree at an exact annotated `v*` tag.
 
 ## Licensing
 

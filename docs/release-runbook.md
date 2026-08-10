@@ -2,9 +2,12 @@
 
 ## 1. Preconditions
 
-Release only from a clean tracked worktree. Verify modules and the full race
-gate, then create the annotated release tag before building; an untagged build
-truthfully reports `dev+git.<commit>` instead of the intended version.
+Release only from a clean committed worktree at an exact annotated `v*` tag.
+Verify modules and the full race gate, then create the annotated tag before
+entering explicit release mode. `SSC_INIT_RELEASE=1` fails closed for an
+untagged commit, a lightweight tag, or a non-version tag. A build without that
+variable remains a developer build and may truthfully report
+`dev+git.<commit>`.
 
 ```sh
 git status --short
@@ -17,8 +20,8 @@ git tag -a vX.Y.Z -m vX.Y.Z
 
 ```sh
 go mod download
-sh scripts/build-darwin.sh
-shasum -a 256 -c dist/checksums.txt
+SSC_INIT_RELEASE=1 sh scripts/build-darwin.sh
+(cd dist && shasum -a 256 -c checksums.txt)
 go test ./scripts -count=1
 ```
 

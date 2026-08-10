@@ -84,7 +84,8 @@ Each adapter:
 - renders concise findings and remediation choices;
 - declares whether pre-execution enforcement is supported in the current host;
 - never claims enforcement when only advisory scanning is possible;
-- contains or bootstraps the exact compatible core version;
+- uses the one separately installed compatible core and never bundles or
+  bootstraps it;
 - does not maintain a separate inventory or policy database.
 
 ### 5.2 Core executable
@@ -112,9 +113,19 @@ All adapters use one installation under `~/Library/Application Support/SSC Init/
 - local reports;
 - reversible quarantine.
 
-The first adapter atomically installs a verified compatible core. Later adapters reuse it. Updates stage a new version, run integrity and doctor checks, and switch only on success. At least one previous known-good version remains available for rollback. Removing an adapter does not silently remove shared data or quarantine contents.
+The compatible core is installed separately through the managed installer;
+every adapter reuses that one installation. Updates stage a new version, run
+integrity and doctor checks, and switch only on success. At least one previous
+known-good version remains available for rollback. Removing an adapter does not
+silently remove the core, shared data, or quarantine contents.
 
-Claude can bundle the executable in its plugin `bin/` directory. Other channels may bundle it or supply a pinned release to the managed installer. Before activation, SSC Init verifies the complete file against the caller-supplied SHA-256 digest and expected Universal Mach-O structure, stages without following symlinks, and runs a bounded doctor health check only on the staged core. Source installation options remain available under the current distribution contract.
+No adapter archive contains or installs the core executable. A separate
+authorized installer invocation supplies the downloaded core and its expected
+SHA-256 digest. Before activation, SSC Init verifies the complete file against
+that digest and the expected Universal Mach-O structure, stages without
+following symlinks, and runs a bounded doctor health check only on the staged
+core. Source installation options remain available under the current
+distribution contract.
 
 ### 5.4 Scheduling
 
@@ -267,7 +278,11 @@ Release gates also include clean macOS arm64 and Intel smoke tests, plugin contr
 
 ## 14. Repository and release model
 
-The monorepo contains the Go core, shared skill sources, host adapters, policy and rule schemas, ingestion pipeline, fixtures, and documentation. A single versioned release produces the Universal Binary, Claude plugin, Codex plugin, Cursor plugin, bootstrap rule bundle, checksums, signatures, SBOM, and build provenance.
+The monorepo contains the Go core, shared skill sources, host adapters, policy
+and rule schemas, ingestion pipeline, fixtures, and documentation. A single
+versioned release produces the Universal Binary, the three core-free adapter
+ZIPs, `checksums.txt`, `sbom.cdx.json`, and `provenance.json` defined by the
+unsigned reproducible distribution contract.
 
 Code and first-party rules use Apache-2.0. Documentation uses CC BY 4.0. Third-party intelligence retains its original license and provenance. The project has no paid or closed-source tier.
 
