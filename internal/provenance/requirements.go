@@ -44,6 +44,9 @@ func requirementLines(contents []byte) ([]string, bool) {
 	for scanner.Scan() {
 		line := strings.TrimSpace(strings.TrimSuffix(scanner.Text(), "\r"))
 		if line == "" || strings.HasPrefix(line, "#") {
+			if current != "" {
+				return nil, false
+			}
 			continue
 		}
 		continued := strings.HasSuffix(strings.TrimRight(line, " \t"), "\\")

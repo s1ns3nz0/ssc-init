@@ -11,7 +11,7 @@ import (
 
 func TestParseRequirementsNormalizesAndRedactsInput(t *testing.T) {
 	digest := strings.Repeat("a", 64)
-	input := "Foo_Bar==1.2.3 ; python_version >= \"3.11\" \\\n+    --hash=sha256:" + digest + "\n" +
+	input := "Foo_Bar==1.2.3 ; python_version >= \"3.11\" \\\n    --hash=sha256:" + digest + "\n" +
 		"--index-url https://user:secret@example.invalid/simple\n" +
 		"-r private-requirements.txt\n"
 	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20)
@@ -89,6 +89,15 @@ func TestParseRequirementsHandlesCRLFBoundsAndCancellation(t *testing.T) {
 	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader("demo==1.0\r\n"), 100)
 	if err != nil || len(records) != 1 || records[0].Name != "demo" {
 		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseRequirementsRejectsContinuationInterruptedByComment(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	input := "demo==1.0 \\\n# interrupted continuation\n" +
+		"--hash=sha256:" + digest + "\n"
+	if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("interrupted continuation accepted: %v", err)
 	}
 }
 
