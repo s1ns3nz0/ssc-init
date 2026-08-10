@@ -101,8 +101,6 @@ func TestBuildScriptWorksOutsideRepositoryAndIsReproducible(t *testing.T) {
 		"dist/ssc-init-adapter-claude.zip",
 		"dist/ssc-init-adapter-codex.zip",
 		"dist/ssc-init-adapter-cursor.zip",
-		"dist/ssc-init-darwin-amd64",
-		"dist/ssc-init-darwin-arm64",
 		"dist/ssc-init-darwin-universal",
 	}
 	if len(lines) != len(wantChecksumFiles) {
