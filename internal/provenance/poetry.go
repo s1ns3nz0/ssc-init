@@ -39,6 +39,9 @@ func parsePoetry(contents []byte) ([]Record, error) {
 				hashes = append(hashes, *file.Hash)
 			}
 		}
+		if _, valid := distinctPythonSHA256(hashes); !valid {
+			return nil, ErrMalformed
+		}
 		mutable := entry.Develop || entry.Source != nil && entry.Source.Type != "legacy"
 		record, ok := pythonRecord(entry.Name, entry.Version, mutable, hashes)
 		if !ok {

@@ -38,6 +38,9 @@ func parseUV(contents []byte) ([]Record, error) {
 				hashes = append(hashes, *wheel.Hash)
 			}
 		}
+		if _, valid := distinctPythonSHA256(hashes); !valid {
+			return nil, ErrMalformed
+		}
 		record, ok := pythonRecord(entry.Name, entry.Version, !uvRegistrySource(entry.Source), hashes)
 		if !ok {
 			return nil, ErrMalformed

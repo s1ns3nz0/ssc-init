@@ -256,6 +256,13 @@ func TestParsePoetryRejectsMalformedEntries(t *testing.T) {
 	}
 }
 
+func TestParsePoetryRejectsMalformedHashForMutableSource(t *testing.T) {
+	input := "[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nsource = { type = \"directory\", url = \"../private-directory\" }\nfiles = [{ hash = \"sha256:" + strings.Repeat("a", 63) + "\" }]\n"
+	if _, err := Parse(context.Background(), FormatPoetry, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("mutable package accepted malformed hash: %v", err)
+	}
+}
+
 func TestParseUVClassifiesArtifactHashesAndRedactsLocations(t *testing.T) {
 	a := strings.Repeat("a", 64)
 	b := strings.Repeat("b", 64)
@@ -354,6 +361,13 @@ func TestParseUVRejectsMalformedEntries(t *testing.T) {
 		if _, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("accepted %q: %v", input, err)
 		}
+	}
+}
+
+func TestParseUVRejectsMalformedHashForMutableSource(t *testing.T) {
+	input := "[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nsource = { git = \"https://user:secret@example.invalid/private.git\" }\nwheels = [{ hash = \"sha256:" + strings.Repeat("a", 63) + "\" }]\n"
+	if _, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("mutable package accepted malformed hash: %v", err)
 	}
 }
 
