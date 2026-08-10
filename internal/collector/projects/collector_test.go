@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -209,6 +210,97 @@ func TestProjectCollectorKeepsValidUVProvenanceWhenPipfileIsMalformed(t *testing
 		}
 	}
 	t.Fatalf("valid uv package was not retained: %+v", result.Assets)
+}
+
+func TestProjectCollectorAggregatesConflictingSiblingPythonFactsConservatively(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	digest := strings.Repeat("a", 64)
+	writeProjectFile(t, filepath.Join(root, "requirements.txt"), "shared-demo==1.0.0\n")
+	writeProjectFile(t, filepath.Join(root, "Pipfile.lock"), `{"default":{"shared-demo":{"version":"==1.0.0","hashes":["sha256:`+digest+`"]}}}`)
+
+	result := collectProjectsAt(t, home, root)
+	packageID := "pkg:pypi/shared-demo@1.0.0"
+	packageAssets := 0
+	for _, asset := range result.Assets {
+		if asset.ID != packageID {
+			continue
+		}
+		packageAssets++
+		if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceUnknown || asset.Provenance.Integrity != "" {
+			t.Fatalf("aggregated package=%+v", asset)
+		}
+	}
+	declaredBy := 0
+	for _, relationship := range result.Relationships {
+		if relationship.From == packageID && relationship.Kind == model.RelationshipDeclaredBy {
+			declaredBy++
+		}
+	}
+	if packageAssets != 1 || declaredBy != 2 {
+		t.Fatalf("package assets=%d declared-by=%d result=%+v", packageAssets, declaredBy, result)
+	}
+}
+
+func TestAggregateProjectPackageAssetsHandlesManyPackagesInOnePass(t *testing.T) {
+	const packageCount = 8192
+	unknown := model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "pypi", Source: "lockfile"}
+	immutable := model.Provenance{Status: model.ProvenanceImmutable, Ecosystem: "pypi", Source: "lockfile", Integrity: "sha256:" + strings.Repeat("a", 64)}
+	result := model.CollectorResult{Assets: make([]model.Asset, 0, packageCount*2)}
+	for index := 0; index < packageCount; index++ {
+		id := "pkg:pypi/demo-" + strconv.Itoa(index) + "@1.0.0"
+		result.Assets = append(result.Assets,
+			model.Asset{ID: id, Type: model.AssetPackage, Name: "demo", Version: "1.0.0", Provenance: &unknown},
+			model.Asset{ID: id, Type: model.AssetPackage, Name: "demo", Version: "1.0.0", Provenance: &immutable},
+		)
+	}
+
+	aggregateProjectPackageAssets(&result)
+	if len(result.Assets) != packageCount {
+		t.Fatalf("assets=%d want=%d", len(result.Assets), packageCount)
+	}
+	for _, asset := range result.Assets {
+		if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceUnknown || asset.Provenance.Integrity != "" {
+			t.Fatalf("aggregated asset=%+v", asset)
+		}
+	}
+}
+
+func TestConservativeProjectPackageProvenanceIsOrderIndependent(t *testing.T) {
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	digestB := "sha256:" + strings.Repeat("b", 64)
+	immutableA := &model.Provenance{Status: model.ProvenanceImmutable, Ecosystem: "pypi", Source: "lockfile", Integrity: digestA}
+	immutableB := &model.Provenance{Status: model.ProvenanceImmutable, Ecosystem: "pypi", Source: "lockfile", Integrity: digestB}
+	unknown := &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "pypi", Source: "lockfile"}
+	mutable := &model.Provenance{Status: model.ProvenanceMutable, Ecosystem: "pypi", Source: "lockfile"}
+
+	tests := []struct {
+		name        string
+		left, right *model.Provenance
+		want        model.ProvenanceStatus
+		integrity   string
+	}{
+		{"identical immutable", immutableA, immutableA, model.ProvenanceImmutable, digestA},
+		{"differing immutable", immutableA, immutableB, model.ProvenanceUnknown, ""},
+		{"unknown dominates immutable", unknown, immutableA, model.ProvenanceUnknown, ""},
+		{"mutable dominates immutable", mutable, immutableA, model.ProvenanceMutable, ""},
+		{"mutable dominates unknown", mutable, unknown, model.ProvenanceMutable, ""},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			forward := conservativeProjectPackageProvenance(testCase.left, testCase.right)
+			reverse := conservativeProjectPackageProvenance(testCase.right, testCase.left)
+			if forward == nil || reverse == nil || *forward != *reverse || forward.Status != testCase.want || forward.Integrity != testCase.integrity {
+				t.Fatalf("forward=%+v reverse=%+v want status=%q integrity=%q", forward, reverse, testCase.want, testCase.integrity)
+			}
+		})
+	}
+
+	leftGrouped := conservativeProjectPackageProvenance(conservativeProjectPackageProvenance(immutableA, immutableB), mutable)
+	rightGrouped := conservativeProjectPackageProvenance(immutableA, conservativeProjectPackageProvenance(immutableB, mutable))
+	if leftGrouped == nil || rightGrouped == nil || *leftGrouped != *rightGrouped || leftGrouped.Status != model.ProvenanceMutable {
+		t.Fatalf("left grouped=%+v right grouped=%+v", leftGrouped, rightGrouped)
+	}
 }
 
 func TestProjectCollectorRejectsPythonLockfileIdentityDrift(t *testing.T) {

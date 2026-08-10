@@ -224,6 +224,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		return abortProjectCollection(&result, err)
 	}
 
+	aggregateProjectPackageAssets(&result)
 	sort.Slice(result.Targets, func(i, j int) bool { return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef })
 	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.Slice(result.Relationships, func(i, j int) bool {
@@ -695,6 +696,50 @@ func appendProjectLockfileProvenance(ctx context.Context, owner *projectCollecto
 		result.Observations = append(result.Observations, packageObservation)
 		result.Relationships = append(result.Relationships, model.Relationship{From: asset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID})
 	}
+}
+
+func aggregateProjectPackageAssets(result *model.CollectorResult) {
+	if result == nil || len(result.Assets) < 2 {
+		return
+	}
+	packageIndexes := make(map[string]int)
+	aggregated := make([]model.Asset, 0, len(result.Assets))
+	for _, candidate := range result.Assets {
+		if candidate.Type != model.AssetPackage {
+			aggregated = append(aggregated, candidate)
+			continue
+		}
+		if index, exists := packageIndexes[candidate.ID]; exists {
+			existing := &aggregated[index]
+			existing.Provenance = conservativeProjectPackageProvenance(existing.Provenance, candidate.Provenance)
+			continue
+		}
+		packageIndexes[candidate.ID] = len(aggregated)
+		aggregated = append(aggregated, candidate)
+	}
+	result.Assets = aggregated
+}
+
+func conservativeProjectPackageProvenance(left, right *model.Provenance) *model.Provenance {
+	if left == nil || right == nil || left.Ecosystem != right.Ecosystem {
+		return nil
+	}
+	merged := *left
+	if merged.Source != right.Source {
+		merged.Source = ""
+	}
+	switch {
+	case left.Status == model.ProvenanceMutable || right.Status == model.ProvenanceMutable:
+		merged.Status = model.ProvenanceMutable
+		merged.Integrity = ""
+	case left.Status == model.ProvenanceImmutable && right.Status == model.ProvenanceImmutable && left.Integrity == right.Integrity:
+		merged.Status = model.ProvenanceImmutable
+		merged.Integrity = left.Integrity
+	default:
+		merged.Status = model.ProvenanceUnknown
+		merged.Integrity = ""
+	}
+	return &merged
 }
 
 func provenancePackageAsset(record provenance.Record) model.Asset {

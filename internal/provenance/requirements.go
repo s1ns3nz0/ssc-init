@@ -40,32 +40,40 @@ func requirementLines(contents []byte) ([]string, bool) {
 	scanner := bufio.NewScanner(bytes.NewReader(contents))
 	scanner.Buffer(make([]byte, 4096), len(contents)+1)
 	lines := make([]string, 0)
-	var current string
+	var current []byte
+	continuing := false
 	for scanner.Scan() {
-		line := strings.TrimSpace(strings.TrimSuffix(scanner.Text(), "\r"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			if current != "" {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] == '#' {
+			if continuing {
 				return nil, false
 			}
 			continue
 		}
-		continued := strings.HasSuffix(strings.TrimRight(line, " \t"), "\\")
+		rightTrimmed := bytes.TrimRight(line, " \t")
+		continued := len(rightTrimmed) > 0 && rightTrimmed[len(rightTrimmed)-1] == '\\'
 		if continued {
-			line = strings.TrimSuffix(strings.TrimRight(line, " \t"), "\\")
+			line = rightTrimmed[:len(rightTrimmed)-1]
 		}
-		if len(current)+len(line) > len(contents) {
+		if !continuing && !continued {
+			lines = append(lines, string(line))
+			continue
+		}
+		if len(line) > len(contents)-len(current) {
 			return nil, false
 		}
-		current += line
+		current = append(current, line...)
+		continuing = true
 		if continued {
 			continue
 		}
-		if current != "" {
-			lines = append(lines, current)
+		if len(current) > 0 {
+			lines = append(lines, string(current))
 		}
-		current = ""
+		current = nil
+		continuing = false
 	}
-	return lines, scanner.Err() == nil && current == ""
+	return lines, scanner.Err() == nil && !continuing
 }
 
 func parseRequirement(line string) (Record, bool, bool) {
@@ -78,6 +86,9 @@ func parseRequirement(line string) (Record, bool, bool) {
 		return Record{}, true, true
 	}
 	option := fields[0]
+	if len(option) > 2 && (strings.HasPrefix(option, "-r") || strings.HasPrefix(option, "-c")) {
+		return Record{}, true, true
+	}
 	editableSource := ""
 	if base, value, found := strings.Cut(option, "="); found {
 		option = base
@@ -89,17 +100,23 @@ func parseRequirement(line string) (Record, bool, bool) {
 		return Record{}, true, true
 	}
 	if option == "-e" || option == "--editable" {
-		if editableSource == "" && len(fields) < 2 {
+		parts, hashes, valid := extractRequirementHashes(fields)
+		if !valid {
 			return Record{}, false, false
 		}
 		if editableSource == "" {
-			editableSource = strings.Join(fields[1:], " ")
+			if len(parts) != 2 {
+				return Record{}, false, false
+			}
+			editableSource = parts[1]
+		} else if len(parts) != 1 {
+			return Record{}, false, false
 		}
 		name := editableRequirementName(editableSource)
 		if name == "" {
 			return Record{}, true, true
 		}
-		record, ok := pythonRecord(name, "", true, nil)
+		record, ok := pythonRecord(name, "", true, hashes)
 		return record, false, ok
 	}
 
@@ -108,6 +125,33 @@ func parseRequirement(line string) (Record, bool, bool) {
 	if len(fields) == 0 {
 		return Record{}, true, true
 	}
+	parts, hashes, valid := extractRequirementHashes(fields)
+	if !valid {
+		return Record{}, false, false
+	}
+	value := strings.Join(parts, " ")
+	if name, source, direct := strings.Cut(value, " @ "); direct {
+		if source == "" || len(strings.Fields(source)) != 1 {
+			return Record{}, false, false
+		}
+		record, ok := pythonRecord(stripPythonExtras(name), "", true, hashes)
+		return record, false, ok
+	}
+	if strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.Contains(value, "://") || strings.HasPrefix(value, "git+") {
+		return Record{}, true, true
+	}
+	if len(strings.Fields(value)) != 1 {
+		return Record{}, false, false
+	}
+	name, version := splitPythonRequirement(value)
+	if name == "" {
+		return Record{}, false, false
+	}
+	record, ok := pythonRecord(stripPythonExtras(name), version, false, hashes)
+	return record, false, ok
+}
+
+func extractRequirementHashes(fields []string) ([]string, []string, bool) {
 	hashes := make([]string, 0)
 	parts := make([]string, 0, len(fields))
 	for index := 0; index < len(fields); index++ {
@@ -118,7 +162,7 @@ func parseRequirement(line string) (Record, bool, bool) {
 		}
 		if field == "--hash" {
 			if index+1 == len(fields) {
-				return Record{}, false, false
+				return nil, nil, false
 			}
 			index++
 			hashes = append(hashes, fields[index])
@@ -126,23 +170,10 @@ func parseRequirement(line string) (Record, bool, bool) {
 		}
 		parts = append(parts, field)
 	}
-	value := strings.Join(parts, " ")
-	if name, source, direct := strings.Cut(value, " @ "); direct {
-		if source == "" {
-			return Record{}, false, false
-		}
-		record, ok := pythonRecord(stripPythonExtras(name), "", true, hashes)
-		return record, false, ok
+	if _, valid := distinctPythonSHA256(hashes); !valid {
+		return nil, nil, false
 	}
-	if strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.Contains(value, "://") || strings.HasPrefix(value, "git+") {
-		return Record{}, true, true
-	}
-	name, version := splitPythonRequirement(value)
-	if name == "" {
-		return Record{}, false, false
-	}
-	record, ok := pythonRecord(stripPythonExtras(name), version, false, hashes)
-	return record, false, ok
+	return parts, hashes, true
 }
 
 func stripRequirementComment(value string) string {

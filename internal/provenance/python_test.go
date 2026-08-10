@@ -3,6 +3,7 @@ package provenance
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -101,6 +102,95 @@ func TestParseRequirementsRejectsContinuationInterruptedByComment(t *testing.T) 
 	}
 }
 
+func TestRequirementLinesBuildsManyContinuationsWithBoundedAllocations(t *testing.T) {
+	const continuations = 4096
+	contents := []byte(strings.Repeat("x\\\n", continuations) + "x\n")
+	wantLength := continuations + 1
+
+	allocations := testing.AllocsPerRun(3, func() {
+		lines, ok := requirementLines(contents)
+		if !ok || len(lines) != 1 || len(lines[0]) != wantLength {
+			panic("many-continuation requirement was not assembled")
+		}
+	})
+	if allocations > 64 {
+		t.Fatalf("requirementLines allocations=%.0f want<=64", allocations)
+	}
+}
+
+func TestParseRequirementsIgnoresAttachedIncludeOptions(t *testing.T) {
+	input := "-rprivate-requirements.txt\n-cprivate-constraints.txt\nsafe==1.0\n"
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "safe" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if strings.Contains(recordText(records), "private") {
+		t.Fatalf("attached include target retained: %+v", records)
+	}
+}
+
+func TestParseRequirementsRejectsMalformedHashesForMutableEntries(t *testing.T) {
+	for _, input := range []string{
+		"ranged>=1 --hash=sha256:" + strings.Repeat("a", 63) + "\n",
+		"direct @ https://user:secret@example.invalid/demo.whl --hash=sha512:not-hex\n",
+	} {
+		if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("mutable requirement accepted malformed hash: %v", err)
+		}
+	}
+}
+
+func TestParseRequirementsAcceptsValidHashForEditableEntry(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	validEditable := "-e git+https://user:secret@example.invalid/demo.git#egg=demo --hash=sha256:" + digest + "\n"
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(validEditable), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "demo" || records[0].Provenance.Status != model.ProvenanceMutable || records[0].Provenance.Integrity != "" {
+		t.Fatalf("valid editable records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseRequirementsRejectsMalformedHashesForEditableAndSkippedEntries(t *testing.T) {
+	for _, input := range []string{
+		"--editable=git+https://user:secret@example.invalid/demo.git#egg=demo --hash=sha256:" + strings.Repeat("a", 63) + "\n",
+		"https://user:secret@example.invalid/demo.whl --hash=sha256:" + strings.Repeat("a", 63) + "\n",
+		"git+https://user:secret@example.invalid/demo.git --hash=sha512:not-hex\n",
+		"../private-demo --hash=sha256:" + strings.Repeat("a", 63) + "\n",
+	} {
+		if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("editable or skipped requirement accepted malformed hash: %v", err)
+		}
+	}
+}
+
+func TestPythonParsersRejectCaseVariantSHA256Algorithms(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	tests := []struct {
+		format Format
+		input  string
+	}{
+		{FormatRequirements, "demo>=1 --hash=SHA256:" + digest + "\n"},
+		{FormatPipfile, `{"default":{"demo":{"version":"==1.0","path":"../private","hashes":["SHA256:` + digest + `"]}}}`},
+	}
+	for _, testCase := range tests {
+		if _, err := Parse(context.Background(), testCase.format, strings.NewReader(testCase.input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("format %q accepted SHA256 case variant: %v", testCase.format, err)
+		}
+	}
+}
+
+func TestParseRequirementsRejectsUnsupportedTrailingTokens(t *testing.T) {
+	for _, input := range []string{
+		"demo==1.0 unexpected\n",
+		"demo==1.0 --unsupported-option\n",
+		"demo>=1 trailing\n",
+		"demo @ https://example.invalid/demo.whl unexpected\n",
+	} {
+		if _, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("requirement with trailing token accepted: %q err=%v", input, err)
+		}
+	}
+}
+
 func TestParsePipfileCombinesSectionsAndSorts(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	input := `{
@@ -115,13 +205,24 @@ func TestParsePipfileCombinesSectionsAndSorts(t *testing.T) {
 	if err != nil || len(records) != 3 {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
-	if records[0].Name != "direct" || records[0].Version != "" || records[0].Provenance.Status != model.ProvenanceMutable ||
+	if records[0].Name != "direct" || records[0].Version != "9.0.0" || records[0].Provenance.Status != model.ProvenanceMutable ||
 		records[1].Name != "foo-bar" || records[1].Version != "1.2.3" || records[1].Provenance.Integrity != "sha256:"+digest ||
 		records[2].Name != "zoo" || records[2].Version != "3.0.0" {
 		t.Fatalf("records=%+v", records)
 	}
 	if strings.Contains(records[0].Version, "secret") {
 		t.Fatalf("mutable source retained: %+v", records[0])
+	}
+}
+
+func TestParsePipfileRejectsMalformedHashesForMutableEntries(t *testing.T) {
+	for _, input := range []string{
+		`{"default":{"path-source":{"version":"==1.0","path":"../private","hashes":["sha256:` + strings.Repeat("a", 63) + `"]}}}`,
+		`{"default":{"git-source":{"version":"==1.0","git":"https://user:secret@example.invalid/repo.git","hashes":["sha512:not-hex"]}}}`,
+	} {
+		if _, err := Parse(context.Background(), FormatPipfile, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("mutable Pipfile entry accepted malformed hash: %v", err)
+		}
 	}
 }
 
@@ -435,6 +536,38 @@ func TestPythonRecordIgnoresValidNonSHA256Hashes(t *testing.T) {
 	got, ok := pythonRecord("demo", "1.2.3", false, []string{"sha512:" + strings.Repeat("a", 128)})
 	if !ok || got.Provenance.Status != model.ProvenanceUnknown || got.Provenance.Integrity != "" {
 		t.Fatalf("record=%+v ok=%v", got, ok)
+	}
+}
+
+func TestPythonRecordRejectsMalformedUnsupportedHashSyntax(t *testing.T) {
+	for _, hash := range []string{
+		"sha512:not-hex",
+		"sha512:" + strings.Repeat("A", 128),
+		"sha512:abc",
+		"sha 512:" + strings.Repeat("a", 128),
+		"_sha512:" + strings.Repeat("a", 128),
+		"sha512_:" + strings.Repeat("a", 128),
+	} {
+		if got, ok := pythonRecord("demo", "1.2.3", true, []string{hash}); ok {
+			t.Fatalf("malformed unsupported hash %q accepted: %+v", hash, got)
+		}
+	}
+}
+
+func TestDistinctPythonSHA256ReturnsSortedDigests(t *testing.T) {
+	hashes := []string{
+		"sha256:" + strings.Repeat("f", 64),
+		"sha256:" + strings.Repeat("1", 64),
+		"sha256:" + strings.Repeat("d", 64),
+		"sha256:" + strings.Repeat("3", 64),
+		"sha256:" + strings.Repeat("b", 64),
+		"sha256:" + strings.Repeat("5", 64),
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		got, ok := distinctPythonSHA256(hashes)
+		if !ok || !sort.StringsAreSorted(got) {
+			t.Fatalf("digests=%q valid=%v", got, ok)
+		}
 	}
 }
 

@@ -85,6 +85,51 @@ source = { directory = "`+localPath+`" }
 	}
 }
 
+func TestConflictingPythonLockfileFactsPersistConservatively(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "Projects", "app")
+	digest := strings.Repeat("ab", 32)
+	writeMatrixFile(t, filepath.Join(project, "requirements.txt"), "shared-demo==1.0.0\n")
+	writeMatrixFile(t, filepath.Join(project, "Pipfile.lock"), `{"default":{"shared-demo":{"version":"==1.0.0","hashes":["sha256:`+digest+`"]}}}`)
+
+	result := runIsolatedBaseline(t, baselineOptions{home: home})
+	reopened := reopenLatestSnapshot(t, result.DatabasePath)
+	packageID := "pkg:pypi/shared-demo@1.0.0"
+	packageAssets := 0
+	for _, asset := range reopened.Inventory.Assets {
+		if asset.ID != packageID {
+			continue
+		}
+		packageAssets++
+		if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceUnknown || asset.Provenance.Integrity != "" {
+			t.Fatalf("persisted package=%+v", asset)
+		}
+	}
+	declaredBy := 0
+	for _, relationship := range reopened.Inventory.Relationships {
+		if relationship.From == packageID && relationship.Kind == model.RelationshipDeclaredBy {
+			declaredBy++
+		}
+	}
+	if packageAssets != 1 || declaredBy != 2 {
+		t.Fatalf("package assets=%d declared-by=%d snapshot=%+v", packageAssets, declaredBy, reopened)
+	}
+	for _, coverage := range reopened.Scan.Coverage {
+		if coverage.Collector != "projects" {
+			continue
+		}
+		coveragePackageAssets := 0
+		for _, asset := range coverage.Assets {
+			if asset.ID == packageID {
+				coveragePackageAssets++
+			}
+		}
+		if coveragePackageAssets != 1 {
+			t.Fatalf("persisted project coverage has %d package assets: %+v", coveragePackageAssets, coverage.Assets)
+		}
+	}
+}
+
 func TestDockerIdentityRelationshipAndV4PrivacyAcceptance(t *testing.T) {
 	home := t.TempDir()
 	runner, inspector := dockerProbeFixture(t, home)

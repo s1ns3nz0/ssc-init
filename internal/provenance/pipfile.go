@@ -52,9 +52,6 @@ func parsePipfile(contents []byte) ([]Record, error) {
 			if !ok {
 				return nil, ErrMalformed
 			}
-			if mutable {
-				record.Version = ""
-			}
 			if err := addRecord(seen, record); err != nil {
 				return nil, err
 			}
