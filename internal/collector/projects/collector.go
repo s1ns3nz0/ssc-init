@@ -40,13 +40,14 @@ type Root struct {
 }
 
 type projectCollector struct {
-	roots              []Root
-	invalid            bool
-	limits             walkLimits
-	beforeOpen         func(string)
-	afterWalk          func(string)
-	beforeProject      func(string)
-	beforeEvidenceHash func(string)
+	roots                []Root
+	invalid              bool
+	limits               walkLimits
+	beforeOpen           func(string)
+	afterWalk            func(string)
+	beforeProject        func(string)
+	beforeEvidenceHash   func(string)
+	afterProvenanceParse func(string)
 }
 
 type localTargetProvenance struct {
@@ -547,7 +548,7 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 		}
 	}
 	if format, supported := provenanceFormat(item.definition.basename); supported {
-		appendProjectLockfileProvenance(ctx, asset, item, configured, projectID, format, result)
+		appendProjectLockfileProvenance(ctx, owner, asset, item, configured, projectID, format, result)
 	}
 	base.RootPath = configured.Path
 	base.RelativePath = filepath.Clean(item.relativePath)
@@ -631,7 +632,7 @@ func provenanceFormat(basename string) (provenance.Format, bool) {
 	}
 }
 
-func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
+func appendProjectLockfileProvenance(ctx context.Context, owner *projectCollector, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
 	basename := filepath.Base(item.relativePath)
 	locationRef := identity.SafeLocationRef(configured.home, filepath.Join(configured.Path, item.relativePath), configured.Ref)
 	lockfileID := digestID("project-lockfile", "ssc-init.project-lockfile.v1", locationRef)
@@ -660,6 +661,9 @@ func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.R
 			appendProjectProvenanceError(result, "provenance_malformed", "lockfile provenance is malformed")
 		}
 		return
+	}
+	if owner.afterProvenanceParse != nil {
+		owner.afterProvenanceParse(filepath.ToSlash(item.relativePath))
 	}
 	after, err := file.Stat()
 	afterFingerprint, afterOK := platform.Fingerprint(after)

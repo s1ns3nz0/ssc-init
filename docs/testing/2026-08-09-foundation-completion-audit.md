@@ -15,7 +15,7 @@ implementation exists.
 | §5.1 Claude/Codex/Cursor adapters | Proved | Native `adapters/{claude,codex,cursor}` packages, closed capability manifests, common bounded evaluation endpoint, cross-host verdict parity, deterministic release ZIPs, and package contract tests | Production marketplace publication remains external |
 | §5.2.1 collectors | Partial | `internal/collector/{agents,ide,mcp,packages,projects,surfaces,runtime}` and isolated-home acceptance suite; bounded developer files plus full local Docker identity and point-in-time process/listener facts behind external probes | Broader package managers and recent-workspace discovery |
 | §5.2.2 inventory graph | Partial | Canonical assets, observations and relationships in `internal/model`; normalization in `internal/inventory` | Executable/package/repository/service/permission dependency edges across all collectors |
-| §5.2.3 analyzers | Partial | Bounded hashes, semantic MCP digest, closed macOS signature facts, local npm/Cargo/Go provenance, supported version ranges, mutable-reference signals, dangerous APIs, bounded obfuscation and narrow credential-egress flows | Dependency extraction beyond supported lockfiles and deeper language-aware analysis |
+| §5.2.3 analyzers | Partial | Bounded hashes, semantic MCP digest, closed macOS signature facts, local npm/Cargo/Go provenance plus Python `requirements.txt`, `Pipfile.lock`, `poetry.lock`, and `uv.lock`, supported version ranges, mutable-reference signals, dangerous APIs, bounded obfuscation and narrow credential-egress flows | Provenance for other ecosystems, conditional dependency-edge extraction, and deeper language-aware analysis |
 | §5.2.4 decision engine | Proved | Exact and version-range verified TI correlation, analyzer findings, deterministic five-level precedence, and capability-bounded adapter response choices | Automatic execution remains deliberately absent |
 | §5.2.5 TI manager | Partial | Closed signed TI schema, lifecycle, freshness, withdrawal and exact asset/hash correlation | Production trust root, signed publication and scheduled retrieval |
 | §5.2.6 policy manager | Partial | Local policy plus verified signed organization deny, digest-bound allow and scoped exception precedence | Git-managed YAML compiler and production trust root/publication |
@@ -23,7 +23,7 @@ implementation exists.
 | §5.2.8 reporters | Partial | Finding JSON, privacy-safe SARIF 2.1.0, inventory CycloneDX, explicit HTTPS webhook and existing local formats | Complete local evidence report and downstream connector modules |
 | §5.3 shared installation | Partial | Separately installed Universal core plus digest/Mach-O verified stage/activate/rollback and doctor v2; adapter ZIPs contain no executable | TI/policy/report/quarantine lifecycle |
 | §5.4 scheduling | Proved | Exact preview plus explicit install/remove, one stable private launchd plist, tokenized logs/removal instructions, atomic publication, rollback, and process/thread concurrency tests | None for the designed opt-in local scheduler |
-| §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, supported lockfile provenance, bounded developer surfaces, optional process/listener facts, dangerous-API/obfuscation facts and explicit coverage gaps | Broader package and language coverage |
+| §6.1 quick scan | Partial | Identity/version/publisher/hash, Docker identity, code-signature facts, npm/Cargo/Go and four-format Python lockfile provenance, bounded developer surfaces, optional process/listener facts, dangerous-API/obfuscation facts and explicit coverage gaps | Provenance for other ecosystems, conditional dependency-edge extraction, and broader language analysis |
 | §6.2 deep scan | Partial | Two-layer bounded decoding and narrow within-file credential-egress flow | Bundled dependencies, cross-file semantic flows, WASM/native metadata and promotion scheduler |
 | §6.3 mutable dependencies | Partial | Normalized absent/latest version, mutable Git ref and direct remote-script facts feed advisory findings | Proven registry integrity, organization default deny and host enforcement |
 | §7 intelligence | Partial | Closed records, signed lifecycle, freshness, withdrawal/campaign/ATT&CK fields and exact/version-range verified correlation | Licensed ingestion and production publication |
@@ -46,8 +46,9 @@ implementation exists.
   Isolated repository tests prove clean-source rejection, exact annotated `v*`
   tag enforcement, and repeat-build identity without blocking untagged
   developer builds.
-- Program D: Docker identity, macOS signature inspection, supported lockfile
-  provenance and closed graph relationships.
+- Program D: Docker identity, macOS signature inspection, npm/Cargo/Go and
+  Python `requirements.txt`/`Pipfile.lock`/`poetry.lock`/`uv.lock` provenance,
+  and closed graph relationships.
 - Program I: bounded developer-file surfaces and opt-in point-in-time
   process/listener inventory. This is snapshot collection, not monitoring.
 - Program E local core: signed TI/organization bundle schemas, verification,
@@ -68,7 +69,9 @@ implementation exists.
 
 ## Remaining dependency order
 
-1. Final automatic-enforcement acceptance cases and broader collector/analyzer coverage.
+1. Final automatic-enforcement acceptance cases, provenance for other
+   ecosystems, conditional dependency-edge extraction, and broader analyzer
+   coverage.
 2. Production bundle publication, clean physical arm64/Intel smoke tests, and
    hosted CI evidence.
 

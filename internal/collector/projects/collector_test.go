@@ -261,6 +261,46 @@ sdist = { hash = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 	}
 }
 
+func TestProjectCollectorRejectsPythonLockfilePostReadIdentityDrift(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	lockfile := filepath.Join(root, "uv.lock")
+	writeProjectFile(t, lockfile, validPythonLockfiles()["uv.lock"])
+	writeProjectFile(t, filepath.Join(root, "requirements.txt"), validPythonLockfiles()["requirements.txt"])
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectCollector := &projectCollector{roots: roots, limits: defaultWalkLimits()}
+	projectCollector.afterProvenanceParse = func(relative string) {
+		if relative != "uv.lock" {
+			return
+		}
+		writeProjectFile(t, lockfile, `[[package]]
+name = "replacement-demo"
+version = "9.9.9"
+source = { registry = "https://example.invalid/simple" }
+`)
+	}
+	result, err := projectCollector.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedSafePackage := false
+	for _, asset := range result.Assets {
+		retainedSafePackage = retainedSafePackage || asset.ID == "pkg:pypi/requirements-demo@1.0.0"
+		if asset.ID == "pkg:pypi/uv-demo@4.0.0" || asset.ID == "pkg:pypi/replacement-demo@9.9.9" {
+			t.Fatalf("identity-changed lockfile emitted package: %+v", asset)
+		}
+	}
+	if !retainedSafePackage {
+		t.Fatalf("safe sibling package was not retained: %+v", result.Assets)
+	}
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "provenance_identity_changed" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestMalformedLockfileKeepsEvidenceAndMarksProvenancePartial(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
