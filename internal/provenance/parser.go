@@ -25,6 +25,8 @@ const (
 	FormatGoSum        Format = "go.sum"
 	FormatRequirements Format = "requirements.txt"
 	FormatPipfile      Format = "Pipfile.lock"
+	FormatPoetry       Format = "poetry.lock"
+	FormatUV           Format = "uv.lock"
 )
 
 var (
@@ -75,6 +77,10 @@ func Parse(ctx context.Context, format Format, source io.Reader, maxBytes int64)
 		records, err = parseRequirements(contents)
 	case FormatPipfile:
 		records, err = parsePipfile(contents)
+	case FormatPoetry:
+		records, err = parsePoetry(contents)
+	case FormatUV:
+		records, err = parseUV(contents)
 	default:
 		err = ErrMalformed
 	}

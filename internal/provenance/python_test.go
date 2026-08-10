@@ -152,6 +152,219 @@ func TestParsePipfileClassifiesAndRejectsInvalidShapes(t *testing.T) {
 	}
 }
 
+func TestParsePoetryClassifiesRegistryHashesAndRedactsMetadata(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("b", 64)
+	input := `[[package]]
+name = "Foo__Bar"
+version = "1.2.3"
+groups = ["main", "dev"]
+markers = "python_version >= '3.11'"
+extras = ["private-extra"]
+files = [{ file = "private-wheel.whl", hash = "sha256:` + a + `" }]
+
+[[package]]
+name = "multi"
+version = "2.0.0"
+files = [{ file = "first.whl", hash = "sha256:` + a + `" }, { file = "second.whl", hash = "sha256:` + b + `" }]
+
+[[package]]
+name = "hashless"
+version = "3.0.0"
+
+[metadata]
+content-hash = "private-content-hash"
+`
+	records, err := Parse(context.Background(), FormatPoetry, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	want := map[string]struct {
+		status    model.ProvenanceStatus
+		integrity string
+	}{
+		"foo-bar\x001.2.3":  {model.ProvenanceImmutable, "sha256:" + a},
+		"multi\x002.0.0":    {model.ProvenanceUnknown, ""},
+		"hashless\x003.0.0": {model.ProvenanceUnknown, ""},
+	}
+	for _, record := range records {
+		got, ok := want[record.Name+"\x00"+record.Version]
+		if !ok || record.Provenance.Status != got.status || record.Provenance.Integrity != got.integrity {
+			t.Fatalf("record=%+v want=%+v", record, want)
+		}
+	}
+	for _, private := range []string{"private-wheel", "first.whl", "private-content-hash", "python_version", "private-extra"} {
+		if strings.Contains(recordText(records), private) {
+			t.Fatalf("private TOML field retained in records: %q", private)
+		}
+	}
+}
+
+func TestParsePoetryMarksNonLegacySourcesAndDevelopMutable(t *testing.T) {
+	input := `[[package]]
+name = "directory"
+version = "1.0.0"
+source = { type = "directory", url = "../private-directory" }
+
+[[package]]
+name = "file"
+version = "1.0.0"
+source = { type = "file", url = "https://user:secret@example.invalid/private.whl" }
+
+[[package]]
+name = "url"
+version = "1.0.0"
+source = { type = "url", url = "https://user:secret@example.invalid/private.whl" }
+
+[[package]]
+name = "git"
+version = "1.0.0"
+source = { type = "git", url = "https://user:secret@example.invalid/private.git" }
+
+[[package]]
+name = "develop"
+version = "1.0.0"
+develop = true
+source = { type = "legacy" }
+`
+	records, err := Parse(context.Background(), FormatPoetry, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	for _, record := range records {
+		if record.Provenance.Status != model.ProvenanceMutable || record.Provenance.Integrity != "" {
+			t.Fatalf("record=%+v", record)
+		}
+	}
+	if strings.Contains(recordText(records), "secret") || strings.Contains(recordText(records), "private") {
+		t.Fatalf("mutable source text retained: %+v", records)
+	}
+}
+
+func TestParsePoetryRejectsMalformedEntries(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, input := range []string{
+		"package = []\n",
+		"[[package]]\nversion = \"1.0.0\"\n",
+		"[[package]]\nname = \"Foo\"\nversion = \"1.0.0\"\n[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\nfiles = [{ hash = \"sha256:" + digest + "\" }]\n",
+		"[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nfiles = [{ hash = \"sha256:" + strings.Repeat("a", 63) + "\" }]\n",
+		"[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nfiles = [{ hash = \"\" }]\n",
+	} {
+		if _, err := Parse(context.Background(), FormatPoetry, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("accepted %q: %v", input, err)
+		}
+	}
+}
+
+func TestParseUVClassifiesArtifactHashesAndRedactsLocations(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("b", 64)
+	input := `[[package]]
+name = "Foo__Bar"
+version = "1.2.3"
+source = { registry = "https://user:secret@example.invalid/simple" }
+sdist = { url = "https://user:secret@example.invalid/private.tar.gz", hash = "sha256:` + a + `" }
+
+[[package]]
+name = "multi"
+version = "2.0.0"
+source = { registry = "https://example.invalid/simple" }
+sdist = { url = "https://example.invalid/private.tar.gz", hash = "sha256:` + a + `" }
+wheels = [{ url = "https://example.invalid/private.whl", hash = "sha256:` + b + `" }]
+
+[[package]]
+name = "hashless"
+version = "3.0.0"
+source = { registry = "https://example.invalid/simple" }
+`
+	records, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	want := map[string]struct {
+		status    model.ProvenanceStatus
+		integrity string
+	}{
+		"foo-bar\x001.2.3":  {model.ProvenanceImmutable, "sha256:" + a},
+		"multi\x002.0.0":    {model.ProvenanceUnknown, ""},
+		"hashless\x003.0.0": {model.ProvenanceUnknown, ""},
+	}
+	for _, record := range records {
+		got, ok := want[record.Name+"\x00"+record.Version]
+		if !ok || record.Provenance.Status != got.status || record.Provenance.Integrity != got.integrity {
+			t.Fatalf("record=%+v want=%+v", record, want)
+		}
+	}
+	for _, private := range []string{"https://", "secret", "private.tar", "private.whl"} {
+		if strings.Contains(recordText(records), private) {
+			t.Fatalf("private artifact field retained in records: %q", private)
+		}
+	}
+}
+
+func TestParseUVMarksNonRegistryAndMissingVersionMutable(t *testing.T) {
+	input := `[[package]]
+name = "git"
+version = "1.0.0"
+source = { git = "https://user:secret@example.invalid/private.git" }
+
+[[package]]
+name = "editable"
+version = "1.0.0"
+source = { editable = "../private-editable" }
+
+[[package]]
+name = "virtual"
+version = "1.0.0"
+source = { virtual = "." }
+
+[[package]]
+name = "path"
+version = "1.0.0"
+source = { path = "../private-path" }
+
+[[package]]
+name = "missing-version"
+source = { registry = "https://example.invalid/simple" }
+`
+	records, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	for _, record := range records {
+		if record.Provenance.Status != model.ProvenanceMutable || record.Provenance.Integrity != "" {
+			t.Fatalf("record=%+v", record)
+		}
+	}
+	if strings.Contains(recordText(records), "secret") || strings.Contains(recordText(records), "private") {
+		t.Fatalf("mutable source text retained: %+v", records)
+	}
+}
+
+func TestParseUVRejectsMalformedEntries(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, input := range []string{
+		"package = []\n",
+		"[[package]]\nversion = \"1.0.0\"\nsource = { registry = \"https://example.invalid/simple\" }\n",
+		"[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nsource = []\n",
+		"[[package]]\nname = \"Foo\"\nversion = \"1.0.0\"\nsource = { registry = \"https://example.invalid/simple\" }\n[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\nsource = { registry = \"https://example.invalid/simple\" }\nsdist = { hash = \"sha256:" + digest + "\" }\n",
+		"[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nsource = { registry = \"https://example.invalid/simple\" }\nsdist = { hash = \"sha256:" + strings.Repeat("a", 63) + "\" }\n",
+		"[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nsource = { registry = \"https://example.invalid/simple\" }\nsdist = { hash = \"\" }\n",
+	} {
+		if _, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("accepted %q: %v", input, err)
+		}
+	}
+}
+
+func recordText(records []Record) string {
+	values := make([]string, 0, len(records))
+	for _, record := range records {
+		values = append(values, record.Ecosystem+" "+record.Name+" "+record.Version+" "+record.Provenance.Integrity)
+	}
+	return strings.Join(values, "\n")
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""
