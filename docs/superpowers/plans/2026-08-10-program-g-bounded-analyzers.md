@@ -61,5 +61,5 @@ references, version edges, privacy, determinism, cancellation and concurrency
 under race/repetition. Update docs/audit and run clean release gates. Commit
 `test: prove bounded analyzer boundaries`.
 
-`[EXTERNAL]` production bundle publication remains pending. `[APPLE]`
-signing/notarization remains deferred and is not a dependency.
+`[EXTERNAL]` production bundle publication remains pending. Release
+distribution follows the [unsigned reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

@@ -355,7 +355,7 @@ Opt-in does not imply trust. It means the user accepted execution after SSC Init
 
 The before/after identity check detects replacement but cannot eliminate every same-UID race between verification and process launch. The report states this boundary instead of calling the executable trusted.
 
-macOS code-signature and notarization verification belongs to the next content-evidence specification; this slice does not label an executable trusted merely because its path and hash were recorded.
+Passive macOS signature inspection belongs to the next content-evidence specification; release distribution follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md). This slice does not label an executable trusted merely because its path and hash were recorded.
 
 `doctor` may resolve command availability read-only, but it must not run probes.
 

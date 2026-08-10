@@ -82,5 +82,5 @@ output under race and repetition. Update README, CLAUDE and the audit. Commit
 `test: prove verified bundle lifecycle`, then run the full clean release gate.
 
 `[EXTERNAL]` production public keys, actual signed publication and scheduled
-retrieval remain unverified. `[APPLE]` release signing/notarization remains
-deferred and is not a dependency.
+retrieval remain unverified. Release distribution follows the [unsigned
+reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

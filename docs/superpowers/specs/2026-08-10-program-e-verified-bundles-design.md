@@ -108,5 +108,5 @@ snapshots and `ssc-init.scan.v5` remain unchanged.
 
 Actual production keys, GitHub-hosted publication, scheduled retrieval, and
 key rotation ceremonies require external trust and infrastructure. They do not
-block the verifier, lifecycle manager, fixtures, CLI, or failure tests. Apple
-Developer signing/notarization is unrelated and remains deferred.
+block the verifier, lifecycle manager, fixtures, CLI, or failure tests. Release
+distribution follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).

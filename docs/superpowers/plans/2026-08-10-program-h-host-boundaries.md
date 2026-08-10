@@ -67,5 +67,4 @@ Update README, architecture, audit, plugin validation, privacy, race,
 repetition, clean release gates, and GitHub packaging evidence. Commit
 `test: prove host boundary safety`.
 
-`[APPLE]` Developer ID verification and notarized bootstrap success remain
-deferred. They do not block Tasks 1–11.
+Release distribution follows the [unsigned reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

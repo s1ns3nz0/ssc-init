@@ -71,5 +71,5 @@ deny/allow/exception precedence, privacy, deterministic output, concurrency
 and migration under race/repetition. Update docs/audit and run clean release
 gates. Commit `test: prove finding and reporting boundaries`.
 
-`[EXTERNAL]` production bundle keys/publication remain pending. `[APPLE]`
-signing/notarization remains deferred and is not a dependency.
+`[EXTERNAL]` production bundle keys/publication remain pending. Release
+distribution follows the [unsigned reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

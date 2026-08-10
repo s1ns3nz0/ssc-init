@@ -2,15 +2,10 @@
 
 ## Scope
 
-Program H delivers every host/remediation/scheduling component that can be
-built and proved without Apple credentials. The GitHub distribution channel
-uses an already-installed `ssc-init` binary. Adapters do not download, copy,
-replace, or independently trust a core binary.
-
-`[APPLE]` remains limited to the optional hardened distribution path: proving
-a Developer ID signature/notarization and allowing an adapter to bootstrap a
-supplied core based on that proof. It is not a dependency of the contracts,
-advisory adapters, quarantine engine, or launchd preview/registration logic.
+Program H delivers the host/remediation/scheduling components. The GitHub
+distribution channel uses an already-installed `ssc-init` binary. Adapters do
+not download, copy, replace, or independently trust a core binary. Release
+distribution follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).
 
 ## Safety boundary
 
@@ -72,5 +67,5 @@ works without scheduling.
 6. Launchd preview, registration/removal, and duplicate-host tests.
 7. Integrated remediation choices and final gates.
 
-Production marketplace publication, production bundle publication, and
-`[APPLE]` bootstrap signing/notarization evidence remain external.
+Production marketplace publication and production bundle publication remain
+external.

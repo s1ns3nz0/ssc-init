@@ -89,7 +89,7 @@ Each adapter:
 
 ### 5.2 Core executable
 
-The core executable is named `ssc-init`. It is a signed, notarized macOS Universal Binary built from Go for arm64 and amd64 with `CGO_ENABLED=0`. The MVP has no mandatory external runtime dependencies. Optional developer tools enrich coverage but their absence skips only the corresponding collector.
+The core executable is named `ssc-init`. The historical signed/notarized requirement is superseded by the [Unsigned Reproducible Distribution Design](2026-08-10-unsigned-reproducible-distribution-design.md): the closed official set is the unsigned Universal Binary, the Claude, Codex, and Cursor native adapter ZIP files, `checksums.txt`, `sbom.cdx.json`, and `provenance.json`. The MVP has no mandatory external runtime dependencies. Optional developer tools enrich coverage but their absence skips only the corresponding collector.
 
 Core modules have stable JSON contracts:
 

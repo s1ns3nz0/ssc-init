@@ -162,5 +162,4 @@ git diff --check
 
 ---
 
-`[APPLE]` real release signing/notarization is intentionally outside this plan;
-its scripts and runbook already exist and await credentials only.
+Release distribution follows the [unsigned reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

@@ -2,59 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Implemented decision (2026-08-09):** The shipping container is a signed,
-> notarized, stapled `.dmg`, not the bare Mach-O/online-ticket fallback described
-> in the original Task 11 draft and open decision 1 below. The implemented
-> `scripts/notarize-darwin.sh` creates and signs `ssc-init-darwin.dmg`, submits
-> it, staples and validates the ticket, performs a Gatekeeper assessment, and
-> writes `checksums-notarized.txt`. `docs/release-runbook.md` is the authority
-> for the final artifact set and release ordering.
+> **Superseded distribution direction (2026-08-10):** Developer ID signing,
+> notarization, stapling, and DMG publication are no longer product work. See
+> `docs/superpowers/specs/2026-08-10-unsigned-reproducible-distribution-design.md`.
+> The completed reproducible build and digest/Mach-O verified install lifecycle
+> remain authoritative; obsolete credential commands and artifact names have
+> been removed from this historical plan.
 
-**Goal:** Turn `scripts/build-darwin.sh` from "two unsigned per-arch binaries and a checksum file" into the §5.2/§14 release artifact set (Universal Binary, checksums, SBOM, build provenance, signature, notarization), and turn `~/Library/Application Support/SSC Init/` from "one directory containing `state.db`" into the §5.3 shared installation with versioned core binaries, a current-version pointer, and a §11 stage → verify → health check → atomic switch → rollback lifecycle.
+**Goal:** Produce the Universal Binary, checksums, SBOM, and build provenance, and turn `~/Library/Application Support/SSC Init/` from one directory containing `state.db` into the §5.3 shared installation with versioned core binaries, a current-version pointer, and a §11 stage → verify → health check → atomic switch → rollback lifecycle.
 
-**Architecture:** The release side stays in `scripts/`: `build-darwin.sh` gains a `lipo` step, a CycloneDX SBOM derived from `go version -m`, and an in-toto/SLSA provenance statement — all deterministic, all still produced with no network and no new module. Signing and notarization move to two *separate* scripts (`scripts/sign-darwin.sh`, `scripts/notarize-darwin.sh`) because a Developer ID signature carries an Apple secure timestamp and is therefore inherently non-reproducible: it must not run inside the reproducible build. The install side is a new `internal/install` package operating through `os.Root` on `DataDir`, with `internal/platform` owning the layout and the version-string trust boundary, `internal/cli` + `cmd/ssc-init` exposing `install`/`rollback`, and `internal/doctor` reporting install health.
+**Architecture:** The release side stays in `scripts/`: `build-darwin.sh` gains a `lipo` step, a CycloneDX SBOM derived from `go version -m`, and an in-toto/SLSA provenance statement — all deterministic, all produced with no network and no new module. The install side is a new `internal/install` package operating through `os.Root` on `DataDir`, with `internal/platform` owning the layout and the version-string trust boundary, `internal/cli` + `cmd/ssc-init` exposing `install`/`rollback`, and `internal/doctor` reporting install health.
 
-**Tech Stack:** Go 1.26 standard library only (`os.Root`, `crypto/sha256`, `encoding/json`, `regexp`), POSIX `sh` + `awk` + `shasum`, Apple-provided `/usr/bin/lipo`, `/usr/bin/codesign`, `xcrun notarytool`. No new Go module.
-
-## Blocked vs unblocked
-
-Code signing and notarization require **an Apple Developer ID Application certificate in the login keychain and an Apple ID with an app-specific password stored as a `notarytool` keychain profile**. The user does not have these yet, and enrolment plus certificate issuance has real-world lead time (Apple Developer Program membership, identity verification, certificate request). Nothing else in this program depends on them.
-
-**Status 2026-08-10: Tasks 10–11 are DEFERRED, not merely pending.** The Apple Developer Program is $99/year and there is no free path — Apple issues Developer ID certificates only to paid members, and notarization requires one. Self-signed and ad-hoc signatures do not help: Gatekeeper does not trust them, so a downloaded binary is still blocked. The user has chosen to defer rather than pay while there is no distribution.
-
-What that costs, stated honestly: §5.2's "signed, notarized" requirement is unmet, and §5.3's adapter bootstrap check loses one of its three legs. **The other two legs are already built** — Task 6 verifies the SHA-256 against a caller-supplied expected digest and validates the Mach-O universal structure. In the settled bootstrap model the adapter supplies both the file and the expected digest, and the adapter is first-party, so trust already flows from the adapter rather than from the signature. A signature would additionally protect a user who obtains a release artifact from a third party — which is precisely the distribution channel that does not exist yet.
-
-Until then, distribution avoids Gatekeeper rather than defeating it: `go install`, `git clone && go build`, or a Homebrew formula that builds from source. Do **not** ship unsigned artifacts with instructions to run `xattr -d com.apple.quarantine`; telling users of a supply-chain security tool to strip Gatekeeper is self-defeating and trains the exact behaviour this product exists to surface.
-
-Revisit when publishing real releases. Nothing else in the roadmap is blocked by this except Program H, which needs the adapters that §5.3 gates on signature verification.
-
-| Task | Blocked on Developer ID? |
-|---|---|
-| 1 Universal binary via `lipo` | No |
-| 2 CycloneDX SBOM | No |
-| 3 Build provenance statement | No |
-| 4 First CI workflow on macOS | No |
-| 5 Versioned install layout and version trust boundary | No |
-| 6 Stage and verify a core version | No |
-| 7 Atomic switch, previous known-good, rollback | No |
-| 8 `install` / `rollback` commands | No |
-| 9 `doctor` install health (`ssc-init.doctor.v2`) | No |
-| 10 `codesign` the Universal Binary | **Yes** — except its fail-closed path, which is tested now |
-| 11 Notarization submission | **Yes** — except its fail-closed path, which is tested now |
-| 12 Release runbook | No to write; the §10–11 sections cannot be *executed* until the certificate exists |
-
-Execute 1 → 12 in order. Tasks 10 and 11 are written, committed, and their fail-closed behaviour tested without any credential; only their success paths wait. Do not reorder 10/11 ahead of 12 if the certificate has not arrived — Task 12 documents them as pending and is amended once they are exercised.
-
-**How the signing tasks are verified.** `codesign` and `notarytool` cannot run in CI (no secrets, no keychain) and cannot run locally without the certificate. Both scripts are therefore split into a *testable* half and a *manual* half:
-
-- Testable now, in CI, with no credential: the script must fail closed with an exact, value-free message naming the missing credential and must not produce, mutate, or truncate any artifact before failing. Task 10 and Task 11 each write a real Go test for this in `scripts/`.
-- Manual, by the user, once the certificate exists: the exact commands and the exact expected output are recorded in the Task 12 runbook (`codesign --verify --strict --verbose=2`, `xcrun notarytool log`, `spctl -a -vvv -t open --context context:primary-signature`). The runbook is amended with the observed output the first time a real release is signed.
+**Tech Stack:** Go 1.26 standard library only (`os.Root`, `crypto/sha256`, `encoding/json`, `regexp`), POSIX `sh` + `awk` + `shasum`, and Apple-provided `/usr/bin/lipo`. No new Go module.
 
 ## Global constraints (release-blocking)
 
-- `CGO_ENABLED=0`, Darwin arm64 + amd64, no mandatory external runtime. `lipo`, `codesign`, and `notarytool` are *build-host* tools, never runtime dependencies of `ssc-init`.
+- `CGO_ENABLED=0`, Darwin arm64 + amd64, no mandatory external runtime. `lipo` is a *build-host* tool, never a runtime dependency of `ssc-init`.
 - No new Go module. `go.mod` must be unchanged by this program.
-- The unsigned build is byte-for-byte reproducible: two consecutive `sh scripts/build-darwin.sh` runs on one machine must produce identical bytes for **every** file in `dist/`. Signing happens outside that boundary — verified below: two ad-hoc `codesign` runs over identical input produce different digests, so a signature in `build-darwin.sh` would break the reproducibility test permanently.
+- The release build is byte-for-byte reproducible: two consecutive `sh scripts/build-darwin.sh` runs on one machine must produce identical bytes for **every** file in `dist/`.
 - The clean-tracked-worktree gate and its exact message `release build requires a clean worktree` stay. No new failure message may leak a filename or path.
 - Version selection is unchanged: exact `v[0-9]*` tag with a safe character set wins, everything else is `dev+git.<40-hex>`.
 - Every existing expectation in `scripts/build-darwin_test.go` keeps holding unless a task explicitly and minimally amends it; amendments are stated in full in the task.
@@ -1246,255 +1211,6 @@ git commit -m "feat: report installation health in doctor"
 
 ---
 
-### Task 10 (BLOCKED on Developer ID): sign the Universal Binary
-
-**Files:**
-- Create: `scripts/sign-darwin.sh`
-- Create: `scripts/sign-darwin_test.go`
-
-**Blocked on:** a `Developer ID Application: <name> (<team id>)` certificate and private key in the login keychain, from an active Apple Developer Program membership.
-
-**Why this is a separate script and not part of `build-darwin.sh`:** measured on this machine, two ad-hoc `codesign` runs over byte-identical input produced different digests (`14415f75…` vs `9b4efff2…`). A real Developer ID signature is worse — `--timestamp` embeds an Apple-issued RFC 3161 timestamp, so the signed artifact is non-reproducible **by design**. Putting `codesign` inside `build-darwin.sh` would make `TestBuildScriptWorksOutsideRepositoryAndIsReproducible` fail forever. The reproducible build and the signature are two separate, independently verifiable facts: `checksums.txt` + `provenance.json` attest to the reproducible bytes, `checksums-signed.txt` attests to what users download.
-
-- [ ] **Step 1: Write the failing test**
-
-Create `scripts/sign-darwin_test.go`:
-
-```go
-func TestSignScriptFailsClosedWithoutAnIdentity(t *testing.T) {
-	repositoryRoot := repositoryRoot(t)
-	script := filepath.Join(repositoryRoot, "scripts", "sign-darwin.sh")
-	distribution := t.TempDir()
-	artifact := filepath.Join(distribution, "ssc-init-darwin-universal")
-	if err := os.WriteFile(artifact, []byte("not-really-a-binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(artifact)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	command := exec.Command("sh", script)
-	command.Dir = t.TempDir()
-	command.Env = append(environmentWith("SSC_INIT_DIST_DIR", distribution), "SSC_INIT_SIGNING_IDENTITY=")
-	output, err := command.CombinedOutput()
-	if err == nil {
-		t.Fatalf("sign script ran without an identity:\n%s", output)
-	}
-	if got := strings.TrimSpace(string(output)); got != "SSC_INIT_SIGNING_IDENTITY is not set; a Developer ID Application identity is required to sign" {
-		t.Fatalf("unexpected or leaking error %q", got)
-	}
-	after, err := os.ReadFile(artifact)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("sign script modified the artifact before failing closed")
-	}
-	if _, err := os.Stat(filepath.Join(distribution, "checksums-signed.txt")); !os.IsNotExist(err) {
-		t.Fatal("sign script produced a signed checksum file without signing")
-	}
-}
-
-func TestSignScriptFailsClosedWithoutAnArtifact(t *testing.T) {
-	// Same shape, with SSC_INIT_SIGNING_IDENTITY set to a value and an empty
-	// dist directory: expect exactly
-	// "universal binary not found; run scripts/build-darwin.sh first".
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `go test ./scripts -run TestSignScript -count=1`
-
-Expected: FAIL — `fork/exec …/scripts/sign-darwin.sh: no such file or directory`.
-
-- [ ] **Step 3: Implement**
-
-Create `scripts/sign-darwin.sh`:
-
-```sh
-#!/bin/sh
-set -eu
-
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-REPOSITORY_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
-DIST_DIR=${SSC_INIT_DIST_DIR:-$REPOSITORY_ROOT/dist}
-UNIVERSAL="$DIST_DIR/ssc-init-darwin-universal"
-BUNDLE_IDENTIFIER=${SSC_INIT_BUNDLE_IDENTIFIER:-dev.sscinit.core}
-
-if [ -z "${SSC_INIT_SIGNING_IDENTITY:-}" ]; then
-	echo "SSC_INIT_SIGNING_IDENTITY is not set; a Developer ID Application identity is required to sign" >&2
-	exit 1
-fi
-
-if [ ! -f "$UNIVERSAL" ]; then
-	echo "universal binary not found; run scripts/build-darwin.sh first" >&2
-	exit 1
-fi
-
-codesign \
-	--sign "$SSC_INIT_SIGNING_IDENTITY" \
-	--identifier "$BUNDLE_IDENTIFIER" \
-	--options runtime \
-	--timestamp \
-	--force \
-	"$UNIVERSAL"
-
-codesign --verify --strict --verbose=2 "$UNIVERSAL"
-
-cd "$REPOSITORY_ROOT"
-shasum -a 256 "$UNIVERSAL" | sed "s|$DIST_DIR/|dist/|" > "$DIST_DIR/checksums-signed.txt"
-```
-
-Flag notes that are load-bearing rather than decorative:
-- `--options runtime` enables the hardened runtime. Notarization (Task 11) **rejects** submissions without it, so omitting it here fails a step later with a much worse error message.
-- `--timestamp` requests Apple's secure timestamp. Without it, the signature stops validating when the certificate expires. It requires network access at signing time.
-- `--identifier` pins the signing identifier; without it `codesign` derives one from the file name (the existing ad-hoc signature shows `Identifier=a.out`).
-- The `sed` keeps `checksums-signed.txt` in the same repository-relative form as `checksums.txt` and, more importantly, keeps the build host's absolute path out of a published file.
-
-Add `scripts/sign-darwin.sh` to the CI workflow's static gates in `.github/workflows/ci.yml` only via `go test ./scripts` — do not add a CI step that invokes it.
-
-- [ ] **Step 4: Run it to verify it passes**
-
-Run: `go test ./scripts -run TestSignScript -count=1`
-
-Expected: PASS. This exercises only the fail-closed path — which is the whole point of the test.
-
-**Manual verification, once the certificate exists** (record the output in the Task 12 runbook):
-
-```sh
-security find-identity -v -p codesigning        # must list a "Developer ID Application" identity
-SSC_INIT_SIGNING_IDENTITY="Developer ID Application: <name> (<team>)" sh scripts/sign-darwin.sh
-codesign --verify --strict --verbose=2 dist/ssc-init-darwin-universal
-codesign -dv --verbose=4 dist/ssc-init-darwin-universal 2>&1 | grep -E 'Authority|TeamIdentifier|Timestamp|flags'
-```
-
-Expected: `valid on disk`, `satisfies its Designated Requirement`, an `Authority=Developer ID Certification Authority` chain, a non-empty `Timestamp=`, and `flags=0x10000(runtime)`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/sign-darwin.sh scripts/sign-darwin_test.go
-git commit -m "feat: sign the universal binary with a developer id identity
-
-The success path cannot run until an Apple Developer ID Application
-certificate exists; the fail-closed path is tested."
-```
-
----
-
-### Task 11 (BLOCKED on Developer ID): notarization submission
-
-**Files:**
-- Create: `scripts/notarize-darwin.sh`
-- Create: `scripts/notarize-darwin_test.go`
-
-**Blocked on:** Task 10's signature plus an Apple ID with an app-specific password stored as a `notarytool` keychain profile:
-
-```sh
-xcrun notarytool store-credentials ssc-init-notary \
-	--apple-id <apple-id> --team-id <team-id> --password <app-specific-password>
-```
-
-**A hard Apple constraint to design around:** `xcrun stapler staple` works on `.app` bundles, `.dmg`, `.pkg`, and `.kext` — **not** on a bare Mach-O executable and not on a `.zip`. There is therefore no way to attach an offline notarization ticket to `ssc-init-darwin-universal` as a bare binary. Two consequences, both of which the runbook must state plainly rather than paper over:
-
-1. Notarization still happens, and Gatekeeper still finds the ticket — by online lookup against Apple's service, keyed on the signature's CDHash.
-2. Offline first-run verification is only possible if the binary ships inside a stapled container. Whether to build one is the open decision recorded at the end of this plan.
-
-- [ ] **Step 1: Write the failing test**
-
-`scripts/notarize-darwin_test.go`, same shape as Task 10:
-
-```go
-func TestNotarizeScriptFailsClosedWithoutAKeychainProfile(t *testing.T)
-// Expect exactly:
-// "SSC_INIT_NOTARY_PROFILE is not set; run xcrun notarytool store-credentials first"
-// and assert no .zip was produced.
-
-func TestNotarizeScriptFailsClosedOnAnUnsignedArtifact(t *testing.T)
-// With the profile variable set and an unsigned artifact present, expect exactly:
-// "universal binary is not signed; run scripts/sign-darwin.sh first"
-```
-
-The second test is runnable now and is worth having: it exercises the real `codesign --verify` on an unsigned file, which is precisely the state of `dist/ssc-init-darwin-universal` after Task 1.
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `go test ./scripts -run TestNotarizeScript -count=1`
-
-Expected: FAIL — `no such file or directory`.
-
-- [ ] **Step 3: Implement**
-
-```sh
-#!/bin/sh
-set -eu
-
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-REPOSITORY_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
-DIST_DIR=${SSC_INIT_DIST_DIR:-$REPOSITORY_ROOT/dist}
-UNIVERSAL="$DIST_DIR/ssc-init-darwin-universal"
-ARCHIVE="$DIST_DIR/ssc-init-darwin-universal.zip"
-
-if [ -z "${SSC_INIT_NOTARY_PROFILE:-}" ]; then
-	echo "SSC_INIT_NOTARY_PROFILE is not set; run xcrun notarytool store-credentials first" >&2
-	exit 1
-fi
-
-if [ ! -f "$UNIVERSAL" ]; then
-	echo "universal binary not found; run scripts/build-darwin.sh first" >&2
-	exit 1
-fi
-
-if ! codesign --verify --strict "$UNIVERSAL" >/dev/null 2>&1; then
-	echo "universal binary is not signed; run scripts/sign-darwin.sh first" >&2
-	exit 1
-fi
-
-rm -f "$ARCHIVE"
-ditto -c -k --keepParent "$UNIVERSAL" "$ARCHIVE"
-
-xcrun notarytool submit "$ARCHIVE" \
-	--keychain-profile "$SSC_INIT_NOTARY_PROFILE" \
-	--wait
-
-# A bare Mach-O executable cannot be stapled (stapler supports .app, .dmg,
-# .pkg, .kext only). Gatekeeper resolves the ticket online instead; this
-# assessment is the closest local confirmation available.
-spctl --assess -vvv --type open --context context:primary-signature "$UNIVERSAL"
-```
-
-`ditto -c -k --keepParent` is the archive form Apple documents for notarizing standalone executables; a `zip(1)` archive does not reliably preserve the metadata `notarytool` expects.
-
-- [ ] **Step 4: Run it to verify it passes**
-
-Run: `go test ./scripts -run TestNotarizeScript -count=1`
-
-Expected: PASS (fail-closed paths only).
-
-**Manual verification, once credentials exist:**
-
-```sh
-SSC_INIT_NOTARY_PROFILE=ssc-init-notary sh scripts/notarize-darwin.sh
-xcrun notarytool history --keychain-profile ssc-init-notary | head
-xcrun notarytool log <submission-id> --keychain-profile ssc-init-notary
-```
-
-Expected: `status: Accepted`, an empty `issues` array in the log, and `spctl` reporting `accepted` with `source=Notarized Developer ID`. If `notarytool` reports `Invalid`, the log's `issues[].message` names the cause; the two likely ones for this artifact are a missing hardened runtime (Task 10's `--options runtime`) and a missing secure timestamp (`--timestamp`).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/notarize-darwin.sh scripts/notarize-darwin_test.go
-git commit -m "feat: notarize the signed universal binary
-
-Stapling is not possible for a bare Mach-O executable; Gatekeeper resolves
-the ticket online. The success path awaits Apple credentials."
-```
-
----
-
 ### Task 12: Release runbook
 
 **Files:**
@@ -1502,7 +1218,7 @@ the ticket online. The success path awaits Apple credentials."
 - Modify: `README.md` (installation section only, and only if it is not concurrently held by another program)
 - Modify: `CLAUDE.md`
 
-The program is not done when the scripts exist; it is done when a person can cut a release without rediscovering the ordering, and when the parts that are still blocked say so out loud instead of looking finished.
+The program is not done when the implementation exists; it is done when a person can cut a release without rediscovering the ordering.
 
 - [ ] **Step 1: Write `docs/release-runbook.md`**
 
@@ -1510,16 +1226,15 @@ It must contain, in this order, with the exact commands:
 
 1. **Preconditions.** Clean tracked worktree; `go mod verify`; full gate `go test -race -count=1 ./...`; the annotated tag `git tag -a vX.Y.Z -m vX.Y.Z` created *before* building, because the build script versions from the exact tag and an untagged build silently produces `dev+git.<sha>`.
 2. **Reproducible build.** `go mod download && sh scripts/build-darwin.sh`, producing `dist/ssc-init-darwin-{amd64,arm64,universal}`, `checksums.txt`, `sbom.cdx.json`, `provenance.json`. Note that a second run must yield identical bytes and that `go test ./scripts -count=1` proves it.
-3. **Signing (blocked until the Developer ID certificate exists).** Task 10's commands and expected `codesign` output. State clearly that the signed artifact is *not* byte-reproducible and that `checksums.txt` describes the pre-signature build while `checksums-signed.txt` describes what users verify.
-4. **Notarization (blocked).** Task 11's commands, expected `Accepted` status, and the explicit statement that no ticket is stapled to the bare binary.
-5. **Publish.** Which files ship: the universal binary, `checksums.txt`, `checksums-signed.txt`, `sbom.cdx.json`, `provenance.json`. The thin per-arch slices are build intermediates and diagnostic aids, not the shipping artifact.
-6. **Consumer verification.** What an adapter or a user runs before trusting a download: `shasum -a 256 -c checksums-signed.txt`, `codesign --verify --strict --verbose=2`, `spctl --assess -vvv --type open --context context:primary-signature`.
-7. **Install and rollback.** `ssc-init install --from <path> --version vX.Y.Z --sha256 <digest> --json`, `ssc-init doctor --json` to read install health, `ssc-init rollback --json` to return to the last known-good. State §5.3's rule explicitly: uninstalling an adapter must never remove `state.db`, bundles, reports, or quarantine, and neither `install` nor `rollback` touches them.
-8. **Known gaps.** No git remote, so `.github/workflows/ci.yml` has never executed. No Developer ID, so steps 3 and 4 have never executed. No stapled container. Each gap names what unblocks it.
+3. **Publish.** The Universal Binary, Claude/Codex/Cursor native adapter ZIPs, `checksums.txt`, `sbom.cdx.json`, and `provenance.json` ship. The thin per-arch slices remain build intermediates and diagnostic aids.
+4. **Consumer verification.** Download the complete checksum subject set into one directory, run `shasum -a 256 -c checksums.txt`, and inspect the SBOM and provenance statement.
+5. **Install and rollback.** `ssc-init install --from <path> --version vX.Y.Z --sha256 <digest> --json`, `ssc-init doctor --json` to read install health, `ssc-init rollback --json` to return to the last known-good. State §5.3's rule explicitly: uninstalling an adapter must never remove `state.db`, bundles, reports, or quarantine, and neither `install` nor `rollback` touches them.
+6. **Known gaps.** No git remote, so `.github/workflows/ci.yml` has never executed.
 
-- [ ] **Step 2: Verify every unblocked command in the runbook by running it**
+- [ ] **Step 2: Verify every command in the runbook by running it**
 
-Cut a throwaway tag, run the full sequence through step 2 and step 7, then delete the tag:
+Cut a throwaway tag, run the reproducible build and install/rollback checks,
+then delete the tag:
 
 ```sh
 git tag -a v0.0.0-runbook-check -m runbook-check
@@ -1542,7 +1257,7 @@ Note that `v0.0.0-runbook-check` is accepted by `ValidInstallVersion` (v-prefixe
 
 - [ ] **Step 3: Update `CLAUDE.md`**
 
-Record: the release artifact set and that signing/notarization live outside the reproducible build and why; that the doctor contract is now `ssc-init.doctor.v2`; that `internal/install` is the only place SSC Init executes a binary by default and that it is never on a scan path; that the current-version pointer is a file, not a symlink, and is re-validated on every read.
+Record: the closed release artifact set; that the doctor contract is now `ssc-init.doctor.v2`; that `internal/install` is the only place SSC Init executes a binary by default and that it is never on a scan path; that the current-version pointer is a file, not a symlink, and is re-validated on every read.
 
 - [ ] **Step 4: Full gate**
 
@@ -1565,16 +1280,13 @@ git commit -m "docs: add the release runbook"
 
 ---
 
-## Decisions the controller should confirm before implementation starts
+## Historical implementation decisions
 
-1. **Stapling and the shipping container.** §5.3 says adapters may bundle the executable in a plugin `bin/` directory, which implies a bare Mach-O. A notarization ticket cannot be stapled to a bare Mach-O, so a machine with no network cannot verify notarization on first run. Options: (a) accept online-only ticket resolution, which this plan assumes; (b) additionally build, sign, notarize, and staple a `.dmg` or `.pkg`, adding a task after 11. The design does not say which, and (b) is a real amount of extra work.
+The distribution decisions are superseded by the notice above. These
+non-distribution choices remain part of the implementation record:
 
-2. **Current-version pointer: file vs symlink.** §5.3 says "a current-version pointer" without specifying the mechanism. This plan uses a pointer *file* because every other subsystem refuses to follow symlinks, but a symlink would give adapters a stable executable path (`core/current/ssc-init`) instead of requiring them to read a file and then build a path. If adapter ergonomics outrank the no-symlink consistency, Task 5 and Task 7 change shape.
+1. **Current-version pointer: file vs symlink.** §5.3 says "a current-version pointer" without specifying the mechanism. This plan uses a pointer *file* because every other subsystem refuses to follow symlinks, but a symlink would give adapters a stable executable path (`core/current/ssc-init`) instead of requiring them to read a file and then build a path. If adapter ergonomics outrank the no-symlink consistency, Task 5 and Task 7 change shape.
 
-3. **Which artifact `checksums.txt` describes after signing.** This plan keeps `checksums.txt` as the record of the *reproducible, unsigned* build and adds `checksums-signed.txt` for the shipped artifact, because signing mutates the universal binary in place. The alternative is signing a copy under a distinct name. The design says a release produces "checksums, signatures, SBOM, and build provenance" without resolving this.
+2. **`install --from` accepts an absolute path from the caller.** No adapters exist yet, so nothing constrains where a staged binary comes from. The plan validates that the path is absolute and a regular file, hashes it against a caller-supplied digest, and never persists or echoes it. If the intended model is instead "the adapter hands over an already-verified file descriptor" or "the core downloads a pinned release itself," Task 6 and Task 8 change shape — and the download path would add the first network access in the product, which needs its own decision.
 
-4. **Provenance subject scope.** This plan's `provenance.json` attests to the unsigned build outputs, so a third party can reproduce and confirm the digests. It therefore does *not* cover the signed artifact. If provenance is expected to describe what users actually download, it must be regenerated after signing — at which point it is no longer independently reproducible.
-
-5. **`install --from` accepts an absolute path from the caller.** No adapters exist yet, so nothing constrains where a staged binary comes from. The plan validates that the path is absolute and a regular file, hashes it against a caller-supplied digest, and never persists or echoes it. If the intended model is instead "the adapter hands over an already-verified file descriptor" or "the core downloads a pinned release itself" (§5.3 mentions bootstrap after checksum, project-signature, and code-signing verification), Task 6 and Task 8 change shape — and the download path would add the first network access in the product, which needs its own decision.
-
-6. **`ssc-init.doctor.v2`.** Task 9 adds an `install` object to the doctor payload and bumps the schema version. If any adapter contract or fixture is expected to pin `v1`, that must be resolved first; `grep -rn "ssc-init.doctor.v1"` is the check.
+3. **`ssc-init.doctor.v2`.** Task 9 adds an `install` object to the doctor payload and bumps the schema version. If any adapter contract or fixture is expected to pin `v1`, that must be resolved first; `grep -rn "ssc-init.doctor.v1"` is the check.

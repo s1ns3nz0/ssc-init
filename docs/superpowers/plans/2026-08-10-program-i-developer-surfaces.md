@@ -100,5 +100,4 @@ git diff --check
 Commit `test: prove bounded developer surface inventory`, then run
 `go test ./scripts -count=1` on the clean worktree.
 
-`[APPLE]` real release signing/notarization remains deferred and is not a
-dependency of this plan.
+Release distribution follows the [unsigned reproducible contract](../specs/2026-08-10-unsigned-reproducible-distribution-design.md).

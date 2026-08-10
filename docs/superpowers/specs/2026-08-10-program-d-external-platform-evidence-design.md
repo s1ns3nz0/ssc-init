@@ -154,5 +154,6 @@ Program D is complete only when tests prove:
 - `[TI]` registry/advisory correlation and signed bundles;
 - `[FINDINGS]` severity, warnings and verdicts;
 - `[DEEP]` archive/native/WASM code analysis;
-- `[HOST]` pre-execution enforcement;
-- `[APPLE]` real Developer ID signing and notarization of the release artifact.
+- `[HOST]` pre-execution enforcement.
+
+Release distribution follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).

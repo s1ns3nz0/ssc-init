@@ -60,8 +60,7 @@ This sub-project does not:
 - inspect archive members or dependency graphs;
 - query registries, marketplaces, Git hosting, TI feeds, or organization APIs;
 - run Docker, package managers, `codesign`, `spctl`, or any other new command;
-- validate a publisher, signature, notarization ticket, SBOM, or build
-  attestation;
+- validate publisher trust, release signatures, SBOMs, or build attestations;
 - hash complete project source trees, personal directories, caches, mounted
   volumes, or unsupported catalog locations;
 - add policy, warnings, blocking, quarantine, host adapters, or background

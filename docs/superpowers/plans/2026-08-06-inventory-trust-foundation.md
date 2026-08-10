@@ -19,7 +19,7 @@
 - All filesystem reads, hashes, directory walks, command output, timeouts, symlink chains, target expansions, and concurrency remain bounded.
 - A collector reports `complete` only when each applicable catalog target is `complete` or `not_present`; unsupported, unavailable, and partial targets force partial coverage.
 - Implementation is TDD: observe RED before production code, run focused GREEN, run the full package regression, then commit each task.
-- Do not merge, push, sign, notarize, add TI, add policy, or add blocking behavior in this plan.
+- Do not merge, push, add release-distribution work, add TI, add policy, or add blocking behavior in this plan.
 
 ## File Structure
 

@@ -180,7 +180,7 @@ Other documented but unrepresented variants include `CLAUDE_CONFIG_DIR`, Cursor'
 
 Linux runtime was not exercised because the host has no local Linux VM/QEMU runner. The source has no non-Darwin runtime guard, so a Linux build can create the macOS-style `$HOME/Library/Application Support/SSC Init` state path and produce an incomplete inventory that appears supported. Linux and Windows must remain explicitly unsupported until platform-specific collectors, state semantics, tests, and release gates exist.
 
-The release currently contains two thin Mach-O binaries, not one Universal Binary. Signing and notarization are not part of this foundation.
+The release currently contains two thin Mach-O binaries, not one Universal Binary. Those historical distribution assumptions are superseded by the [unsigned reproducible contract](../superpowers/specs/2026-08-10-unsigned-reproducible-distribution-design.md).
 
 ## Existing automated coverage
 

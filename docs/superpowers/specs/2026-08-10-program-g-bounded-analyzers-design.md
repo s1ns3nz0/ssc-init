@@ -61,5 +61,5 @@ or `needs-review`. No heuristic alone blocks.
 
 WASM/native semantic inspection, archive recursion, whole-program data flow,
 registry retrieval, model review and host enforcement remain outside Program
-G. Production bundle keys/publication remain external. Apple signing and
-notarization remain deferred and unrelated.
+G. Production bundle keys/publication remain external. Release distribution
+follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).

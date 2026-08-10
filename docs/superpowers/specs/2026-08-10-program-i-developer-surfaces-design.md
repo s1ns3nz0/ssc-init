@@ -112,6 +112,6 @@ Program I is complete when tests prove:
 
 ## 8. Deferred boundaries
 
-`[APPLE]` release signing/notarization, `[TI]`, findings, deep analysis,
-organization reporting, launchd scheduling, enforcement and host adapters
-remain outside Program I.
+`[TI]`, findings, deep analysis, organization reporting, launchd scheduling,
+enforcement and host adapters remain outside Program I. Release distribution
+follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).

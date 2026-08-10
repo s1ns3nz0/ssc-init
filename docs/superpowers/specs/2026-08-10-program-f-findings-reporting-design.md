@@ -96,5 +96,5 @@ visible and reduce confidence but do not block personal use. Invalid active
 bundle state produces no findings and never falls back to unverified bytes.
 Organization policy is inactive unless the active policy bundle verifies.
 
-Production keys/publication and network retrieval remain external. Apple
-Developer signing/notarization remains deferred and unrelated.
+Production keys/publication and network retrieval remain external. Release
+distribution follows the [unsigned reproducible contract](2026-08-10-unsigned-reproducible-distribution-design.md).

@@ -42,7 +42,7 @@ not an EDR and does not claim a malware verdict or safety guarantee.
 
 This sub-project establishes deterministic local evidence only. TI feeds,
 analyzers, organization Git/YAML policy, warnings/blocking, Claude/Codex/Cursor
-host adapters, signing/notarization, and behavioral monitoring remain outside
+host adapters, release distribution, and behavioral monitoring remain outside
 Tasks 1–14. Do not silently widen this branch into those later layers.
 
 Security invariants already implemented and expected to remain true:
