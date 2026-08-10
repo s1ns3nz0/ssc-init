@@ -1,4 +1,4 @@
-package projects_test
+package projects
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
 	"github.com/s1ns3nz0/ssc-init/internal/evidence"
 	"github.com/s1ns3nz0/ssc-init/internal/inventory"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -21,11 +20,11 @@ func TestProjectCollectorDiscoversManifestEvidenceAtConfiguredRoot(t *testing.T)
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
 	writeProjectFile(t, filepath.Join(root, "package.json"), `{"name":"fixture"}`)
-	roots, err := projects.ResolveRoots(home, []string{root})
+	roots, err := ResolveRoots(home, []string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	result, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +142,125 @@ func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testin
 	}
 }
 
+func TestProjectCollectorCollectsPythonLockfileProvenance(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	for name, contents := range validPythonLockfiles() {
+		writeProjectFile(t, filepath.Join(root, name), contents)
+	}
+	result := collectProjectsAt(t, home, root)
+	graph := inventory.Build([]model.CollectorResult{result})
+
+	want := map[string]string{
+		"pkg:pypi/requirements-demo@1.0.0": "requirements.txt",
+		"pkg:pypi/pipfile-demo@2.0.0":      "Pipfile.lock",
+		"pkg:pypi/poetry-demo@3.0.0":       "poetry.lock",
+		"pkg:pypi/uv-demo@4.0.0":           "uv.lock",
+	}
+	assets := make(map[string]model.Asset, len(graph.Assets))
+	for _, asset := range graph.Assets {
+		assets[asset.ID] = asset
+	}
+	for packageID, lockfileName := range want {
+		packageAsset, found := assets[packageID]
+		if !found || packageAsset.Provenance == nil || packageAsset.Provenance.Status != model.ProvenanceImmutable {
+			t.Fatalf("package %q asset=%+v", packageID, packageAsset)
+		}
+		declaredBy := false
+		for _, relationship := range graph.Relationships {
+			if relationship.From == packageID && relationship.Kind == model.RelationshipDeclaredBy && assets[relationship.To].Name == lockfileName && assets[relationship.To].Source == "project-lockfile" {
+				declaredBy = true
+			}
+		}
+		if !declaredBy {
+			t.Fatalf("package %q has no declared-by edge to %q: %+v", packageID, lockfileName, graph.Relationships)
+		}
+	}
+	if len(graph.Assets) != 9 || len(graph.Observations) != 9 {
+		t.Fatalf("assets=%+v observations=%+v", graph.Assets, graph.Observations)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 4 || collection.Coverage.Status != model.CoverageComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+	for _, record := range collection.Evidence {
+		if record.Status != model.EvidenceComplete {
+			t.Fatalf("record=%+v", record)
+		}
+	}
+}
+
+func TestProjectCollectorKeepsValidUVProvenanceWhenPipfileIsMalformed(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "Pipfile.lock"), `{"default":`)
+	writeProjectFile(t, filepath.Join(root, "uv.lock"), validPythonLockfiles()["uv.lock"])
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoveragePartial || len(result.Errors) != 1 || result.Errors[0].Code != "provenance_malformed" {
+		t.Fatalf("result=%+v", result)
+	}
+	for _, asset := range result.Assets {
+		if asset.ID == "pkg:pypi/uv-demo@4.0.0" && asset.Provenance != nil && asset.Provenance.Status == model.ProvenanceImmutable {
+			collection := collectProjectEvidence(t, home, result)
+			if len(collection.Evidence) == 2 && collection.Coverage.Status == model.CoverageComplete && collection.Evidence[0].Status == model.EvidenceComplete && collection.Evidence[1].Status == model.EvidenceComplete {
+				return
+			}
+			t.Fatalf("collection=%+v", collection)
+		}
+	}
+	t.Fatalf("valid uv package was not retained: %+v", result.Assets)
+}
+
+func TestProjectCollectorRejectsPythonLockfileIdentityDrift(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	lockfile := filepath.Join(root, "uv.lock")
+	replacement := filepath.Join(home, "replacement-uv.lock")
+	writeProjectFile(t, lockfile, validPythonLockfiles()["uv.lock"])
+	writeProjectFile(t, filepath.Join(root, "requirements.txt"), validPythonLockfiles()["requirements.txt"])
+	writeProjectFile(t, replacement, `[[package]]
+name = "replacement-demo"
+version = "9.9.9"
+source = { registry = "https://example.invalid/simple" }
+sdist = { hash = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }
+`)
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectCollector := &projectCollector{roots: roots, limits: defaultWalkLimits()}
+	projectCollector.beforeEvidenceHash = func(relative string) {
+		if relative != "uv.lock" {
+			return
+		}
+		if err := os.Rename(lockfile, lockfile+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, lockfile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := projectCollector.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retainedSafePackage bool
+	for _, asset := range result.Assets {
+		retainedSafePackage = retainedSafePackage || asset.ID == "pkg:pypi/requirements-demo@1.0.0"
+		if asset.ID == "pkg:pypi/uv-demo@4.0.0" || asset.ID == "pkg:pypi/replacement-demo@9.9.9" {
+			t.Fatalf("identity-changed lockfile emitted package: %+v", asset)
+		}
+	}
+	if !retainedSafePackage {
+		t.Fatalf("safe sibling package was not retained: %+v", result.Assets)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	bySubject := evidenceBySubject(collection.Evidence)
+	if len(collection.Evidence) != 2 || collection.Coverage.Status != model.CoveragePartial || bySubject["project-lockfile:uv.lock"].Status != model.EvidenceUnavailable {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
 func TestMalformedLockfileKeepsEvidenceAndMarksProvenancePartial(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
@@ -172,6 +290,8 @@ func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 			contents = `{"packages":{}}`
 		case "go.sum", "Cargo.lock":
 			contents = ""
+		case "requirements.txt", "Pipfile.lock", "poetry.lock", "uv.lock":
+			contents = validPythonLockfiles()[name]
 		}
 		writeProjectFile(t, filepath.Join(root, name), contents)
 	}
@@ -179,8 +299,22 @@ func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 		writeProjectFile(t, filepath.Join(root, name), "must not be evidence")
 	}
 	result := collectProjectsAt(t, home, root)
-	if len(result.Assets) != 1 || len(result.Observations) != 1 || len(result.LocalEvidenceTargets) != len(names) {
+	if len(result.Assets) != 9 || len(result.Observations) != 9 || len(result.LocalEvidenceTargets) != len(names) {
 		t.Fatalf("assets=%+v observations=%+v targets=%+v", result.Assets, result.Observations, result.LocalEvidenceTargets)
+	}
+	var projectAssetID, projectObservationID string
+	for _, asset := range result.Assets {
+		if asset.Type == model.AssetProject && asset.Name == "project" && asset.Source == "" {
+			projectAssetID = asset.ID
+		}
+	}
+	for _, observation := range result.Observations {
+		if observation.AssetID == projectAssetID {
+			projectObservationID = observation.ID
+		}
+	}
+	if projectAssetID == "" || projectObservationID == "" {
+		t.Fatalf("assets=%+v observations=%+v", result.Assets, result.Observations)
 	}
 	wantTargets := make(map[string]struct{}, len(names))
 	for _, name := range names {
@@ -191,7 +325,7 @@ func TestProjectCollectorEmitsCompleteExactCatalogForOneProject(t *testing.T) {
 		wantTargets[prefix+name] = struct{}{}
 	}
 	for _, target := range result.LocalEvidenceTargets {
-		if _, ok := wantTargets[target.TargetID]; !ok || target.Subject != projectEvidenceSubjectForTest(filepath.Base(target.RelativePath)) || target.ObservationID != result.Observations[0].ID || target.AssetID != result.Assets[0].ID {
+		if _, ok := wantTargets[target.TargetID]; !ok || target.Subject != projectEvidenceSubjectForTest(filepath.Base(target.RelativePath)) || target.ObservationID != projectObservationID || target.AssetID != projectAssetID {
 			t.Fatalf("unexpected target=%+v", target)
 		}
 		delete(wantTargets, target.TargetID)
@@ -311,10 +445,14 @@ func TestEveryProjectCatalogFileMutationChangesOnlyItsEvidence(t *testing.T) {
 			if name == sibling {
 				sibling = "requirements.txt"
 			}
-			writeProjectFile(t, path, "before")
+			before, after := "before", "after"
+			if name == "requirements.txt" {
+				before, after = "# before\n", "# after\n"
+			}
+			writeProjectFile(t, path, before)
 			writeProjectFile(t, filepath.Join(root, sibling), "stable sibling")
 			beforeCollection, beforeInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
-			writeProjectFile(t, path, "after")
+			writeProjectFile(t, path, after)
 			afterCollection, afterInventory := collectProjectInventory(t, home, collectProjectsAt(t, home, root))
 			if len(beforeCollection.Evidence) != 2 || len(afterCollection.Evidence) != 2 {
 				t.Fatalf("before=%+v after=%+v", beforeCollection, afterCollection)
@@ -340,11 +478,11 @@ func TestEveryProjectCatalogFileMutationChangesOnlyItsEvidence(t *testing.T) {
 
 func TestProjectCollectorAdvertisesOnlyRootTarget(t *testing.T) {
 	home := t.TempDir()
-	roots, err := projects.ResolveRoots(home, nil)
+	roots, err := ResolveRoots(home, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectCollector := projects.New(roots)
+	projectCollector := New(roots)
 	want := []model.TargetSpec{{
 		ID: "projects.root", Collector: "projects", Scope: model.ScopeProject,
 		Platform: "darwin", Method: model.TargetDirectory,
@@ -358,11 +496,11 @@ func TestProjectCollectorAdvertisesOnlyRootTarget(t *testing.T) {
 		t.Fatalf("targets changed through caller slice: %+v", got)
 	}
 	var _ collector.TargetedCollector = projectCollector
-	var _ func([]projects.Root) collector.TargetedCollector = projects.New
+	var _ func([]Root) collector.TargetedCollector = New
 }
 
 func TestProjectCollectorRejectsForgedRootWithoutLeakage(t *testing.T) {
-	forged := []projects.Root{{
+	forged := []Root{{
 		Path: "/private/very-sensitive-client-root",
 		Ref:  "private-ref-must-not-leak",
 	}}
@@ -373,17 +511,17 @@ func TestProjectCollectorRejectsMutatedResolvedRootWithoutLeakage(t *testing.T) 
 	home := t.TempDir()
 	for _, testCase := range []struct {
 		name      string
-		mutate    func(*projects.Root)
+		mutate    func(*Root)
 		forbidden string
 	}{
-		{name: "path", mutate: func(root *projects.Root) { root.Path = "/private/mutated-client-root" }, forbidden: "/private/mutated-client-root"},
-		{name: "relative path", mutate: func(root *projects.Root) { root.Path = "relative-client-root" }, forbidden: "relative-client-root"},
-		{name: "non-canonical path", mutate: func(root *projects.Root) { root.Path += "/../Projects" }, forbidden: "/../Projects"},
-		{name: "ref", mutate: func(root *projects.Root) { root.Ref = "mutated-ref-must-not-leak" }, forbidden: "mutated-ref-must-not-leak"},
-		{name: "non-deterministic ref", mutate: func(root *projects.Root) { root.Ref = "external-root-9" }, forbidden: "external-root-9"},
+		{name: "path", mutate: func(root *Root) { root.Path = "/private/mutated-client-root" }, forbidden: "/private/mutated-client-root"},
+		{name: "relative path", mutate: func(root *Root) { root.Path = "relative-client-root" }, forbidden: "relative-client-root"},
+		{name: "non-canonical path", mutate: func(root *Root) { root.Path += "/../Projects" }, forbidden: "/../Projects"},
+		{name: "ref", mutate: func(root *Root) { root.Ref = "mutated-ref-must-not-leak" }, forbidden: "mutated-ref-must-not-leak"},
+		{name: "non-deterministic ref", mutate: func(root *Root) { root.Ref = "external-root-9" }, forbidden: "external-root-9"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+			roots, err := ResolveRoots(home, []string{"$HOME/Projects"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -395,37 +533,37 @@ func TestProjectCollectorRejectsMutatedResolvedRootWithoutLeakage(t *testing.T) 
 
 func TestProjectCollectorRejectsInvalidResolvedRootSets(t *testing.T) {
 	home := t.TempDir()
-	valid, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	valid, err := ResolveRoots(home, []string{"$HOME/Projects"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstExternal, err := projects.ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-a")})
+	firstExternal, err := ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-a")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondExternal, err := projects.ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-b")})
+	secondExternal, err := ResolveRoots(home, []string{filepath.Join(filepath.Dir(home), "external-b")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sorted, err := projects.ResolveRoots(home, []string{"$HOME/a", "$HOME/z"})
+	sorted, err := ResolveRoots(home, []string{"$HOME/a", "$HOME/z"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reversed := []projects.Root{sorted[1], sorted[0]}
-	excess := make([]projects.Root, 33)
+	reversed := []Root{sorted[1], sorted[0]}
+	excess := make([]Root, 33)
 	for index := range excess {
 		excess[index] = valid[0]
 	}
 	for _, testCase := range []struct {
 		name      string
-		roots     []projects.Root
+		roots     []Root
 		forbidden string
 	}{
 		{name: "empty", roots: nil},
-		{name: "duplicate", roots: []projects.Root{valid[0], valid[0]}, forbidden: "$HOME/Projects"},
+		{name: "duplicate", roots: []Root{valid[0], valid[0]}, forbidden: "$HOME/Projects"},
 		{name: "excess", roots: excess, forbidden: "$HOME/Projects"},
 		{name: "misordered", roots: reversed, forbidden: "$HOME/z"},
-		{name: "duplicate external ref", roots: []projects.Root{firstExternal[0], secondExternal[0]}, forbidden: "external-root-1"},
+		{name: "duplicate external ref", roots: []Root{firstExternal[0], secondExternal[0]}, forbidden: "external-root-1"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			assertRejectedRoots(t, testCase.roots, testCase.forbidden)
@@ -437,11 +575,11 @@ func TestProjectCollectorCopiesValidatedRootsBeforeCollection(t *testing.T) {
 	home := t.TempDir()
 	config := filepath.Join(home, "Projects", "sample", ".mcp.json")
 	writeProjectFile(t, config, `{}`)
-	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	roots, err := ResolveRoots(home, []string{"$HOME/Projects"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectCollector := projects.New(roots)
+	projectCollector := New(roots)
 	roots[0].Path = "/private/mutated-after-new"
 	roots[0].Ref = "mutated-after-new"
 	got, err := projectCollector.Collect(context.Background(), testutil.Environment(t, home))
@@ -469,11 +607,11 @@ func TestProjectCollectorRecognizesOnlyFixedProjectConfigs(t *testing.T) {
 	for relative, contents := range files {
 		writeProjectFile(t, filepath.Join(project, relative), contents)
 	}
-	roots, err := projects.ResolveRoots(home, []string{configuredRoot})
+	roots, err := ResolveRoots(home, []string{configuredRoot})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	got, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,11 +677,11 @@ func TestProjectCollectorDistinguishesMissingAndUnavailableRoots(t *testing.T) {
 	missing := filepath.Join(home, "missing")
 	notDirectory := filepath.Join(home, "not-a-directory")
 	writeProjectFile(t, notDirectory, "fixture")
-	roots, err := projects.ResolveRoots(home, []string{missing, notDirectory})
+	roots, err := ResolveRoots(home, []string{missing, notDirectory})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	got, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,11 +706,11 @@ func TestProjectCollectorReportsSafelyEmptyRootComplete(t *testing.T) {
 	if err := os.MkdirAll(empty, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	roots, err := projects.ResolveRoots(home, []string{empty})
+	roots, err := ResolveRoots(home, []string{empty})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	got, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,11 +728,11 @@ func TestProjectCollectorHidesExternalAbsoluteLocations(t *testing.T) {
 	external := t.TempDir()
 	rawConfig := filepath.Join(external, "client-name", ".mcp.json")
 	writeProjectFile(t, rawConfig, `{}`)
-	roots, err := projects.ResolveRoots(home, []string{external})
+	roots, err := ResolveRoots(home, []string{external})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	got, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,11 +772,11 @@ func writeProjectFile(t *testing.T, path, contents string) {
 
 func collectProjectsAt(t *testing.T, home, root string) model.CollectorResult {
 	t.Helper()
-	roots, err := projects.ResolveRoots(home, []string{root})
+	roots, err := ResolveRoots(home, []string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, home))
+	result, err := New(roots).Collect(context.Background(), testutil.Environment(t, home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,12 +816,30 @@ func projectEvidenceSubjectForTest(name string) string {
 	return "project-manifest:" + name
 }
 
-func assertRejectedRoots(t *testing.T, roots []projects.Root, forbidden ...string) {
+func validPythonLockfiles() map[string]string {
+	return map[string]string{
+		"requirements.txt": "requirements-demo==1.0.0 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+		"Pipfile.lock":     `{"default":{"pipfile-demo":{"version":"==2.0.0","hashes":["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}}`,
+		"poetry.lock": `[[package]]
+name = "poetry-demo"
+version = "3.0.0"
+files = [{ hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+`,
+		"uv.lock": `[[package]]
+name = "uv-demo"
+version = "4.0.0"
+source = { registry = "https://example.invalid/simple" }
+sdist = { hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+`,
+	}
+}
+
+func assertRejectedRoots(t *testing.T, roots []Root, forbidden ...string) {
 	t.Helper()
-	if refs := projects.RootRefs(roots); refs != nil {
+	if refs := RootRefs(roots); refs != nil {
 		t.Fatalf("forged roots exposed refs=%q", refs)
 	}
-	got, err := projects.New(roots).Collect(context.Background(), testutil.Environment(t, t.TempDir()))
+	got, err := New(roots).Collect(context.Background(), testutil.Environment(t, t.TempDir()))
 	if err == nil || err.Error() != "invalid project roots" {
 		t.Fatalf("result=%+v err=%v", got, err)
 	}

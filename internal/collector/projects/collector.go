@@ -618,6 +618,14 @@ func provenanceFormat(basename string) (provenance.Format, bool) {
 		return provenance.FormatCargo, true
 	case "go.sum":
 		return provenance.FormatGoSum, true
+	case "requirements.txt":
+		return provenance.FormatRequirements, true
+	case "Pipfile.lock":
+		return provenance.FormatPipfile, true
+	case "poetry.lock":
+		return provenance.FormatPoetry, true
+	case "uv.lock":
+		return provenance.FormatUV, true
 	default:
 		return "", false
 	}
