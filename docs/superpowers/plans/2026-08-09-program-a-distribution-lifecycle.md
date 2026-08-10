@@ -20,6 +20,14 @@
 
 Code signing and notarization require **an Apple Developer ID Application certificate in the login keychain and an Apple ID with an app-specific password stored as a `notarytool` keychain profile**. The user does not have these yet, and enrolment plus certificate issuance has real-world lead time (Apple Developer Program membership, identity verification, certificate request). Nothing else in this program depends on them.
 
+**Status 2026-08-10: Tasks 10–11 are DEFERRED, not merely pending.** The Apple Developer Program is $99/year and there is no free path — Apple issues Developer ID certificates only to paid members, and notarization requires one. Self-signed and ad-hoc signatures do not help: Gatekeeper does not trust them, so a downloaded binary is still blocked. The user has chosen to defer rather than pay while there is no distribution.
+
+What that costs, stated honestly: §5.2's "signed, notarized" requirement is unmet, and §5.3's adapter bootstrap check loses one of its three legs. **The other two legs are already built** — Task 6 verifies the SHA-256 against a caller-supplied expected digest and validates the Mach-O universal structure. In the settled bootstrap model the adapter supplies both the file and the expected digest, and the adapter is first-party, so trust already flows from the adapter rather than from the signature. A signature would additionally protect a user who obtains a release artifact from a third party — which is precisely the distribution channel that does not exist yet.
+
+Until then, distribution avoids Gatekeeper rather than defeating it: `go install`, `git clone && go build`, or a Homebrew formula that builds from source. Do **not** ship unsigned artifacts with instructions to run `xattr -d com.apple.quarantine`; telling users of a supply-chain security tool to strip Gatekeeper is self-defeating and trains the exact behaviour this product exists to surface.
+
+Revisit when publishing real releases. Nothing else in the roadmap is blocked by this except Program H, which needs the adapters that §5.3 gates on signature verification.
+
 | Task | Blocked on Developer ID? |
 |---|---|
 | 1 Universal binary via `lipo` | No |
