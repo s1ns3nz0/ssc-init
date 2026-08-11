@@ -49,6 +49,7 @@ func TestDiscoveryCandidateRejectsUnsafeHomeLocationsWithFixedCoverage(t *testin
 		"home itself":       home,
 		"outside home":      outside,
 		"Library":           filepath.Join(home, "Library", "project"),
+		"lowercase Library": filepath.Join(home, "library", "project"),
 		"Trash":             filepath.Join(home, ".Trash", "project"),
 		"Downloads media":   filepath.Join(home, "Downloads", "recording.mov"),
 		"cache":             filepath.Join(home, ".cache", "project"),
@@ -72,6 +73,43 @@ func TestDiscoveryCandidateRejectsUnsafeHomeLocationsWithFixedCoverage(t *testin
 			assertDiscoveryJSONExcludes(t, got, home, outside, path, "private-marker")
 		})
 	}
+}
+
+func TestDiscoveryCandidateAllowsLegitimateDownloadsProject(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "Downloads", "code-project")
+	mkdirDiscoveryCandidate(t, project)
+
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{{
+		path: project, source: discoveryVSCodeTargetID, priority: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := RootRefs(got.Roots); !reflect.DeepEqual(refs, []string{"$HOME/Downloads/code-project"}) {
+		t.Fatalf("refs=%v coverage=%+v", refs, got.Coverage)
+	}
+	assertDiscoveryJSONExcludes(t, got, home, project)
+}
+
+func TestDiscoveryCandidateRejectsIntermediateSymlinkEscape(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	mkdirDiscoveryCandidate(t, filepath.Join(outside, "project"))
+	link := filepath.Join(home, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(link, "project")
+
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{{
+		path: candidate, source: discoveryCursorTargetID, priority: 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscoveryIssue(t, got, discoveryCursorTargetID, "symlink_rejected")
+	assertDiscoveryJSONExcludes(t, got, home, outside, candidate)
 }
 
 func TestDiscoveryCandidateRejectsUnsafeFilesystemObjects(t *testing.T) {
@@ -110,20 +148,48 @@ func TestDiscoveryCandidateRejectsUnsafeFilesystemObjects(t *testing.T) {
 	}
 }
 
-func TestDiscoveryCandidateRejectsIdentityReplacement(t *testing.T) {
+func TestDiscoveryCandidateRejectsDifferentHomeFilesystemDevice(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	mkdirDiscoveryCandidate(t, project)
+	fileSystem := &discoveryDeviceFileSystem{
+		OSFileSystem: platform.OSFileSystem{}, home: home, candidate: project,
+		candidateDevice: ^uint64(0),
+	}
+
+	got, err := finalizeDiscoveredRoots(home, fileSystem, []discoveryCandidate{{
+		path: project, source: discoveryWindsurfTargetID, priority: 3,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscoveryIssue(t, got, discoveryWindsurfTargetID, "outside_home")
+	if fileSystem.localityChecks == 0 {
+		t.Fatal("candidate did not provide local-filesystem evidence")
+	}
+	assertDiscoveryJSONExcludes(t, got, home, project)
+}
+
+func TestDiscoveryCandidateRejectsIdentityReplacementAtFinalAnchoredRecheck(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, "project")
 	replacement := filepath.Join(home, "replacement")
 	mkdirDiscoveryCandidate(t, project)
 	mkdirDiscoveryCandidate(t, replacement)
 
-	got, err := finalizeDiscoveredRoots(home, &discoverySwapFileSystem{
-		OSFileSystem: platform.OSFileSystem{}, target: project, replacement: replacement,
-	}, []discoveryCandidate{{path: project, source: discoveryJetBrainsTargetID, priority: 4}})
+	fileSystem := &discoveryFinalSwapFileSystem{
+		OSFileSystem: platform.OSFileSystem{}, home: home, target: project, replacement: replacement,
+	}
+	got, err := finalizeDiscoveredRoots(home, fileSystem, []discoveryCandidate{{
+		path: project, source: discoveryJetBrainsTargetID, priority: 4,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertDiscoveryIssue(t, got, discoveryJetBrainsTargetID, "identity_changed")
+	if fileSystem.candidateOpens != 2 || !fileSystem.swapped {
+		t.Fatalf("candidate opens=%d swapped=%v", fileSystem.candidateOpens, fileSystem.swapped)
+	}
 	assertDiscoveryJSONExcludes(t, got, home, project, replacement)
 }
 
@@ -184,7 +250,7 @@ func TestFinalizeDiscoveredRootsOrdersByConventionalRootSourcePriorityAndRef(t *
 	}
 }
 
-func TestFinalizeDiscoveredRootsCapsSelectionAtThirtyTwoWithoutLeakingOmittedRefs(t *testing.T) {
+func TestFinalizeDiscoveredRootsReservesConventionalRootCapacityWithoutLeakingOmittedRefs(t *testing.T) {
 	home := t.TempDir()
 	candidates := make([]discoveryCandidate, 0, maxConfiguredRoots+2)
 	for index := maxConfiguredRoots + 1; index >= 0; index-- {
@@ -199,17 +265,17 @@ func TestFinalizeDiscoveredRootsCapsSelectionAtThirtyTwoWithoutLeakingOmittedRef
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Roots) != maxConfiguredRoots {
+	if len(got.Roots) != maxConfiguredRoots-1 {
 		t.Fatalf("roots=%d", len(got.Roots))
 	}
 	if len(got.Coverage) != 1 || got.Coverage[0].TargetID != discoveryGitTargetID || got.Coverage[0].Status != model.TargetPartial || len(got.Coverage[0].Errors) != 1 || got.Coverage[0].Errors[0].Code != "root_limit" || got.Coverage[0].Errors[0].Path != "" {
 		t.Fatalf("coverage=%+v", got.Coverage)
 	}
 	refs := RootRefs(got.Roots)
-	if refs[0] != "$HOME/work/00" || refs[len(refs)-1] != "$HOME/work/31" {
+	if refs[0] != "$HOME/work/00" || refs[len(refs)-1] != "$HOME/work/30" {
 		t.Fatalf("refs=%v", refs)
 	}
-	assertDiscoveryJSONExcludes(t, got, home, "$HOME/work/32", "$HOME/work/33")
+	assertDiscoveryJSONExcludes(t, got, home, "$HOME/work/31", "$HOME/work/32", "$HOME/work/33")
 }
 
 func TestDiscoveryCandidateRequiresNoFollowAndRootedFilesystemCapabilities(t *testing.T) {
@@ -310,26 +376,48 @@ func assertDiscoveryJSONExcludes(t *testing.T, discovery Discovery, markers ...s
 	}
 }
 
-type discoverySwapFileSystem struct {
+type discoveryFinalSwapFileSystem struct {
 	platform.OSFileSystem
-	target      string
-	replacement string
-	swapped     bool
+	home           string
+	target         string
+	replacement    string
+	candidateOpens int
+	swapped        bool
 }
 
-func (f *discoverySwapFileSystem) Lstat(name string) (os.FileInfo, error) {
-	info, err := f.OSFileSystem.Lstat(name)
-	if err != nil || name != f.target || f.swapped {
-		return info, err
+func (f *discoveryFinalSwapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil || name != f.home {
+		return root, err
 	}
-	f.swapped = true
-	if err := os.Rename(f.target, f.target+"-original"); err != nil {
+	return &discoveryFinalSwapRoot{RootedDirectory: root, owner: f, current: f.home}, nil
+}
+
+type discoveryFinalSwapRoot struct {
+	platform.RootedDirectory
+	owner   *discoveryFinalSwapFileSystem
+	current string
+}
+
+func (r *discoveryFinalSwapRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	path := filepath.Join(r.current, name)
+	if path == r.owner.target {
+		r.owner.candidateOpens++
+		if r.owner.candidateOpens == 2 {
+			r.owner.swapped = true
+			if err := os.Rename(r.owner.target, r.owner.target+"-original"); err != nil {
+				return nil, err
+			}
+			if err := os.Rename(r.owner.replacement, r.owner.target); err != nil {
+				return nil, err
+			}
+		}
+	}
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(f.replacement, f.target); err != nil {
-		return nil, err
-	}
-	return info, nil
+	return &discoveryFinalSwapRoot{RootedDirectory: child, owner: r.owner, current: path}, nil
 }
 
 type discoveryRedirectFileSystem struct {
@@ -345,8 +433,94 @@ func (f *discoveryRedirectFileSystem) Lstat(name string) (os.FileInfo, error) {
 }
 
 func (f *discoveryRedirectFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
-	if redirected, ok := f.redirects[name]; ok {
-		name = redirected
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
 	}
-	return f.OSFileSystem.OpenRoot(name)
+	return &discoveryRedirectRoot{RootedDirectory: root, redirects: f.redirects, current: name}, nil
+}
+
+type discoveryRedirectRoot struct {
+	platform.RootedDirectory
+	redirects map[string]string
+	current   string
+}
+
+func (r *discoveryRedirectRoot) Lstat(name string) (os.FileInfo, error) {
+	path := filepath.Join(r.current, name)
+	if redirected, ok := r.redirects[path]; ok {
+		return os.Lstat(redirected)
+	}
+	return r.RootedDirectory.Lstat(name)
+}
+
+func (r *discoveryRedirectRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	path := filepath.Join(r.current, name)
+	if redirected, ok := r.redirects[path]; ok {
+		root, err := platform.OSFileSystem{}.OpenRoot(redirected)
+		if err != nil {
+			return nil, err
+		}
+		return &discoveryRedirectRoot{RootedDirectory: root, redirects: r.redirects, current: redirected}, nil
+	}
+	root, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryRedirectRoot{RootedDirectory: root, redirects: r.redirects, current: path}, nil
+}
+
+type discoveryDeviceFileSystem struct {
+	platform.OSFileSystem
+	home            string
+	candidate       string
+	candidateDevice uint64
+	localityChecks  int
+}
+
+func (f *discoveryDeviceFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryDeviceRoot{RootedDirectory: root, owner: f, current: name}, nil
+}
+
+type discoveryDeviceRoot struct {
+	platform.RootedDirectory
+	owner   *discoveryDeviceFileSystem
+	current string
+}
+
+func (r *discoveryDeviceRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	child, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryDeviceRoot{RootedDirectory: child, owner: r.owner, current: filepath.Join(r.current, name)}, nil
+}
+
+func (r *discoveryDeviceRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryDeviceFile{RootedFile: file, owner: r.owner}, nil
+}
+
+func (r *discoveryDeviceRoot) filesystemDevice() (uint64, bool) {
+	if r.current == r.owner.candidate {
+		return r.owner.candidateDevice, true
+	}
+	return 1, true
+}
+
+type discoveryDeviceFile struct {
+	platform.RootedFile
+	owner *discoveryDeviceFileSystem
+}
+
+func (f *discoveryDeviceFile) LocalFilesystem() (bool, bool) {
+	f.owner.localityChecks++
+	return true, true
 }

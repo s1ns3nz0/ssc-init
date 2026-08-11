@@ -1,10 +1,12 @@
 package projects
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -26,6 +28,14 @@ var discoveryTargetOrder = []string{
 	discoveryWindsurfTargetID,
 	discoveryJetBrainsTargetID,
 	discoveryGitTargetID,
+}
+
+const maxDiscoveredRoots = maxConfiguredRoots - 1
+
+var excludedDiscoveryMediaExtensions = map[string]struct{}{
+	".avi": {}, ".flac": {}, ".gif": {}, ".heic": {}, ".jpeg": {},
+	".jpg": {}, ".m4a": {}, ".m4v": {}, ".mkv": {}, ".mov": {},
+	".mp3": {}, ".mp4": {}, ".png": {}, ".raw": {}, ".wav": {},
 }
 
 // Discovery contains sealed project roots and privacy-safe source coverage.
@@ -60,6 +70,11 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 	if fileSystem == nil || !noFollowOK || !rootedOK {
 		return Discovery{}, errors.New("project discovery filesystem unavailable")
 	}
+	homeRoot, homeIdentity, homeDevice, err := openDiscoveryHome(cleanHome, noFollow, rooted)
+	if err != nil {
+		return Discovery{}, err
+	}
+	defer homeRoot.Close()
 
 	issues := make(map[string]map[string]struct{}, len(discoveryTargetOrder))
 	addIssue := func(source, code string) {
@@ -97,7 +112,7 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 	verified := make([]verifiedDiscoveryCandidate, 0, len(ordered))
 	seenPaths := make(map[string]struct{}, len(ordered))
 	for _, candidate := range ordered {
-		ref, identity, code := validateDiscoveryCandidate(cleanHome, noFollow, rooted, candidate.path)
+		ref, identity, code := validateDiscoveryCandidate(cleanHome, homeRoot, homeDevice, candidate.path)
 		if code != "" {
 			addIssue(candidate.source, code)
 			continue
@@ -140,17 +155,16 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 			selected = append(selected, candidate)
 		}
 	}
-	if len(selected) > maxConfiguredRoots {
-		for _, omitted := range selected[maxConfiguredRoots:] {
+	if len(selected) > maxDiscoveredRoots {
+		for _, omitted := range selected[maxDiscoveredRoots:] {
 			addIssue(omitted.source, "root_limit")
 		}
-		selected = selected[:maxConfiguredRoots]
+		selected = selected[:maxDiscoveredRoots]
 	}
 
 	result := Discovery{Roots: make([]Root, 0, len(selected))}
 	for _, candidate := range selected {
-		final, err := noFollow.Lstat(candidate.path)
-		if err != nil || final == nil || !os.SameFile(candidate.identity, final) {
+		if !recheckDiscoveryCandidate(cleanHome, homeRoot, homeDevice, candidate.path, candidate.identity) {
 			addIssue(candidate.source, "identity_changed")
 			continue
 		}
@@ -161,6 +175,10 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 		root.seal = sealRoot(root)
 		result.Roots = append(result.Roots, root)
 	}
+	finalHome, err := noFollow.Lstat(cleanHome)
+	if err != nil || finalHome == nil || !os.SameFile(homeIdentity, finalHome) {
+		return Discovery{}, errors.New("project discovery home identity changed")
+	}
 	if len(result.Roots) > 0 {
 		if err := validateResolvedRoots(result.Roots); err != nil {
 			return Discovery{}, errors.New("invalid discovered project roots")
@@ -170,7 +188,47 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 	return result, nil
 }
 
-func validateDiscoveryCandidate(home string, noFollow platform.NoFollowFileSystem, rooted platform.RootedFileSystem, path string) (string, os.FileInfo, string) {
+func openDiscoveryHome(home string, noFollow platform.NoFollowFileSystem, rooted platform.RootedFileSystem) (platform.RootedDirectory, os.FileInfo, uint64, error) {
+	expected, err := noFollow.Lstat(home)
+	if err != nil || expected == nil || expected.Mode()&fs.ModeSymlink != 0 || !expected.IsDir() {
+		return nil, nil, 0, errors.New("project discovery home unavailable")
+	}
+	root, err := rooted.OpenRoot(home)
+	if err != nil {
+		return nil, nil, 0, errors.New("project discovery home unavailable")
+	}
+	opened, err := root.Lstat(".")
+	if err != nil || opened == nil || !os.SameFile(expected, opened) {
+		_ = root.Close()
+		return nil, nil, 0, errors.New("project discovery home identity changed")
+	}
+	directory, err := platform.OpenVerifiedDirectory(root)
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, 0, errors.New("project discovery home identity changed")
+	}
+	descriptorInfo, statErr := directory.Stat()
+	if statErr != nil || descriptorInfo == nil || !os.SameFile(expected, descriptorInfo) {
+		_ = directory.Close()
+		_ = root.Close()
+		return nil, nil, 0, errors.New("project discovery home identity changed")
+	}
+	if localFile, ok := directory.(platform.LocalRootedFile); ok {
+		if local, known := localFile.LocalFilesystem(); known && !local {
+			_ = directory.Close()
+			_ = root.Close()
+			return nil, nil, 0, errors.New("project discovery home is not local")
+		}
+	}
+	device, ok := discoveryFilesystemDevice(root, descriptorInfo)
+	if closeErr := directory.Close(); closeErr != nil || !ok {
+		_ = root.Close()
+		return nil, nil, 0, errors.New("project discovery home device unavailable")
+	}
+	return root, expected, device, nil
+}
+
+func validateDiscoveryCandidate(home string, homeRoot platform.RootedDirectory, homeDevice uint64, path string) (string, os.FileInfo, string) {
 	if path == "" || !validMetadataText(path) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", nil, "outside_home"
 	}
@@ -178,29 +236,20 @@ func validateDiscoveryCandidate(home string, noFollow platform.NoFollowFileSyste
 	if !insideHome || ref == "$HOME" || excludedDiscoveryCandidate(home, path) {
 		return "", nil, "outside_home"
 	}
-	expected, err := noFollow.Lstat(path)
-	if err != nil || expected == nil {
-		return "", nil, "metadata_unavailable"
+	components, ok := discoveryRelativeComponents(home, path)
+	if !ok {
+		return "", nil, "outside_home"
 	}
-	if expected.Mode()&fs.ModeSymlink != 0 {
-		return "", nil, "symlink_rejected"
-	}
-	if !expected.IsDir() {
-		return "", nil, "metadata_unavailable"
-	}
-	root, err := rooted.OpenRoot(path)
-	if err != nil {
-		if errors.Is(err, platform.ErrUnsafeRootedPath) {
-			return "", nil, "identity_changed"
-		}
-		return "", nil, "metadata_unavailable"
+	root, code := openAnchoredDiscoveryCandidate(homeRoot, components)
+	if code != "" {
+		return "", nil, code
 	}
 	defer root.Close()
-	opened, err := root.Lstat(".")
-	if err != nil || opened == nil || !os.SameFile(expected, opened) {
+	expected, err := root.Lstat(".")
+	if err != nil || expected == nil || !expected.IsDir() {
 		return "", nil, "identity_changed"
 	}
-	directory, err := root.Open(".")
+	directory, err := platform.OpenVerifiedDirectory(root)
 	if err != nil {
 		return "", nil, "identity_changed"
 	}
@@ -215,10 +264,136 @@ func validateDiscoveryCandidate(home string, noFollow platform.NoFollowFileSyste
 			return "", nil, "outside_home"
 		}
 	}
+	device, deviceOK := discoveryFilesystemDevice(root, openedDescriptor)
+	if !deviceOK || device != homeDevice {
+		_ = directory.Close()
+		return "", nil, "outside_home"
+	}
 	if err := directory.Close(); err != nil {
 		return "", nil, "identity_changed"
 	}
 	return ref, expected, ""
+}
+
+func openAnchoredDiscoveryCandidate(homeRoot platform.RootedDirectory, components []string) (platform.RootedDirectory, string) {
+	if len(components) == 0 {
+		return nil, "outside_home"
+	}
+	current := homeRoot
+	owned := false
+	closeOwned := func() {
+		if owned {
+			_ = current.Close()
+		}
+	}
+	for _, component := range components {
+		observed, err := current.Lstat(component)
+		if err != nil || observed == nil {
+			closeOwned()
+			return nil, "metadata_unavailable"
+		}
+		if observed.Mode()&fs.ModeSymlink != 0 {
+			closeOwned()
+			return nil, "symlink_rejected"
+		}
+		if !observed.IsDir() {
+			closeOwned()
+			return nil, "metadata_unavailable"
+		}
+		child, err := platform.OpenVerifiedRoot(context.Background(), current, component)
+		if err != nil {
+			closeOwned()
+			return nil, "identity_changed"
+		}
+		if owned {
+			_ = current.Close()
+		}
+		current = child
+		owned = true
+	}
+	return current, ""
+}
+
+func recheckDiscoveryCandidate(home string, homeRoot platform.RootedDirectory, homeDevice uint64, path string, expected os.FileInfo) bool {
+	components, ok := discoveryRelativeComponents(home, path)
+	if !ok {
+		return false
+	}
+	root, code := openAnchoredDiscoveryCandidate(homeRoot, components)
+	if code != "" {
+		return false
+	}
+	defer root.Close()
+	current, err := root.Lstat(".")
+	if err != nil || current == nil || !os.SameFile(expected, current) {
+		return false
+	}
+	directory, err := platform.OpenVerifiedDirectory(root)
+	if err != nil {
+		return false
+	}
+	descriptorInfo, statErr := directory.Stat()
+	if statErr != nil || descriptorInfo == nil || !os.SameFile(expected, descriptorInfo) {
+		_ = directory.Close()
+		return false
+	}
+	if localFile, ok := directory.(platform.LocalRootedFile); ok {
+		if local, known := localFile.LocalFilesystem(); known && !local {
+			_ = directory.Close()
+			return false
+		}
+	}
+	device, deviceOK := discoveryFilesystemDevice(root, descriptorInfo)
+	return directory.Close() == nil && deviceOK && device == homeDevice
+}
+
+func discoveryRelativeComponents(home, path string) ([]string, bool) {
+	relative, err := filepath.Rel(home, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, false
+	}
+	components := strings.Split(relative, string(filepath.Separator))
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return nil, false
+		}
+	}
+	return components, true
+}
+
+type discoveryDeviceEvidence interface {
+	filesystemDevice() (uint64, bool)
+}
+
+func discoveryFilesystemDevice(source any, info os.FileInfo) (uint64, bool) {
+	if evidence, ok := source.(discoveryDeviceEvidence); ok {
+		return evidence.filesystemDevice()
+	}
+	if info == nil || info.Sys() == nil {
+		return 0, false
+	}
+	value := reflect.ValueOf(info.Sys())
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0, false
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return 0, false
+	}
+	device := value.FieldByName("Dev")
+	if !device.IsValid() {
+		return 0, false
+	}
+	switch device.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return uint64(device.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return device.Uint(), true
+	default:
+		return 0, false
+	}
 }
 
 func excludedDiscoveryCandidate(home, path string) bool {
@@ -228,16 +403,21 @@ func excludedDiscoveryCandidate(home, path string) bool {
 	}
 	components := strings.Split(relative, string(filepath.Separator))
 	for index, component := range components {
-		if _, excluded := excludedDirectoryNames[component]; excluded {
-			return true
+		for excluded := range excludedDirectoryNames {
+			if strings.EqualFold(component, excluded) {
+				return true
+			}
 		}
 		switch strings.ToLower(component) {
-		case ".trash", "caches", "backups", "backups.backupdb":
+		case "library", ".trash", "caches", "backups", "backups.backupdb":
+			return true
+		}
+		if _, media := excludedDiscoveryMediaExtensions[strings.ToLower(filepath.Ext(component))]; media {
 			return true
 		}
 		if index == 0 {
 			switch strings.ToLower(component) {
-			case "downloads", "movies", "music", "pictures":
+			case "movies", "music", "pictures":
 				return true
 			}
 			if strings.HasPrefix(component, ".") {
