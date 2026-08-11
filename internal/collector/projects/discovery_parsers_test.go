@@ -64,6 +64,9 @@ func TestParseVSCodeWorkspaceRejectsUnsafeMetadataWithoutLeakingValues(t *testin
 		{name: "virtual filesystem scheme", contents: `{"folder":"vscode-vfs://remote/Users/` + secret + `"}`, wantErr: errRemoteUnsupported},
 		{name: "http scheme", contents: `{"folder":"https://example.test/Users/` + secret + `"}`, wantErr: errRemoteUnsupported},
 		{name: "relative path", contents: `{"folder":"file:relative/` + secret + `"}`, wantErr: errMetadataMalformed},
+		{name: "noncanonical single slash URI", contents: `{"folder":"file:/Users/` + secret + `"}`, wantErr: errMetadataMalformed},
+		{name: "noncanonical extra slash URI", contents: `{"folder":"file:////Users/` + secret + `"}`, wantErr: errMetadataMalformed},
+		{name: "noncanonical dot path", contents: `{"folder":"file:///Users/example/../` + secret + `"}`, wantErr: errMetadataMalformed},
 		{name: "NUL value", contents: `{"folder":"file:///Users/` + secret + `\u0000"}`, wantErr: errMetadataMalformed},
 		{name: "control value", contents: `{"folder":"file:///Users/` + secret + `\u0001"}`, wantErr: errMetadataMalformed},
 	}
@@ -122,6 +125,8 @@ func TestParseJetBrainsRecentRejectsUnsafeOrUnexpectedXML(t *testing.T) {
 		{name: "entity", contents: valid(`/Users/&amp;` + secret)},
 		{name: "processing instruction", contents: `<?bad ` + secret + `?>` + valid(`/Users/`+secret)},
 		{name: "wrong nesting", contents: `<application><component name="RecentProjectsManager"><list><option value="/Users/` + secret + `"/></list></component></application>`},
+		{name: "text in accepted hierarchy", contents: `<application><component name="RecentProjectsManager"><option name="recentPaths"><list>` + secret + `<option value="/Users/example/project"/></list></option></component></application>`},
+		{name: "trailing text", contents: valid(`/Users/example/project`) + secret},
 		{name: "too many tokens", contents: strings.Repeat(`<!--x-->`, 4097) + valid(`/Users/`+secret)},
 	}
 	for _, test := range tests {

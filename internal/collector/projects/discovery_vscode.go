@@ -88,7 +88,10 @@ func parseVSCodeWorkspace(contents []byte) (string, candidateKind, error) {
 		return "", 0, errMetadataMalformed
 	}
 	path := filepath.Clean(parsed.Path)
-	if !filepath.IsAbs(path) || !validMetadataText(path) {
+	if parsed.Path != path || !filepath.IsAbs(path) || !validMetadataText(path) {
+		return "", 0, errMetadataMalformed
+	}
+	if value != (&url.URL{Scheme: "file", Path: path}).String() {
 		return "", 0, errMetadataMalformed
 	}
 	if field == "workspace" {

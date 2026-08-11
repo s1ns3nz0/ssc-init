@@ -66,6 +66,10 @@ func parseJetBrainsRecent(contents []byte) ([]string, error) {
 				return nil, errMetadataMalformed
 			}
 			stack = stack[:len(stack)-1]
+		case xml.CharData:
+			if strings.TrimSpace(string(token)) != "" {
+				return nil, errMetadataMalformed
+			}
 		}
 	}
 }
