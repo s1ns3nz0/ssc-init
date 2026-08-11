@@ -155,11 +155,15 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 			selected = append(selected, candidate)
 		}
 	}
-	if len(selected) > maxDiscoveredRoots {
-		for _, omitted := range selected[maxDiscoveredRoots:] {
+	selectionLimit := maxDiscoveredRoots
+	if len(selected) > 0 && selected[0].ref == "$HOME/Projects" {
+		selectionLimit = maxConfiguredRoots
+	}
+	if len(selected) > selectionLimit {
+		for _, omitted := range selected[selectionLimit:] {
 			addIssue(omitted.source, "root_limit")
 		}
-		selected = selected[:maxDiscoveredRoots]
+		selected = selected[:selectionLimit]
 	}
 
 	result := Discovery{Roots: make([]Root, 0, len(selected))}

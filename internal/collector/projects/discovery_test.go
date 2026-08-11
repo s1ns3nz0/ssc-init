@@ -278,6 +278,39 @@ func TestFinalizeDiscoveredRootsReservesConventionalRootCapacityWithoutLeakingOm
 	assertDiscoveryJSONExcludes(t, got, home, "$HOME/work/31", "$HOME/work/32", "$HOME/work/33")
 }
 
+func TestFinalizeDiscoveredRootsUsesAllCapacityWhenConventionalRootIsAlreadyDiscovered(t *testing.T) {
+	home := t.TempDir()
+	candidates := make([]discoveryCandidate, 0, maxConfiguredRoots)
+	projects := filepath.Join(home, "Projects")
+	mkdirDiscoveryCandidate(t, projects)
+	candidates = append(candidates, discoveryCandidate{
+		path: projects, source: discoveryGitTargetID, priority: 5,
+	})
+	for index := 0; index < maxConfiguredRoots-1; index++ {
+		path := filepath.Join(home, "work", fixedDiscoveryIndex(index))
+		mkdirDiscoveryCandidate(t, path)
+		candidates = append(candidates, discoveryCandidate{
+			path: path, source: discoveryVSCodeTargetID, priority: 1,
+		})
+	}
+
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Roots) != maxConfiguredRoots {
+		t.Fatalf("roots=%d refs=%v coverage=%+v", len(got.Roots), RootRefs(got.Roots), got.Coverage)
+	}
+	if len(got.Coverage) != 0 {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+	refs := RootRefs(got.Roots)
+	if refs[0] != "$HOME/Projects" || refs[len(refs)-1] != "$HOME/work/30" {
+		t.Fatalf("refs=%v", refs)
+	}
+	assertDiscoveryJSONExcludes(t, got, home, projects)
+}
+
 func TestDiscoveryCandidateRequiresNoFollowAndRootedFilesystemCapabilities(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, "project")
