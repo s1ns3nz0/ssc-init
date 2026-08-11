@@ -506,13 +506,11 @@ func discoveryIssueCoverage(issues map[string]map[string]struct{}) []model.Targe
 
 func discoveryIssueMessage(code string) string {
 	switch code {
-	case "entry_limit":
-		return "project discovery source entry limit reached"
 	case "identity_changed":
 		return "project candidate identity changed"
 	case "metadata_malformed":
 		return "project discovery metadata is malformed"
-	case "metadata_oversized":
+	case "metadata_oversize":
 		return "project discovery metadata exceeds the size limit"
 	case "metadata_unavailable":
 		return "project candidate metadata is unavailable"
@@ -520,6 +518,8 @@ func discoveryIssueMessage(code string) string {
 		return "project candidate is outside the permitted home scope"
 	case "root_limit":
 		return "project root limit reached"
+	case "remote_unsupported":
+		return "remote project metadata is unsupported"
 	case "symlink_rejected":
 		return "symbolic link candidate was rejected"
 	default:

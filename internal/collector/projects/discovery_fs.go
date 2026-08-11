@@ -17,6 +17,8 @@ import (
 
 var jetBrainsDiscoveryComponents = []string{"Library", "Application Support", "JetBrains"}
 
+const maxDiscoveryRawEntries = 4096
+
 // discoverIDERoots reads only the fixed IDE metadata catalog below env.Home.
 // Returned candidate paths are runtime-only and must pass final validation
 // before they are sealed or persisted.
@@ -159,6 +161,7 @@ func discoverVSCodeSource(ctx context.Context, homeRoot platform.RootedDirectory
 		if parseErr != nil {
 			path = ""
 			if errors.Is(parseErr, errRemoteUnsupported) {
+				issues = append(issues, "remote_unsupported")
 				continue
 			}
 			issues = append(issues, "metadata_malformed")
@@ -323,17 +326,16 @@ func readDiscoveryDirectory(ctx context.Context, root platform.RootedDirectory, 
 		return nil, discoverySourceErrorCode(err), nil
 	}
 	defer directory.Close()
-	entries := make([]os.DirEntry, 0, limit+1)
-	for len(entries) <= limit {
+	entries := make([]os.DirEntry, 0, min(maxDiscoveryRawEntries+1, 128))
+	for len(entries) <= maxDiscoveryRawEntries {
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		request := min(128, limit+1-len(entries))
+		request := min(128, maxDiscoveryRawEntries+1-len(entries))
 		batch, readErr := directory.ReadDir(request)
 		entries = append(entries, batch...)
-		if len(entries) > limit {
-			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-			return entries[:limit], "entry_limit", nil
+		if len(entries) > maxDiscoveryRawEntries {
+			return nil, "root_limit", nil
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -343,8 +345,28 @@ func readDiscoveryDirectory(ctx context.Context, root platform.RootedDirectory, 
 			return entries, "metadata_unavailable", nil
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	return entries, "", nil
+	directories := make([]os.DirEntry, 0, min(len(entries), limit+1))
+	symlinks := make([]os.DirEntry, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories = append(directories, entry)
+			continue
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			symlinks = append(symlinks, entry)
+		}
+	}
+	sort.Slice(directories, func(i, j int) bool { return directories[i].Name() < directories[j].Name() })
+	code := ""
+	if len(directories) > limit {
+		directories = directories[:limit]
+		code = "root_limit"
+	}
+	selected := make([]os.DirEntry, 0, len(directories)+len(symlinks))
+	selected = append(selected, directories...)
+	selected = append(selected, symlinks...)
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Name() < selected[j].Name() })
+	return selected, code, nil
 }
 
 type discoveryMetadata struct {
@@ -370,7 +392,7 @@ func readDiscoveryMetadata(ctx context.Context, root platform.RootedDirectory, n
 	metadata := &discoveryMetadata{file: file, expected: expected, opened: opened, limit: limit, name: name}
 	if expected.Size() < 0 || opened.Size() < 0 || expected.Size() > limit || opened.Size() > limit {
 		metadata.clearAndClose()
-		return nil, "metadata_oversized", nil
+		return nil, "metadata_oversize", nil
 	}
 	contents, readErr := io.ReadAll(io.LimitReader(&discoveryContextReader{ctx: ctx, reader: file}, limit+1))
 	if readErr != nil {
@@ -384,7 +406,7 @@ func readDiscoveryMetadata(ctx context.Context, root platform.RootedDirectory, n
 	if int64(len(contents)) > limit {
 		clearBytes(contents)
 		metadata.clearAndClose()
-		return nil, "metadata_oversized", nil
+		return nil, "metadata_oversize", nil
 	}
 	metadata.contents = contents
 	return metadata, "", nil

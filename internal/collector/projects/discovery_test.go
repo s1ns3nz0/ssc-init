@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -79,9 +80,105 @@ func TestDiscoverVSCodeCapsChildrenAndRejectsOversizedMetadata(t *testing.T) {
 	if candidates[0].source != discoveryVSCodeTargetID || candidates[255].source != discoveryVSCodeTargetID {
 		t.Fatalf("unexpected candidates=%+v", candidates)
 	}
-	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "entry_limit")
-	assertDiscoveryCoverageCodes(t, coverage, discoveryCursorTargetID, "metadata_oversized")
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "root_limit")
+	assertDiscoveryCoverageCodes(t, coverage, discoveryCursorTargetID, "metadata_oversize")
 	assertCoverageExcludes(t, coverage, home, strings.Repeat("x", 64))
+}
+
+func TestDiscoverVSCodeSelectsSortedDirectoriesIndependentOfReadDirOrder(t *testing.T) {
+	home := t.TempDir()
+	source := vscodeDiscoverySourcePath(home, "Code")
+	wantPaths := make([]string, 0, maxVSCodeDiscoveryChildren)
+	for index := 0; index < 300; index++ {
+		project := filepath.Join(home, "work", fmt.Sprintf("project-%03d", index))
+		mkdirDiscoveryCandidate(t, project)
+		writeVSCodeWorkspaceAt(t, source, fmt.Sprintf("workspace-%03d", index), "folder", project)
+		if index < maxVSCodeDiscoveryChildren {
+			wantPaths = append(wantPaths, project)
+		}
+	}
+	env := testutil.Environment(t, home)
+	env.FS = &discoveryPermutedFileSystem{target: source, reverse: true}
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotPaths := make([]string, len(candidates))
+	for index := range candidates {
+		gotPaths[index] = candidates[index].path
+	}
+	if !reflect.DeepEqual(gotPaths, wantPaths) {
+		t.Fatalf("first=%v last=%v count=%d", gotPaths[:min(2, len(gotPaths))], gotPaths[max(0, len(gotPaths)-2):], len(gotPaths))
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "root_limit")
+}
+
+func TestDiscoverVSCodeRegularFilesDoNotHideValidWorkspaceDirectories(t *testing.T) {
+	home := t.TempDir()
+	source := vscodeDiscoverySourcePath(home, "Code")
+	for index := 0; index < maxVSCodeDiscoveryChildren; index++ {
+		writeDiscoveryFile(t, filepath.Join(source, fmt.Sprintf("file-%03d", index)), nil)
+	}
+	want := []discoveryCandidate{
+		{path: filepath.Join(home, "work", "alpha"), source: discoveryVSCodeTargetID, priority: 1},
+		{path: filepath.Join(home, "work", "zeta"), source: discoveryVSCodeTargetID, priority: 1},
+	}
+	for index, child := range []string{"workspace-alpha", "workspace-zeta"} {
+		mkdirDiscoveryCandidate(t, want[index].path)
+		writeVSCodeWorkspaceAt(t, source, child, "folder", want[index].path)
+	}
+	env := testutil.Environment(t, home)
+	env.FS = &discoveryPermutedFileSystem{target: source, filesFirst: true}
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(candidates, want) || coverage != nil {
+		t.Fatalf("candidates=%+v want=%+v coverage=%+v", candidates, want, coverage)
+	}
+}
+
+func TestDiscoverVSCodeRawEntryCapFailsClosedForOnlyThatSource(t *testing.T) {
+	home := t.TempDir()
+	codeProject := filepath.Join(home, "work", "must-not-escape-cap")
+	cursorProject := filepath.Join(home, "work", "cursor")
+	mkdirDiscoveryCandidate(t, codeProject)
+	mkdirDiscoveryCandidate(t, cursorProject)
+	source := vscodeDiscoverySourcePath(home, "Code")
+	for index := 0; index < 4096; index++ {
+		writeDiscoveryFile(t, filepath.Join(source, fmt.Sprintf("file-%04d", index)), nil)
+	}
+	writeVSCodeWorkspaceAt(t, source, "workspace", "folder", codeProject)
+	writeVSCodeDiscoveryWorkspace(t, home, "Cursor", "workspace", "folder", cursorProject)
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []discoveryCandidate{{path: cursorProject, source: discoveryCursorTargetID, priority: 2}}
+	if !reflect.DeepEqual(candidates, want) {
+		t.Fatalf("candidates=%+v want=%+v", candidates, want)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "root_limit")
+	assertCoverageExcludes(t, coverage, home, codeProject, "workspace", "file-0000")
+}
+
+func TestDiscoverVSCodeReportsRemoteWorkspaceWithoutPersistingItsValue(t *testing.T) {
+	home := t.TempDir()
+	secret := "private-remote-workspace"
+	writeVSCodeDiscoveryRaw(t, home, "Code", "remote-hash", []byte(`{"folder":"vscode-remote://ssh-remote+host/`+secret+`"}`))
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "remote_unsupported")
+	assertCoverageExcludes(t, coverage, home, secret, "remote-hash", "ssh-remote")
 }
 
 func TestDiscoverVSCodeRejectsSourceAndWorkspaceFileSymlinks(t *testing.T) {
@@ -219,7 +316,7 @@ func TestDiscoverJetBrainsCapsProductsAndIsolatesOversizedAndMalformedProducts(t
 	if len(candidates) != 30 {
 		t.Fatalf("candidates=%d", len(candidates))
 	}
-	assertDiscoveryCoverageCodes(t, coverage, discoveryJetBrainsTargetID, "entry_limit", "metadata_malformed", "metadata_oversized")
+	assertDiscoveryCoverageCodes(t, coverage, discoveryJetBrainsTargetID, "metadata_malformed", "metadata_oversize", "root_limit")
 	assertCoverageExcludes(t, coverage, home, "Product00", "Product01", strings.Repeat("x", 64))
 }
 
@@ -852,6 +949,86 @@ func (f *discoveryReadSwapFile) Read(buffer []byte) (int, error) {
 		})
 	}
 	return count, err
+}
+
+type discoveryPermutedFileSystem struct {
+	platform.OSFileSystem
+	target     string
+	reverse    bool
+	filesFirst bool
+}
+
+func (f *discoveryPermutedFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryPermutedRoot{RootedDirectory: root, owner: f, current: name}, nil
+}
+
+type discoveryPermutedRoot struct {
+	platform.RootedDirectory
+	owner   *discoveryPermutedFileSystem
+	current string
+}
+
+func (r *discoveryPermutedRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryPermutedRoot{RootedDirectory: root, owner: r.owner, current: filepath.Join(r.current, name)}, nil
+}
+
+func (r *discoveryPermutedRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil || name != "." || r.current != r.owner.target {
+		return file, err
+	}
+	entries, readErr := file.ReadDir(-1)
+	if readErr != nil {
+		_ = file.Close()
+		return nil, readErr
+	}
+	if r.owner.reverse {
+		for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
+			entries[left], entries[right] = entries[right], entries[left]
+		}
+	}
+	if r.owner.filesFirst {
+		ordered := make([]os.DirEntry, 0, len(entries))
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				ordered = append(ordered, entry)
+			}
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				ordered = append(ordered, entry)
+			}
+		}
+		entries = ordered
+	}
+	return &discoveryPermutedDirectory{RootedFile: file, entries: entries}, nil
+}
+
+type discoveryPermutedDirectory struct {
+	platform.RootedFile
+	entries []os.DirEntry
+	index   int
+}
+
+func (d *discoveryPermutedDirectory) ReadDir(count int) ([]os.DirEntry, error) {
+	if d.index >= len(d.entries) {
+		return nil, io.EOF
+	}
+	end := min(d.index+count, len(d.entries))
+	batch := d.entries[d.index:end]
+	d.index = end
+	if d.index == len(d.entries) {
+		return batch, io.EOF
+	}
+	return batch, nil
 }
 
 type discoveryFinalSwapFileSystem struct {
