@@ -198,7 +198,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		environment, configuredCollectors, err := scanConfiguration(ctx, home, options)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if len(options.ProjectRoots) == 0 {
 				fmt.Fprintln(stderr, "failed to initialize SSC Init")
 				return 1
 			}

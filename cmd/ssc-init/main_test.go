@@ -375,6 +375,43 @@ func TestScanExplicitRootCarriesResolvedScopeAndProjectCollector(t *testing.T) {
 	}
 }
 
+func TestScanExplicitRootResolutionFailureRemainsUsageError(t *testing.T) {
+	oldGOOS, oldParse, oldHost := runtimeGOOS, parseOptionsForRun, hostPathsForRun
+	oldResolve, oldDiscover, oldOpen := resolveRootsForRun, discoverRootsForRun, openStoreForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		parseOptionsForRun = oldParse
+		hostPathsForRun = oldHost
+		resolveRootsForRun = oldResolve
+		discoverRootsForRun = oldDiscover
+		openStoreForRun = oldOpen
+	})
+	runtimeGOOS = "darwin"
+	parseOptionsForRun = func([]string) (cli.Options, error) {
+		return cli.Options{Command: "scan", JSON: true, Baseline: true, ProjectRoots: []string{"invalid-root"}}, nil
+	}
+	home := t.TempDir()
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		return home, platform.PathsForHome(home), true
+	}
+	resolveRootsForRun = func(string, []string) ([]projects.Root, error) {
+		return nil, errors.New("invalid explicit root")
+	}
+	discoverRootsForRun = func(context.Context, collector.Environment) (projects.Discovery, error) {
+		t.Fatal("explicit root failure invoked automatic discovery or its runner")
+		return projects.Discovery{}, errors.New("automatic discovery must not run")
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		t.Fatal("invalid explicit root opened the store")
+		return nil, errors.New("store must not be opened")
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"ignored-by-injected-parser"}, &stdout, &stderr)
+	if code != 2 || stdout.String() != "" || stderr.String() != "invalid command arguments\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestScanConfigurationAutomaticDiscoveryFinalizesScopeAndCoverage(t *testing.T) {
 	oldDiscover, oldResolve := discoverRootsForRun, resolveRootsForRun
 	t.Cleanup(func() {
@@ -460,6 +497,38 @@ func TestScanAutomaticDiscoveryCancellationDoesNotOpenStore(t *testing.T) {
 	cancel()
 	var stdout, stderr bytes.Buffer
 	code := runWithIO(ctx, []string{"ignored-by-injected-parser"}, &stdout, &stderr)
+	if code != 1 || stdout.String() != "" || stderr.String() != "failed to initialize SSC Init\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestScanAutomaticDiscoveryOperationalFailureDoesNotOpenStore(t *testing.T) {
+	oldGOOS, oldParse, oldHost := runtimeGOOS, parseOptionsForRun, hostPathsForRun
+	oldDiscover, oldOpen := discoverRootsForRun, openStoreForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		parseOptionsForRun = oldParse
+		hostPathsForRun = oldHost
+		discoverRootsForRun = oldDiscover
+		openStoreForRun = oldOpen
+	})
+	runtimeGOOS = "darwin"
+	parseOptionsForRun = func([]string) (cli.Options, error) {
+		return cli.Options{Command: "scan", JSON: true, Baseline: true}, nil
+	}
+	home := t.TempDir()
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		return home, platform.PathsForHome(home), true
+	}
+	discoverRootsForRun = func(context.Context, collector.Environment) (projects.Discovery, error) {
+		return projects.Discovery{}, errors.New("metadata unavailable")
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		t.Fatal("failed discovery opened the store")
+		return nil, errors.New("store must not be opened")
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(context.Background(), []string{"ignored-by-injected-parser"}, &stdout, &stderr)
 	if code != 1 || stdout.String() != "" || stderr.String() != "failed to initialize SSC Init\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
