@@ -40,13 +40,14 @@ type Root struct {
 }
 
 type projectCollector struct {
-	roots              []Root
-	invalid            bool
-	limits             walkLimits
-	beforeOpen         func(string)
-	afterWalk          func(string)
-	beforeProject      func(string)
-	beforeEvidenceHash func(string)
+	roots                []Root
+	invalid              bool
+	limits               walkLimits
+	beforeOpen           func(string)
+	afterWalk            func(string)
+	beforeProject        func(string)
+	beforeEvidenceHash   func(string)
+	afterProvenanceParse func(string)
 }
 
 type localTargetProvenance struct {
@@ -223,6 +224,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		return abortProjectCollection(&result, err)
 	}
 
+	aggregateProjectPackageAssets(&result)
 	sort.Slice(result.Targets, func(i, j int) bool { return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef })
 	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.Slice(result.Relationships, func(i, j int) bool {
@@ -547,7 +549,7 @@ func issueProjectEvidence(ctx context.Context, owner *projectCollector, env coll
 		}
 	}
 	if format, supported := provenanceFormat(item.definition.basename); supported {
-		appendProjectLockfileProvenance(ctx, asset, item, configured, projectID, format, result)
+		appendProjectLockfileProvenance(ctx, owner, asset, item, configured, projectID, format, result)
 	}
 	base.RootPath = configured.Path
 	base.RelativePath = filepath.Clean(item.relativePath)
@@ -618,12 +620,20 @@ func provenanceFormat(basename string) (provenance.Format, bool) {
 		return provenance.FormatCargo, true
 	case "go.sum":
 		return provenance.FormatGoSum, true
+	case "requirements.txt":
+		return provenance.FormatRequirements, true
+	case "Pipfile.lock":
+		return provenance.FormatPipfile, true
+	case "poetry.lock":
+		return provenance.FormatPoetry, true
+	case "uv.lock":
+		return provenance.FormatUV, true
 	default:
 		return "", false
 	}
 }
 
-func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
+func appendProjectLockfileProvenance(ctx context.Context, owner *projectCollector, projectRoot platform.RootedDirectory, item discoveredProjectEvidence, configured Root, projectID string, format provenance.Format, result *model.CollectorResult) {
 	basename := filepath.Base(item.relativePath)
 	locationRef := identity.SafeLocationRef(configured.home, filepath.Join(configured.Path, item.relativePath), configured.Ref)
 	lockfileID := digestID("project-lockfile", "ssc-init.project-lockfile.v1", locationRef)
@@ -652,6 +662,9 @@ func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.R
 			appendProjectProvenanceError(result, "provenance_malformed", "lockfile provenance is malformed")
 		}
 		return
+	}
+	if owner.afterProvenanceParse != nil {
+		owner.afterProvenanceParse(filepath.ToSlash(item.relativePath))
 	}
 	after, err := file.Stat()
 	afterFingerprint, afterOK := platform.Fingerprint(after)
@@ -683,6 +696,50 @@ func appendProjectLockfileProvenance(ctx context.Context, projectRoot platform.R
 		result.Observations = append(result.Observations, packageObservation)
 		result.Relationships = append(result.Relationships, model.Relationship{From: asset.ID, Kind: model.RelationshipDeclaredBy, To: lockfileID})
 	}
+}
+
+func aggregateProjectPackageAssets(result *model.CollectorResult) {
+	if result == nil || len(result.Assets) < 2 {
+		return
+	}
+	packageIndexes := make(map[string]int)
+	aggregated := make([]model.Asset, 0, len(result.Assets))
+	for _, candidate := range result.Assets {
+		if candidate.Type != model.AssetPackage {
+			aggregated = append(aggregated, candidate)
+			continue
+		}
+		if index, exists := packageIndexes[candidate.ID]; exists {
+			existing := &aggregated[index]
+			existing.Provenance = conservativeProjectPackageProvenance(existing.Provenance, candidate.Provenance)
+			continue
+		}
+		packageIndexes[candidate.ID] = len(aggregated)
+		aggregated = append(aggregated, candidate)
+	}
+	result.Assets = aggregated
+}
+
+func conservativeProjectPackageProvenance(left, right *model.Provenance) *model.Provenance {
+	if left == nil || right == nil || left.Ecosystem != right.Ecosystem {
+		return nil
+	}
+	merged := *left
+	if merged.Source != right.Source {
+		merged.Source = ""
+	}
+	switch {
+	case left.Status == model.ProvenanceMutable || right.Status == model.ProvenanceMutable:
+		merged.Status = model.ProvenanceMutable
+		merged.Integrity = ""
+	case left.Status == model.ProvenanceImmutable && right.Status == model.ProvenanceImmutable && left.Integrity == right.Integrity:
+		merged.Status = model.ProvenanceImmutable
+		merged.Integrity = left.Integrity
+	default:
+		merged.Status = model.ProvenanceUnknown
+		merged.Integrity = ""
+	}
+	return &merged
 }
 
 func provenancePackageAsset(record provenance.Record) model.Asset {
