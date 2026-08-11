@@ -24,8 +24,11 @@ history.
   Only the explicit roots are resolved and scanned.
 - With no explicit root, `$HOME/Projects` remains the conventional seed and is
   combined with auto-discovered roots.
-- Only existing regular directories strictly inside `$HOME` are eligible.
-  `$HOME` itself is never an auto-discovered project root.
+- Only existing regular directories strictly inside `$HOME` are eligible as
+  discovered projects. `$HOME` itself is never an auto-discovered project
+  root. The conventional `$HOME/Projects` scope placeholder is the sole
+  exception: it remains present when missing so existing `not_present`
+  behavior stays compatible, but it yields no discovered project.
 - Auto-discovery performs no process execution and opens no socket.
 - The final deterministic root references are recorded in the existing scan
   scope before collection begins; no scan schema change is required.
@@ -131,7 +134,7 @@ entries produce fixed coverage detail and no candidate.
 
 ## 5. Candidate validation
 
-Every candidate passes the same sequence:
+Every IDE or Git candidate passes the same sequence:
 
 1. decode without NUL, control characters, or invalid UTF-8;
 2. require an absolute lexically canonical path;
@@ -147,6 +150,12 @@ Every candidate passes the same sequence:
 IDE metadata under `Library/Application Support` is a permitted *source* but
 can never itself become a project candidate. A candidate under any `Library`
 subtree is rejected.
+
+The conventional `$HOME/Projects` placeholder is constructed through the
+existing explicit-root resolver and kept separately from discovered
+candidates. If it exists, it also undergoes the existing project collector's
+no-follow identity validation. If it is missing, it remains only a
+`not_present` scope entry and is never treated as a verified discovery result.
 
 Candidate roots are deduplicated by verified filesystem identity and canonical
 path. If one candidate contains another, only the parent is retained, except
