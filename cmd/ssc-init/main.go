@@ -46,10 +46,11 @@ type applicationStore interface {
 }
 
 var (
-	runtimeGOOS        = runtime.GOOS
-	parseOptionsForRun = cli.ParseOptions
-	hostPathsForRun    = hostPaths
-	resolveRootsForRun = projects.ResolveRoots
+	runtimeGOOS         = runtime.GOOS
+	parseOptionsForRun  = cli.ParseOptions
+	hostPathsForRun     = hostPaths
+	resolveRootsForRun  = projects.ResolveRoots
+	discoverRootsForRun = projects.DiscoverRoots
 	// The local-policy build always opens the store with documented retention
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
@@ -195,8 +196,12 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
 		}
-		environment, configuredCollectors, err := scanConfiguration(home, options)
+		environment, configuredCollectors, err := scanConfiguration(ctx, home, options)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				return 1
+			}
 			fmt.Fprintln(stderr, "invalid command arguments")
 			return 2
 		}
@@ -311,7 +316,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
 		}
-		environment, configuredCollectors, err := scanConfiguration(home, options)
+		environment, configuredCollectors, err := scanConfiguration(ctx, home, options)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
@@ -537,33 +542,49 @@ func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
 	return ti, organization, err
 }
 
-func scanConfiguration(home string, options cli.Options) (collector.Environment, []collector.Collector, error) {
-	roots, err := resolveRootsForRun(home, options.ProjectRoots)
-	if err != nil {
-		return collector.Environment{}, nil, err
-	}
+func scanConfiguration(ctx context.Context, home string, options cli.Options) (collector.Environment, []collector.Collector, error) {
 	environment := collector.Environment{
 		Home:     home,
 		Platform: runtime.GOOS,
-		Scope: model.ScanScope{
-			Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
-			ProjectRoots: projects.RootRefs(roots), ExternalProbes: options.ExternalProbes,
-		},
-		FS: platform.OSFileSystem{},
+		FS:       platform.OSFileSystem{},
 		Runner: platform.ExecRunner{
 			Timeout:        5 * time.Second,
 			MaxOutputBytes: 4 << 20,
 		},
 		Now: func() time.Time { return time.Now().UTC() },
 	}
+	var (
+		roots             []projects.Root
+		discoveryCoverage []model.TargetCoverage
+		err               error
+	)
+	if len(options.ProjectRoots) > 0 {
+		roots, err = resolveRootsForRun(home, options.ProjectRoots)
+	} else {
+		var discovery projects.Discovery
+		discovery, err = discoverRootsForRun(ctx, environment)
+		roots = discovery.Roots
+		discoveryCoverage = discovery.Coverage
+	}
+	if err != nil {
+		return collector.Environment{}, nil, err
+	}
+	environment.Scope = model.ScanScope{
+		Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
+		ProjectRoots: projects.RootRefs(roots), ExternalProbes: options.ExternalProbes,
+	}
 	if options.ExternalProbes {
 		environment.Inspector = platform.NewExecutableInspector(16, 64<<20)
 		environment.SignatureInspector = platform.NewSignatureInspector(environment.Runner)
 	}
+	projectCollector := projects.New(roots)
+	if len(options.ProjectRoots) == 0 {
+		projectCollector = projects.NewWithDiscovery(roots, discoveryCoverage)
+	}
 	configuredCollectors := []collector.Collector{
 		agents.New(),
 		ide.New(),
-		projects.New(roots),
+		projectCollector,
 		surfaces.New(),
 		packages.New(),
 		runtimecollector.New(),

@@ -279,19 +279,19 @@ func TestHookOnUnsupportedOperatingSystemIsAUsageError(t *testing.T) {
 }
 
 func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
-	oldHost, oldOpen, oldResolve := hostPathsForRun, openStoreForRun, resolveRootsForRun
+	oldHost, oldOpen, oldDiscover := hostPathsForRun, openStoreForRun, discoverRootsForRun
 	t.Cleanup(func() {
 		hostPathsForRun = oldHost
 		openStoreForRun = oldOpen
-		resolveRootsForRun = oldResolve
+		discoverRootsForRun = oldDiscover
 	})
 	home := t.TempDir()
 
 	for _, testCase := range []struct {
-		name    string
-		hosts   func() (string, platform.Paths, bool)
-		open    func(string) (applicationStore, error)
-		resolve func(string, []string) ([]projects.Root, error)
+		name     string
+		hosts    func() (string, platform.Paths, bool)
+		open     func(string) (applicationStore, error)
+		discover func(context.Context, collector.Environment) (projects.Discovery, error)
 	}{
 		{
 			name:  "host paths unavailable",
@@ -308,8 +308,8 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 				t.Fatal("hook opened the store without a scan configuration")
 				return nil, errors.New("store must not be opened")
 			},
-			resolve: func(string, []string) ([]projects.Root, error) {
-				return nil, errors.New("project roots unavailable")
+			discover: func(context.Context, collector.Environment) (projects.Discovery, error) {
+				return projects.Discovery{}, errors.New("project roots unavailable")
 			},
 		},
 		{
@@ -321,9 +321,9 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			hostPathsForRun = testCase.hosts
 			openStoreForRun = testCase.open
-			resolveRootsForRun = oldResolve
-			if testCase.resolve != nil {
-				resolveRootsForRun = testCase.resolve
+			discoverRootsForRun = oldDiscover
+			if testCase.discover != nil {
+				discoverRootsForRun = testCase.discover
 			}
 			var stdout, stderr bytes.Buffer
 			code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr)
@@ -334,14 +334,20 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 	}
 }
 
-func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) {
+func TestScanExplicitRootCarriesResolvedScopeAndProjectCollector(t *testing.T) {
+	oldDiscover := discoverRootsForRun
+	t.Cleanup(func() { discoverRootsForRun = oldDiscover })
+	discoverRootsForRun = func(context.Context, collector.Environment) (projects.Discovery, error) {
+		t.Fatal("explicit project root invoked automatic discovery")
+		return projects.Discovery{}, errors.New("automatic discovery must not run")
+	}
 	home := t.TempDir()
 	external := filepath.Join(filepath.Dir(home), "external-projects")
 	options := cli.Options{
 		Command: "scan", JSON: true, Baseline: true, ExternalProbes: true,
 		ProjectRoots: []string{"$HOME/Projects", external},
 	}
-	environment, collectors, err := scanConfiguration(home, options)
+	environment, collectors, err := scanConfiguration(context.Background(), home, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,8 +375,98 @@ func TestScanConfigurationCarriesResolvedScopeAndProjectCollector(t *testing.T) 
 	}
 }
 
+func TestScanConfigurationAutomaticDiscoveryFinalizesScopeAndCoverage(t *testing.T) {
+	oldDiscover, oldResolve := discoverRootsForRun, resolveRootsForRun
+	t.Cleanup(func() {
+		discoverRootsForRun = oldDiscover
+		resolveRootsForRun = oldResolve
+	})
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "automatic")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := projects.ResolveRoots(home, []string{project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCoverage := model.TargetCoverage{
+		TargetID: "projects.discovery.vscode",
+		Status:   model.TargetComplete,
+	}
+	resolveRootsForRun = func(string, []string) ([]projects.Root, error) {
+		t.Fatal("automatic discovery invoked explicit root resolution")
+		return nil, errors.New("explicit root resolution must not run")
+	}
+	discoverRootsForRun = func(ctx context.Context, environment collector.Environment) (projects.Discovery, error) {
+		if err := ctx.Err(); err != nil {
+			return projects.Discovery{}, err
+		}
+		if environment.Home != home || environment.FS == nil || environment.Runner == nil || environment.Now == nil {
+			t.Fatalf("incomplete discovery environment=%+v", environment)
+		}
+		if len(environment.Scope.ProjectRoots) != 0 {
+			t.Fatalf("scope finalized before discovery: %+v", environment.Scope)
+		}
+		return projects.Discovery{Roots: roots, Coverage: []model.TargetCoverage{wantCoverage}}, nil
+	}
+
+	environment, collectors, err := scanConfiguration(context.Background(), home, cli.Options{Command: "scan", JSON: true, Baseline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantScope := model.ScanScope{
+		Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
+		ProjectRoots: []string{"$HOME/work/automatic"},
+	}
+	if !reflect.DeepEqual(environment.Scope, wantScope) {
+		t.Fatalf("scope=%+v want=%+v", environment.Scope, wantScope)
+	}
+	result, err := collectors[2].Collect(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Targets) < 1 || !reflect.DeepEqual(result.Targets[0], wantCoverage) {
+		t.Fatalf("project targets=%+v want discovery first=%+v", result.Targets, wantCoverage)
+	}
+}
+
+func TestScanAutomaticDiscoveryCancellationDoesNotOpenStore(t *testing.T) {
+	oldGOOS, oldParse, oldHost := runtimeGOOS, parseOptionsForRun, hostPathsForRun
+	oldDiscover, oldOpen := discoverRootsForRun, openStoreForRun
+	t.Cleanup(func() {
+		runtimeGOOS = oldGOOS
+		parseOptionsForRun = oldParse
+		hostPathsForRun = oldHost
+		discoverRootsForRun = oldDiscover
+		openStoreForRun = oldOpen
+	})
+	runtimeGOOS = "darwin"
+	parseOptionsForRun = func([]string) (cli.Options, error) {
+		return cli.Options{Command: "scan", JSON: true, Baseline: true}, nil
+	}
+	home := t.TempDir()
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		return home, platform.PathsForHome(home), true
+	}
+	discoverRootsForRun = func(ctx context.Context, _ collector.Environment) (projects.Discovery, error) {
+		return projects.Discovery{}, ctx.Err()
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		t.Fatal("canceled discovery opened the store")
+		return nil, errors.New("store must not be opened")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := runWithIO(ctx, []string{"ignored-by-injected-parser"}, &stdout, &stderr)
+	if code != 1 || stdout.String() != "" || stderr.String() != "failed to initialize SSC Init\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestScanConfigurationLeavesInspectorUnwiredWhenExternalProbesAreDisabled(t *testing.T) {
-	environment, _, err := scanConfiguration(t.TempDir(), cli.Options{Command: "scan", JSON: true, Baseline: true})
+	environment, _, err := scanConfiguration(context.Background(), t.TempDir(), cli.Options{Command: "scan", JSON: true, Baseline: true})
 	if err != nil {
 		t.Fatal(err)
 	}
