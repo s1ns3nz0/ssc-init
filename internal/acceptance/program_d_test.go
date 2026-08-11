@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,17 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/agents"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
-	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/scanconfig"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
 )
 
@@ -58,6 +56,8 @@ func TestProjectAutoDiscoveryPrivacyAndExplicitOverrideAcceptance(t *testing.T) 
 
 	automaticFS := &discoveryRecordingFileSystem{matrixFileSystem: &matrixFileSystem{OSFileSystem: platform.OSFileSystem{}, root: home}}
 	automatic := runDiscoveryAcceptanceBaseline(t, home, nil, automaticFS)
+	repeatedFS := &discoveryRecordingFileSystem{matrixFileSystem: &matrixFileSystem{OSFileSystem: platform.OSFileSystem{}, root: home}}
+	repeated := runDiscoveryAcceptanceBaseline(t, home, nil, repeatedFS)
 	wantScope := []string{"$HOME/Projects", "$HOME/work/code", "$HOME/work/cursor", "$HOME/work/windsurf", "$HOME/work/jetbrains", "$HOME/work/git-linked"}
 	if !reflect.DeepEqual(automatic.Scan.Scope.ProjectRoots, wantScope) {
 		t.Fatalf("automatic scope=%v want=%v", automatic.Scan.Scope.ProjectRoots, wantScope)
@@ -74,6 +74,9 @@ func TestProjectAutoDiscoveryPrivacyAndExplicitOverrideAcceptance(t *testing.T) 
 	if automatic.Runner.callCount() != 0 {
 		t.Fatalf("automatic discovery executed commands: %d", automatic.Runner.callCount())
 	}
+	if !bytes.Equal(automatic.Report, repeated.Report) || !reflect.DeepEqual(automatic.Scan, repeated.Scan) || !reflect.DeepEqual(automatic.Inventory, repeated.Inventory) || !reflect.DeepEqual(automatic.Snapshot, repeated.Snapshot) {
+		t.Fatal("repeated automatic baseline was not byte-identical")
+	}
 	reopened := reopenLatestSnapshot(t, automatic.DatabasePath)
 	if !reflect.DeepEqual(reopened.Scan.Scope, automatic.Scan.Scope) || !reflect.DeepEqual(reopened.Inventory, automatic.Inventory) {
 		t.Fatal("real-store reload drifted from automatic baseline")
@@ -82,10 +85,14 @@ func TestProjectAutoDiscoveryPrivacyAndExplicitOverrideAcceptance(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateMarkers := []string{home, "private-home-marker", "private-code-workspace-id", "private-cursor-workspace-id", "private-windsurf-workspace-id", "private-worktree-id", "file://" + home}
+	privateMarkers := []string{
+		home, "private-home-marker", "private-code-workspace-id", "private-cursor-workspace-id", "private-windsurf-workspace-id",
+		"unsupported-remote", "vscode-remote://ssh-remote+host/private", "IntelliJIdea2026.1", "MalformedProduct",
+		"private-worktree-id", "stale-private-id", admin, filepath.Join(home, "missing", ".git"), "file://" + home,
+	}
 	for _, marker := range privateMarkers {
 		if strings.Contains(string(automatic.Report), marker) || strings.Contains(string(snapshotJSON), marker) {
-			t.Fatalf("automatic output leaked private marker %q", marker)
+			t.Fatal("automatic output leaked a private discovery marker")
 		}
 	}
 
@@ -96,7 +103,7 @@ func TestProjectAutoDiscoveryPrivacyAndExplicitOverrideAcceptance(t *testing.T) 
 		t.Fatalf("explicit scope=%v", got)
 	}
 	if explicitFS.openedDiscoveryMetadata() {
-		t.Fatalf("explicit override opened discovery metadata: %v", explicitFS.openedPaths())
+		t.Fatal("explicit override opened discovery metadata")
 	}
 	if got := countAssetsOfType(overridden.Inventory, model.AssetProject); got != 1 {
 		t.Fatalf("explicit override project assets=%d want=1: %+v", got, overridden.Inventory.Assets)
@@ -119,11 +126,33 @@ type discoveryRecordingFileSystem struct {
 	opened []string
 }
 
+func TestDiscoveryRecordingFileSystemClassifiesGitMetadata(t *testing.T) {
+	recorder := &discoveryRecordingFileSystem{matrixFileSystem: &matrixFileSystem{OSFileSystem: platform.OSFileSystem{}, root: t.TempDir()}}
+	for _, path := range []string{
+		filepath.Join(recorder.root, "Projects", "main", ".git"),
+		filepath.Join(recorder.root, "Projects", "main", ".git", "worktrees", "private-id", "gitdir"),
+		filepath.Join(recorder.root, "work", "linked", ".git"),
+	} {
+		recorder.record(path)
+	}
+	if !recorder.openedDiscoveryMetadata() {
+		t.Fatal("Git discovery metadata was not classified")
+	}
+}
+
 func (f *discoveryRecordingFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	f.record(name)
+	root, err := f.matrixFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryRecordingRoot{RootedDirectory: root, owner: f, path: filepath.Clean(name)}, nil
+}
+
+func (f *discoveryRecordingFileSystem) record(name string) {
 	f.mu.Lock()
 	f.opened = append(f.opened, filepath.Clean(name))
 	f.mu.Unlock()
-	return f.matrixFileSystem.OpenRoot(name)
 }
 
 func (f *discoveryRecordingFileSystem) openedPaths() []string {
@@ -134,36 +163,68 @@ func (f *discoveryRecordingFileSystem) openedPaths() []string {
 
 func (f *discoveryRecordingFileSystem) openedDiscoveryMetadata() bool {
 	for _, path := range f.openedPaths() {
-		if strings.Contains(path, filepath.Join("Library", "Application Support", "Code")) || strings.Contains(path, filepath.Join("Library", "Application Support", "Cursor")) || strings.Contains(path, filepath.Join("Library", "Application Support", "Windsurf")) || strings.Contains(path, filepath.Join("Library", "Application Support", "JetBrains")) {
+		if isDiscoveryMetadataPath(path) {
 			return true
 		}
 	}
 	return false
 }
 
+func isDiscoveryMetadataPath(path string) bool {
+	clean := filepath.Clean(path)
+	for _, product := range []string{"Code", "Cursor", "Windsurf"} {
+		if strings.Contains(clean, filepath.Join("Library", "Application Support", product, "User", "workspaceStorage")) {
+			return true
+		}
+	}
+	if strings.Contains(clean, filepath.Join("Library", "Application Support", "JetBrains")) && (strings.Contains(clean, string(filepath.Separator)+"options") || strings.HasSuffix(clean, "recentProjects.xml")) {
+		return true
+	}
+	separator := string(filepath.Separator)
+	return strings.HasSuffix(clean, separator+".git") || strings.Contains(clean, separator+".git"+separator)
+}
+
+type discoveryRecordingRoot struct {
+	platform.RootedDirectory
+	owner *discoveryRecordingFileSystem
+	path  string
+}
+
+func (r *discoveryRecordingRoot) Lstat(name string) (os.FileInfo, error) {
+	r.owner.record(filepath.Join(r.path, name))
+	return r.RootedDirectory.Lstat(name)
+}
+
+func (r *discoveryRecordingRoot) Readlink(name string) (string, error) {
+	r.owner.record(filepath.Join(r.path, name))
+	return r.RootedDirectory.Readlink(name)
+}
+
+func (r *discoveryRecordingRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	path := filepath.Join(r.path, name)
+	r.owner.record(path)
+	root, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryRecordingRoot{RootedDirectory: root, owner: r.owner, path: path}, nil
+}
+
+func (r *discoveryRecordingRoot) Open(name string) (platform.RootedFile, error) {
+	r.owner.record(filepath.Join(r.path, name))
+	return r.RootedDirectory.Open(name)
+}
+
 func runDiscoveryAcceptanceBaseline(t *testing.T, home string, explicit []string, fileSystem *discoveryRecordingFileSystem) isolatedBaseline {
 	t.Helper()
 	runner := &matrixRunner{failOnCall: true}
 	environment := collector.Environment{Home: home, Platform: "darwin", FS: fileSystem, Runner: runner, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }}
-	var roots []projects.Root
-	var discoveryCoverage []model.TargetCoverage
-	var err error
-	if len(explicit) > 0 {
-		roots, err = projects.ResolveRoots(home, explicit)
-	} else {
-		var discovery projects.Discovery
-		discovery, err = projects.DiscoverRoots(context.Background(), environment)
-		roots, discoveryCoverage = discovery.Roots, discovery.Coverage
-	}
+	options := cli.Options{Command: "scan", Baseline: true, JSON: true, ProjectRoots: explicit}
+	environment, configured, err := scanconfig.Configure(context.Background(), environment, options, projects.ResolveRoots, projects.DiscoverRoots)
 	if err != nil {
 		t.Fatal(err)
 	}
-	environment.Scope = model.ScanScope{Platform: "darwin", CatalogVersion: collector.CatalogVersion, ProjectRoots: projects.RootRefs(roots)}
-	projectCollector := projects.New(roots)
-	if len(explicit) == 0 {
-		projectCollector = projects.NewWithDiscovery(roots, discoveryCoverage)
-	}
-	configured := []collector.Collector{agents.New(), ide.New(), projectCollector, surfaces.New(), packages.New(), runtimecollector.New()}
+	configured = []collector.Collector{configured[2]}
 	databasePath := filepath.Join(privateMatrixTempDir(t), "state.db")
 	snapshots, err := store.Open(databasePath)
 	if err != nil {

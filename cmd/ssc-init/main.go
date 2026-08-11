@@ -19,20 +19,16 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/agents"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/ide"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/packages"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
-	runtimecollector "github.com/s1ns3nz0/ssc-init/internal/collector/runtime"
-	"github.com/s1ns3nz0/ssc-init/internal/collector/surfaces"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/install"
-	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
+	"github.com/s1ns3nz0/ssc-init/internal/scanconfig"
 	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
 	"github.com/s1ns3nz0/ssc-init/internal/webhook"
@@ -553,41 +549,14 @@ func scanConfiguration(ctx context.Context, home string, options cli.Options) (c
 		},
 		Now: func() time.Time { return time.Now().UTC() },
 	}
-	var (
-		roots             []projects.Root
-		discoveryCoverage []model.TargetCoverage
-		err               error
-	)
-	if len(options.ProjectRoots) > 0 {
-		roots, err = resolveRootsForRun(home, options.ProjectRoots)
-	} else {
-		var discovery projects.Discovery
-		discovery, err = discoverRootsForRun(ctx, environment)
-		roots = discovery.Roots
-		discoveryCoverage = discovery.Coverage
-	}
+	configuredEnvironment, configuredCollectors, err := scanconfig.Configure(ctx, environment, options, resolveRootsForRun, discoverRootsForRun)
 	if err != nil {
 		return collector.Environment{}, nil, err
 	}
-	environment.Scope = model.ScanScope{
-		Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
-		ProjectRoots: projects.RootRefs(roots), ExternalProbes: options.ExternalProbes,
-	}
+	environment = configuredEnvironment
 	if options.ExternalProbes {
 		environment.Inspector = platform.NewExecutableInspector(16, 64<<20)
 		environment.SignatureInspector = platform.NewSignatureInspector(environment.Runner)
-	}
-	projectCollector := projects.New(roots)
-	if len(options.ProjectRoots) == 0 {
-		projectCollector = projects.NewWithDiscovery(roots, discoveryCoverage)
-	}
-	configuredCollectors := []collector.Collector{
-		agents.New(),
-		ide.New(),
-		projectCollector,
-		surfaces.New(),
-		packages.New(),
-		runtimecollector.New(),
 	}
 	return environment, configuredCollectors, nil
 }
