@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
@@ -75,6 +76,132 @@ type verifiedDiscoveryCandidate struct {
 	source   string
 	priority int
 	identity os.FileInfo
+}
+
+// DiscoverRoots performs the bounded automatic project discovery prepass.
+// The conventional root is retained as a scope placeholder even when absent.
+func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, error) {
+	if err := ctx.Err(); err != nil {
+		return Discovery{}, err
+	}
+	conventional, err := ResolveRoots(env.Home, nil)
+	if err != nil {
+		return Discovery{}, err
+	}
+	if len(conventional) != 1 || conventional[0].Ref != "$HOME/Projects" {
+		return Discovery{}, errors.New("invalid conventional project root")
+	}
+
+	ideCandidates, ideCoverage, err := discoverIDERoots(ctx, env)
+	if err != nil {
+		clearDiscoveryCandidates(ideCandidates)
+		return Discovery{}, err
+	}
+	defer clearDiscoveryCandidates(ideCandidates)
+	verifiedIDE, err := verifyDiscoverySeeds(ctx, env.Home, env.FS, ideCandidates)
+	if err != nil {
+		return Discovery{}, err
+	}
+	defer clearDiscoveryCandidates(verifiedIDE)
+
+	seeds := make([]discoveryCandidate, 0, len(verifiedIDE)+1)
+	allCandidates := make([]discoveryCandidate, 0, len(ideCandidates)+1)
+	if info, statErr := discoveryConventionalRootInfo(env.FS, conventional[0].Path); statErr == nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
+		seed := discoveryCandidate{path: conventional[0].Path, source: discoveryGitTargetID, priority: 0}
+		seeds = append(seeds, seed)
+		allCandidates = append(allCandidates, seed)
+	}
+	seeds = append(seeds, verifiedIDE...)
+	defer clearDiscoveryCandidates(seeds)
+
+	gitCandidates, gitCoverage, err := discoverGitWorktrees(ctx, env, seeds)
+	if err != nil {
+		clearDiscoveryCandidates(gitCandidates)
+		clearDiscoveryCandidates(allCandidates)
+		return Discovery{}, err
+	}
+	defer clearDiscoveryCandidates(gitCandidates)
+	allCandidates = append(allCandidates, ideCandidates...)
+	allCandidates = append(allCandidates, gitCandidates...)
+	defer clearDiscoveryCandidates(allCandidates)
+
+	finalized, err := finalizeDiscoveredRoots(env.Home, env.FS, allCandidates)
+	if err != nil {
+		return Discovery{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		clearDiscoveryRoots(finalized.Roots)
+		return Discovery{}, err
+	}
+
+	if len(finalized.Roots) > 0 && finalized.Roots[0].Ref == "$HOME/Projects" {
+		finalized.Roots[0] = conventional[0]
+	} else {
+		roots := make([]Root, 0, len(finalized.Roots)+1)
+		roots = append(roots, conventional[0])
+		roots = append(roots, finalized.Roots...)
+		finalized.Roots = roots
+	}
+	finalized.Coverage = mergeDiscoveryCoverage(ideCoverage, gitCoverage, finalized.Coverage)
+	return finalized, nil
+}
+
+func verifyDiscoverySeeds(ctx context.Context, home string, fileSystem platform.FileSystem, candidates []discoveryCandidate) ([]discoveryCandidate, error) {
+	noFollow, noFollowOK := fileSystem.(platform.NoFollowFileSystem)
+	rooted, rootedOK := fileSystem.(platform.RootedFileSystem)
+	if fileSystem == nil || !noFollowOK || !rootedOK {
+		return nil, errors.New("project discovery filesystem unavailable")
+	}
+	homeRoot, _, homeDevice, err := openDiscoveryHome(home, noFollow, rooted)
+	if err != nil {
+		return nil, err
+	}
+	defer homeRoot.Close()
+	verified := make([]discoveryCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			clearDiscoveryCandidates(verified)
+			return nil, err
+		}
+		_, identity, code := validateDiscoveryCandidate(home, homeRoot, homeDevice, candidate.path)
+		if code != "" || !recheckDiscoveryCandidate(home, homeRoot, homeDevice, candidate.path, identity) {
+			continue
+		}
+		verified = append(verified, candidate)
+	}
+	return verified, nil
+}
+
+func discoveryConventionalRootInfo(fileSystem platform.FileSystem, path string) (os.FileInfo, error) {
+	noFollow, ok := fileSystem.(platform.NoFollowFileSystem)
+	if fileSystem == nil || !ok {
+		return nil, errors.New("project discovery filesystem unavailable")
+	}
+	return noFollow.Lstat(path)
+}
+
+func mergeDiscoveryCoverage(groups ...[]model.TargetCoverage) []model.TargetCoverage {
+	issues := make(map[string]map[string]struct{}, len(discoveryTargetOrder))
+	for _, group := range groups {
+		for _, target := range group {
+			if !isDiscoveryTargetID(target.TargetID) {
+				continue
+			}
+			for _, issue := range target.Errors {
+				if issues[target.TargetID] == nil {
+					issues[target.TargetID] = make(map[string]struct{})
+				}
+				issues[target.TargetID][issue.Code] = struct{}{}
+			}
+		}
+	}
+	return discoveryIssueCoverage(issues)
+}
+
+func clearDiscoveryRoots(roots []Root) {
+	for index := range roots {
+		roots[index] = Root{}
+	}
 }
 
 // finalizeDiscoveredRoots validates ephemeral candidates, removes duplicate

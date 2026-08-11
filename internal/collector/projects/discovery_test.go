@@ -762,6 +762,117 @@ func TestDiscoveryCoverageIsPrependedDeepCopiedAndMakesCollectionPartial(t *test
 	}
 }
 
+func TestDiscoverRootsOrchestratesConventionalIDEAndGitSourcesDeterministically(t *testing.T) {
+	home := t.TempDir()
+	projects := filepath.Join(home, "Projects")
+	codeProject := filepath.Join(home, "work", "code")
+	jetBrainsProject := filepath.Join(codeProject, "nested")
+	linked := filepath.Join(home, "work", "feature")
+	for _, path := range []string{projects, codeProject, jetBrainsProject} {
+		mkdirDiscoveryCandidate(t, path)
+	}
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "valid", "folder", codeProject)
+	writeVSCodeDiscoveryRaw(t, home, "Code", "broken", []byte(`{"folder":`))
+	writeVSCodeDiscoveryRaw(t, home, "Cursor", "remote", []byte(`{"folder":"vscode-remote://ssh-remote+host/private"}`))
+	writeVSCodeDiscoveryRaw(t, home, "Windsurf", "broken", []byte(`{"folder":`))
+	writeJetBrainsRecent(t, home, "IntelliJIdea", []string{jetBrainsProject})
+	writeDiscoveryFile(t, filepath.Join(jetbrainsDiscoverySourcePath(home), "WebStorm", "options", "recentProjects.xml"), []byte(`<application>`))
+	makeGitPair(t, filepath.Join(projects, "main"), linked, "feature")
+	// A stale safe sibling contributes coverage without erasing the valid pair.
+	writeGitFixture(t, filepath.Join(projects, "stale", ".git", "worktrees", "stale", "gitdir"), filepath.Join(home, "missing", ".git")+"\n")
+
+	env := testutil.Environment(t, home)
+	first, err := DiscoverRoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRefs := []string{"$HOME/Projects", "$HOME/work/code", "$HOME/work/feature"}
+	gotRefs := make([]string, len(first.Roots))
+	for index := range first.Roots {
+		gotRefs[index] = first.Roots[index].Ref
+	}
+	if !reflect.DeepEqual(gotRefs, wantRefs) {
+		t.Fatalf("refs=%v want=%v", gotRefs, wantRefs)
+	}
+	wantTargets := []string{discoveryVSCodeTargetID, discoveryCursorTargetID, discoveryWindsurfTargetID, discoveryJetBrainsTargetID, discoveryGitTargetID}
+	gotTargets := make([]string, len(first.Coverage))
+	for index := range first.Coverage {
+		gotTargets[index] = first.Coverage[index].TargetID
+	}
+	if !reflect.DeepEqual(gotTargets, wantTargets) {
+		t.Fatalf("targets=%v want=%v", gotTargets, wantTargets)
+	}
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DiscoverRoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(firstJSON, secondJSON) {
+		t.Fatalf("unstable discovery:\n%s\n%s", firstJSON, secondJSON)
+	}
+	assertCoverageExcludes(t, first.Coverage, home, codeProject, linked, "private", "feature", "stale")
+}
+
+func TestDiscoverRootsKeepsMissingConventionalPlaceholderAndSafeSibling(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "safe")
+	mkdirDiscoveryCandidate(t, project)
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "valid", "folder", project)
+	writeVSCodeDiscoveryRaw(t, home, "Cursor", "broken", []byte(`{"folder":`))
+
+	got, err := DiscoverRoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"$HOME/Projects", "$HOME/work/safe"}
+	refs := make([]string, len(got.Roots))
+	for index := range got.Roots {
+		refs[index] = got.Roots[index].Ref
+	}
+	if !reflect.DeepEqual(refs, want) {
+		t.Fatalf("refs=%v want=%v", refs, want)
+	}
+	assertDiscoveryCoverageCodes(t, got.Coverage, discoveryCursorTargetID, "metadata_malformed")
+}
+
+func TestDiscoverRootsCancellationReturnsNoPartialDiscovery(t *testing.T) {
+	home := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := DiscoverRoots(ctx, testutil.Environment(t, home))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(got.Roots) != 0 || len(got.Coverage) != 0 {
+		t.Fatalf("partial discovery=%+v", got)
+	}
+}
+
+func TestDiscoverRootsDoesNotWalkRejectedIDECandidate(t *testing.T) {
+	home := t.TempDir()
+	rejected := filepath.Join(home, "Library", "private-repository")
+	linked := filepath.Join(home, "work", "must-not-be-discovered")
+	makeGitPair(t, filepath.Join(rejected, "main"), linked, "private-id")
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "workspace-hash", "folder", rejected)
+
+	got, err := DiscoverRoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Roots) != 1 || got.Roots[0].Ref != "$HOME/Projects" {
+		t.Fatalf("roots=%+v", got.Roots)
+	}
+	assertDiscoveryCoverageCodes(t, got.Coverage, discoveryVSCodeTargetID, "outside_home")
+	assertDiscoveryJSONExcludes(t, got, home, rejected, linked, "private-id", "workspace-hash")
+}
+
 func mkdirDiscoveryCandidate(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o700); err != nil {
