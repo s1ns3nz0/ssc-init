@@ -3,16 +3,306 @@ package projects
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 	"github.com/s1ns3nz0/ssc-init/internal/testutil"
 )
+
+func TestDiscoverVSCodeSourcesAreAbsentWithoutCoverage(t *testing.T) {
+	home := t.TempDir()
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidates != nil || coverage != nil {
+		t.Fatalf("candidates=%+v coverage=%+v", candidates, coverage)
+	}
+}
+
+func TestDiscoverVSCodeSortsSourcesAndChildrenConvertsWorkspaceAndIsolatesMalformedSibling(t *testing.T) {
+	home := t.TempDir()
+	codeProject := filepath.Join(home, "work", "code")
+	cursorProject := filepath.Join(home, "work", "cursor")
+	windsurfProject := filepath.Join(home, "work", "windsurf")
+	workspaceFile := filepath.Join(home, "workspaces", "team.code-workspace")
+	for _, project := range []string{codeProject, cursorProject, windsurfProject, filepath.Dir(workspaceFile)} {
+		mkdirDiscoveryCandidate(t, project)
+	}
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "z-child", "workspace", workspaceFile)
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "a-child", "folder", codeProject)
+	writeVSCodeDiscoveryRaw(t, home, "Code", "m-broken", []byte(`{"folder":`))
+	writeVSCodeDiscoveryWorkspace(t, home, "Cursor", "only", "folder", cursorProject)
+	writeVSCodeDiscoveryWorkspace(t, home, "Windsurf", "only", "folder", windsurfProject)
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []discoveryCandidate{
+		{path: codeProject, source: discoveryVSCodeTargetID, priority: 1},
+		{path: filepath.Dir(workspaceFile), source: discoveryVSCodeTargetID, priority: 1},
+		{path: cursorProject, source: discoveryCursorTargetID, priority: 2},
+		{path: windsurfProject, source: discoveryWindsurfTargetID, priority: 3},
+	}
+	if !reflect.DeepEqual(candidates, want) {
+		t.Fatalf("candidates=%+v want=%+v", candidates, want)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "metadata_malformed")
+	assertCoverageExcludes(t, coverage, home, "m-broken", "a-child", "z-child")
+}
+
+func TestDiscoverVSCodeCapsChildrenAndRejectsOversizedMetadata(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "project")
+	mkdirDiscoveryCandidate(t, project)
+	for index := 0; index < 257; index++ {
+		writeVSCodeDiscoveryWorkspace(t, home, "Code", fmt.Sprintf("%03d", index), "folder", project)
+	}
+	writeVSCodeDiscoveryRaw(t, home, "Cursor", "oversized", []byte(`{"folder":"file:///`+strings.Repeat("x", 64*1024)+`"}`))
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 256 {
+		t.Fatalf("candidates=%d", len(candidates))
+	}
+	if candidates[0].source != discoveryVSCodeTargetID || candidates[255].source != discoveryVSCodeTargetID {
+		t.Fatalf("unexpected candidates=%+v", candidates)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "entry_limit")
+	assertDiscoveryCoverageCodes(t, coverage, discoveryCursorTargetID, "metadata_oversized")
+	assertCoverageExcludes(t, coverage, home, strings.Repeat("x", 64))
+}
+
+func TestDiscoverVSCodeRejectsSourceAndWorkspaceFileSymlinks(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "project")
+	mkdirDiscoveryCandidate(t, project)
+	realSource := filepath.Join(home, "real-source")
+	writeVSCodeWorkspaceAt(t, realSource, "linked", "folder", project)
+	codeSource := vscodeDiscoverySourcePath(home, "Code")
+	if err := os.MkdirAll(filepath.Dir(codeSource), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realSource, codeSource); err != nil {
+		t.Fatal(err)
+	}
+	cursorChild := filepath.Join(vscodeDiscoverySourcePath(home, "Cursor"), "linked")
+	if err := os.MkdirAll(cursorChild, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(home, "real-workspace.json")
+	writeDiscoveryFile(t, realFile, []byte(`{"folder":"file://`+project+`"}`))
+	if err := os.Symlink(realFile, filepath.Join(cursorChild, "workspace.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "symlink_rejected")
+	assertDiscoveryCoverageCodes(t, coverage, discoveryCursorTargetID, "symlink_rejected")
+	assertCoverageExcludes(t, coverage, home, project, realSource, realFile)
+}
+
+func TestDiscoverVSCodeRejectsSourceAndFileReplacementAfterRead(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		replaceSrc bool
+	}{
+		{name: "source", replaceSrc: true},
+		{name: "file"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			project := filepath.Join(home, "work", "project")
+			other := filepath.Join(home, "work", "other")
+			mkdirDiscoveryCandidate(t, project)
+			mkdirDiscoveryCandidate(t, other)
+			source := vscodeDiscoverySourcePath(home, "Code")
+			writeVSCodeWorkspaceAt(t, source, "child", "folder", project)
+			workspace := filepath.Join(source, "child", "workspace.json")
+			var replace func() error
+			if testCase.replaceSrc {
+				replacement := filepath.Join(home, "replacement-source")
+				writeVSCodeWorkspaceAt(t, replacement, "child", "folder", other)
+				replace = func() error { return replaceDiscoveryPath(source, replacement) }
+			} else {
+				replacement := filepath.Join(home, "replacement-workspace.json")
+				writeDiscoveryFile(t, replacement, []byte(`{"folder":"file://`+other+`"}`))
+				replace = func() error { return replaceDiscoveryPath(workspace, replacement) }
+			}
+			fileSystem := &discoveryReadSwapFileSystem{target: workspace, swap: replace}
+			env := testutil.Environment(t, home)
+			env.FS = fileSystem
+
+			candidates, coverage, err := discoverIDERoots(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fileSystem.swapErr != nil {
+				t.Fatal(fileSystem.swapErr)
+			}
+			if !fileSystem.swapped || len(candidates) != 0 {
+				t.Fatalf("swapped=%v candidates=%+v", fileSystem.swapped, candidates)
+			}
+			assertDiscoveryCoverageCodes(t, coverage, discoveryVSCodeTargetID, "identity_changed")
+			assertCoverageExcludes(t, coverage, home, project, other)
+		})
+	}
+}
+
+func TestDiscoverVSCodeReturnsCancellationWithoutPartialResults(t *testing.T) {
+	home := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	candidates, coverage, err := discoverIDERoots(ctx, testutil.Environment(t, home))
+	if !errors.Is(err, context.Canceled) || candidates != nil || coverage != nil {
+		t.Fatalf("candidates=%+v coverage=%+v err=%v", candidates, coverage, err)
+	}
+}
+
+func TestDiscoverJetBrainsSortsProductsUsesExactOptionsPathAndResolvesUserHome(t *testing.T) {
+	home := t.TempDir()
+	alphaProject := filepath.Join(home, "work", "alpha")
+	zetaProject := filepath.Join(home, "work", "zeta")
+	ignoredProject := filepath.Join(home, "work", "ignored")
+	for _, project := range []string{alphaProject, zetaProject, ignoredProject} {
+		mkdirDiscoveryCandidate(t, project)
+	}
+	writeJetBrainsRecent(t, home, "Zeta", []string{"$USER_HOME$/work/zeta"})
+	writeJetBrainsRecent(t, home, "Alpha", []string{"~/work/alpha"})
+	writeDiscoveryFile(t, filepath.Join(jetbrainsDiscoverySourcePath(home), "Wrong", "recentProjects.xml"), jetBrainsRecentXML([]string{ignoredProject}))
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []discoveryCandidate{
+		{path: alphaProject, source: discoveryJetBrainsTargetID, priority: 4},
+		{path: zetaProject, source: discoveryJetBrainsTargetID, priority: 4},
+	}
+	if !reflect.DeepEqual(candidates, want) || coverage != nil {
+		t.Fatalf("candidates=%+v want=%+v coverage=%+v", candidates, want, coverage)
+	}
+}
+
+func TestDiscoverJetBrainsCapsProductsAndIsolatesOversizedAndMalformedProducts(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "project")
+	mkdirDiscoveryCandidate(t, project)
+	for index := 0; index < 33; index++ {
+		writeJetBrainsRecent(t, home, fmt.Sprintf("Product%02d", index), []string{project})
+	}
+	writeDiscoveryFile(t, filepath.Join(jetbrainsDiscoverySourcePath(home), "Product00", "options", "recentProjects.xml"), []byte(`<application>`))
+	oversized := filepath.Join(jetbrainsDiscoverySourcePath(home), "Product01", "options", "recentProjects.xml")
+	writeDiscoveryFile(t, oversized, []byte(`<application><!--`+strings.Repeat("x", 256*1024)+`--></application>`))
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 30 {
+		t.Fatalf("candidates=%d", len(candidates))
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryJetBrainsTargetID, "entry_limit", "metadata_malformed", "metadata_oversized")
+	assertCoverageExcludes(t, coverage, home, "Product00", "Product01", strings.Repeat("x", 64))
+}
+
+func TestDiscoverJetBrainsRejectsProductAndRecentFileSymlinks(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "project")
+	mkdirDiscoveryCandidate(t, project)
+	realProduct := filepath.Join(home, "real-product")
+	writeJetBrainsRecentAt(t, realProduct, []string{project})
+	source := jetbrainsDiscoverySourcePath(home)
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realProduct, filepath.Join(source, "LinkedProduct")); err != nil {
+		t.Fatal(err)
+	}
+	linkedFileProduct := filepath.Join(source, "LinkedFile", "options")
+	if err := os.MkdirAll(linkedFileProduct, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(home, "real-recent.xml")
+	writeDiscoveryFile(t, realFile, jetBrainsRecentXML([]string{project}))
+	if err := os.Symlink(realFile, filepath.Join(linkedFileProduct, "recentProjects.xml")); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, coverage, err := discoverIDERoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	assertDiscoveryCoverageCodes(t, coverage, discoveryJetBrainsTargetID, "symlink_rejected")
+	assertCoverageExcludes(t, coverage, home, project, realProduct, realFile)
+}
+
+func TestDiscoverJetBrainsRejectsProductAndFileReplacementAfterRead(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		replaceSrc bool
+	}{
+		{name: "product", replaceSrc: true},
+		{name: "file"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			project := filepath.Join(home, "work", "project")
+			other := filepath.Join(home, "work", "other")
+			mkdirDiscoveryCandidate(t, project)
+			mkdirDiscoveryCandidate(t, other)
+			product := filepath.Join(jetbrainsDiscoverySourcePath(home), "Idea")
+			writeJetBrainsRecentAt(t, product, []string{project})
+			recent := filepath.Join(product, "options", "recentProjects.xml")
+			var replace func() error
+			if testCase.replaceSrc {
+				replacement := filepath.Join(home, "replacement-product")
+				writeJetBrainsRecentAt(t, replacement, []string{other})
+				replace = func() error { return replaceDiscoveryPath(product, replacement) }
+			} else {
+				replacement := filepath.Join(home, "replacement-recent.xml")
+				writeDiscoveryFile(t, replacement, jetBrainsRecentXML([]string{other}))
+				replace = func() error { return replaceDiscoveryPath(recent, replacement) }
+			}
+			fileSystem := &discoveryReadSwapFileSystem{target: recent, swap: replace}
+			env := testutil.Environment(t, home)
+			env.FS = fileSystem
+
+			candidates, coverage, err := discoverIDERoots(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fileSystem.swapErr != nil {
+				t.Fatal(fileSystem.swapErr)
+			}
+			if !fileSystem.swapped || len(candidates) != 0 {
+				t.Fatalf("swapped=%v candidates=%+v", fileSystem.swapped, candidates)
+			}
+			assertDiscoveryCoverageCodes(t, coverage, discoveryJetBrainsTargetID, "identity_changed")
+			assertCoverageExcludes(t, coverage, home, project, other)
+		})
+	}
+}
 
 func TestFinalizeDiscoveredRootsAcceptsCanonicalHomeDirectoryWithoutPersistingHostPaths(t *testing.T) {
 	home := t.TempDir()
@@ -407,6 +697,161 @@ func assertDiscoveryJSONExcludes(t *testing.T, discovery Discovery, markers ...s
 			t.Fatalf("discovery JSON leaked marker %q: %s", marker, encoded)
 		}
 	}
+}
+
+func vscodeDiscoverySourcePath(home, product string) string {
+	return filepath.Join(home, "Library", "Application Support", product, "User", "workspaceStorage")
+}
+
+func jetbrainsDiscoverySourcePath(home string) string {
+	return filepath.Join(home, "Library", "Application Support", "JetBrains")
+}
+
+func writeVSCodeDiscoveryWorkspace(t *testing.T, home, product, child, field, path string) {
+	t.Helper()
+	writeVSCodeWorkspaceAt(t, vscodeDiscoverySourcePath(home, product), child, field, path)
+}
+
+func writeVSCodeWorkspaceAt(t *testing.T, source, child, field, path string) {
+	t.Helper()
+	writeDiscoveryFile(t, filepath.Join(source, child, "workspace.json"), []byte(fmt.Sprintf(`{"%s":"file://%s"}`, field, path)))
+}
+
+func writeVSCodeDiscoveryRaw(t *testing.T, home, product, child string, contents []byte) {
+	t.Helper()
+	writeDiscoveryFile(t, filepath.Join(vscodeDiscoverySourcePath(home, product), child, "workspace.json"), contents)
+}
+
+func writeJetBrainsRecent(t *testing.T, home, product string, paths []string) {
+	t.Helper()
+	writeJetBrainsRecentAt(t, filepath.Join(jetbrainsDiscoverySourcePath(home), product), paths)
+}
+
+func writeJetBrainsRecentAt(t *testing.T, product string, paths []string) {
+	t.Helper()
+	writeDiscoveryFile(t, filepath.Join(product, "options", "recentProjects.xml"), jetBrainsRecentXML(paths))
+}
+
+func jetBrainsRecentXML(paths []string) []byte {
+	var contents strings.Builder
+	contents.WriteString(`<application><component name="RecentProjectsManager"><option name="recentPaths"><list>`)
+	for _, path := range paths {
+		contents.WriteString(`<option value="`)
+		contents.WriteString(path)
+		contents.WriteString(`"/>`)
+	}
+	contents.WriteString(`</list></option></component></application>`)
+	return []byte(contents.String())
+}
+
+func writeDiscoveryFile(t *testing.T, path string, contents []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDiscoveryCoverageCodes(t *testing.T, coverage []model.TargetCoverage, targetID string, wantCodes ...string) {
+	t.Helper()
+	for _, target := range coverage {
+		if target.TargetID != targetID {
+			continue
+		}
+		gotCodes := make([]string, len(target.Errors))
+		for index, issue := range target.Errors {
+			gotCodes[index] = issue.Code
+			if issue.Path != "" {
+				t.Fatalf("coverage path=%q target=%q", issue.Path, targetID)
+			}
+		}
+		if !reflect.DeepEqual(gotCodes, wantCodes) {
+			t.Fatalf("target=%q codes=%v want=%v", targetID, gotCodes, wantCodes)
+		}
+		return
+	}
+	t.Fatalf("missing coverage target=%q in %+v", targetID, coverage)
+}
+
+func assertCoverageExcludes(t *testing.T, coverage []model.TargetCoverage, markers ...string) {
+	t.Helper()
+	encoded, err := json.Marshal(coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range markers {
+		if marker != "" && strings.Contains(string(encoded), marker) {
+			t.Fatalf("coverage leaked marker %q: %s", marker, encoded)
+		}
+	}
+}
+
+func replaceDiscoveryPath(target, replacement string) error {
+	if err := os.Rename(target, target+"-original"); err != nil {
+		return err
+	}
+	return os.Rename(replacement, target)
+}
+
+type discoveryReadSwapFileSystem struct {
+	platform.OSFileSystem
+	target  string
+	swap    func() error
+	once    sync.Once
+	swapped bool
+	swapErr error
+}
+
+func (f *discoveryReadSwapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := f.OSFileSystem.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryReadSwapRoot{RootedDirectory: root, owner: f, current: name}, nil
+}
+
+type discoveryReadSwapRoot struct {
+	platform.RootedDirectory
+	owner   *discoveryReadSwapFileSystem
+	current string
+}
+
+func (r *discoveryReadSwapRoot) OpenRoot(name string) (platform.RootedDirectory, error) {
+	root, err := r.RootedDirectory.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &discoveryReadSwapRoot{RootedDirectory: root, owner: r.owner, current: filepath.Join(r.current, name)}, nil
+}
+
+func (r *discoveryReadSwapRoot) Open(name string) (platform.RootedFile, error) {
+	file, err := r.RootedDirectory.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(r.current, name)
+	if path != r.owner.target {
+		return file, nil
+	}
+	return &discoveryReadSwapFile{RootedFile: file, owner: r.owner}, nil
+}
+
+type discoveryReadSwapFile struct {
+	platform.RootedFile
+	owner *discoveryReadSwapFileSystem
+}
+
+func (f *discoveryReadSwapFile) Read(buffer []byte) (int, error) {
+	count, err := f.RootedFile.Read(buffer)
+	if count > 0 {
+		f.owner.once.Do(func() {
+			f.owner.swapped = true
+			f.owner.swapErr = f.owner.swap()
+		})
+	}
+	return count, err
 }
 
 type discoveryFinalSwapFileSystem struct {

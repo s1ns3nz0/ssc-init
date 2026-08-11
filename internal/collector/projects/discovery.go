@@ -32,6 +32,25 @@ var discoveryTargetOrder = []string{
 
 const maxDiscoveredRoots = maxConfiguredRoots - 1
 
+const (
+	maxVSCodeDiscoveryChildren = 256
+	maxVSCodeMetadataBytes     = 64 * 1024
+	maxJetBrainsProducts       = 32
+	maxJetBrainsMetadataBytes  = 256 * 1024
+)
+
+type vscodeDiscoverySource struct {
+	product  string
+	targetID string
+	priority int
+}
+
+var vscodeDiscoverySources = []vscodeDiscoverySource{
+	{product: "Code", targetID: discoveryVSCodeTargetID, priority: 1},
+	{product: "Cursor", targetID: discoveryCursorTargetID, priority: 2},
+	{product: "Windsurf", targetID: discoveryWindsurfTargetID, priority: 3},
+}
+
 var excludedDiscoveryMediaExtensions = map[string]struct{}{
 	".avi": {}, ".flac": {}, ".gif": {}, ".heic": {}, ".jpeg": {},
 	".jpg": {}, ".m4a": {}, ".m4v": {}, ".mkv": {}, ".mov": {},
@@ -465,7 +484,7 @@ func normalizeDiscoverySource(source string) (string, bool) {
 }
 
 func discoveryIssueCoverage(issues map[string]map[string]struct{}) []model.TargetCoverage {
-	coverage := make([]model.TargetCoverage, 0, len(issues))
+	var coverage []model.TargetCoverage
 	for _, targetID := range discoveryTargetOrder {
 		codes := issues[targetID]
 		if len(codes) == 0 {
@@ -487,8 +506,14 @@ func discoveryIssueCoverage(issues map[string]map[string]struct{}) []model.Targe
 
 func discoveryIssueMessage(code string) string {
 	switch code {
+	case "entry_limit":
+		return "project discovery source entry limit reached"
 	case "identity_changed":
 		return "project candidate identity changed"
+	case "metadata_malformed":
+		return "project discovery metadata is malformed"
+	case "metadata_oversized":
+		return "project discovery metadata exceeds the size limit"
 	case "metadata_unavailable":
 		return "project candidate metadata is unavailable"
 	case "outside_home":
