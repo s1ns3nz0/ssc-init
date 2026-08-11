@@ -1,0 +1,352 @@
+package projects
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/platform"
+	"github.com/s1ns3nz0/ssc-init/internal/testutil"
+)
+
+func TestFinalizeDiscoveredRootsAcceptsCanonicalHomeDirectoryWithoutPersistingHostPaths(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "alpha")
+	mkdirDiscoveryCandidate(t, project)
+
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{{
+		path: project, source: discoveryVSCodeTargetID, priority: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := RootRefs(got.Roots); !reflect.DeepEqual(refs, []string{"$HOME/work/alpha"}) {
+		t.Fatalf("refs=%v", refs)
+	}
+	if len(got.Coverage) != 0 {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{home, project, filepath.Base(home)} {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("discovery JSON leaked host marker %q: %s", marker, encoded)
+		}
+	}
+}
+
+func TestDiscoveryCandidateRejectsUnsafeHomeLocationsWithFixedCoverage(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	paths := map[string]string{
+		"home itself":       home,
+		"outside home":      outside,
+		"Library":           filepath.Join(home, "Library", "project"),
+		"Trash":             filepath.Join(home, ".Trash", "project"),
+		"Downloads media":   filepath.Join(home, "Downloads", "recording.mov"),
+		"cache":             filepath.Join(home, ".cache", "project"),
+		"backup":            filepath.Join(home, "Backups", "project"),
+		"relative":          filepath.Join("relative", "project"),
+		"nul":               filepath.Join(home, "project") + "\x00private-marker",
+		"noncanonical path": home + string(filepath.Separator) + "work" + string(filepath.Separator) + ".." + string(filepath.Separator) + "project",
+	}
+	for name, path := range paths {
+		t.Run(name, func(t *testing.T) {
+			if filepath.IsAbs(path) && !strings.ContainsRune(path, '\x00') && path != home && path != outside {
+				mkdirDiscoveryCandidate(t, path)
+			}
+			got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{{
+				path: path, source: discoveryCursorTargetID, priority: 2,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertDiscoveryIssue(t, got, discoveryCursorTargetID, "outside_home")
+			assertDiscoveryJSONExcludes(t, got, home, outside, path, "private-marker")
+		})
+	}
+}
+
+func TestDiscoveryCandidateRejectsUnsafeFilesystemObjects(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "target")
+	mkdirDiscoveryCandidate(t, target)
+	symlink := filepath.Join(home, "linked")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+	regular := filepath.Join(home, "regular")
+	if err := os.WriteFile(regular, []byte("private-file-marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "missing-private-marker")
+
+	for _, testCase := range []struct {
+		name string
+		path string
+		code string
+	}{
+		{name: "symlink", path: symlink, code: "symlink_rejected"},
+		{name: "non-directory", path: regular, code: "metadata_unavailable"},
+		{name: "missing", path: missing, code: "metadata_unavailable"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{{
+				path: testCase.path, source: discoveryWindsurfTargetID, priority: 3,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertDiscoveryIssue(t, got, discoveryWindsurfTargetID, testCase.code)
+			assertDiscoveryJSONExcludes(t, got, home, testCase.path, "private-file-marker", "missing-private-marker")
+		})
+	}
+}
+
+func TestDiscoveryCandidateRejectsIdentityReplacement(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	replacement := filepath.Join(home, "replacement")
+	mkdirDiscoveryCandidate(t, project)
+	mkdirDiscoveryCandidate(t, replacement)
+
+	got, err := finalizeDiscoveredRoots(home, &discoverySwapFileSystem{
+		OSFileSystem: platform.OSFileSystem{}, target: project, replacement: replacement,
+	}, []discoveryCandidate{{path: project, source: discoveryJetBrainsTargetID, priority: 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscoveryIssue(t, got, discoveryJetBrainsTargetID, "identity_changed")
+	assertDiscoveryJSONExcludes(t, got, home, project, replacement)
+}
+
+func TestFinalizeDiscoveredRootsDeduplicatesIdentityAndMinimizesNestedRoots(t *testing.T) {
+	home := t.TempDir()
+	real := filepath.Join(home, "real")
+	mkdirDiscoveryCandidate(t, real)
+	aliasA := filepath.Join(home, "alias-a")
+	aliasB := filepath.Join(home, "alias-b")
+	virtual := &discoveryRedirectFileSystem{
+		OSFileSystem: platform.OSFileSystem{},
+		redirects:    map[string]string{aliasA: real, aliasB: real},
+	}
+
+	got, err := finalizeDiscoveredRoots(home, virtual, []discoveryCandidate{
+		{path: aliasB, source: discoveryCursorTargetID, priority: 2},
+		{path: aliasA, source: discoveryVSCodeTargetID, priority: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := RootRefs(got.Roots); !reflect.DeepEqual(refs, []string{"$HOME/alias-a"}) {
+		t.Fatalf("same-identity refs=%v", refs)
+	}
+
+	parent := filepath.Join(home, "workspace")
+	child := filepath.Join(parent, "nested", "project")
+	mkdirDiscoveryCandidate(t, child)
+	got, err = finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{
+		{path: child, source: discoveryVSCodeTargetID, priority: 1},
+		{path: parent, source: discoveryGitTargetID, priority: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := RootRefs(got.Roots); !reflect.DeepEqual(refs, []string{"$HOME/workspace"}) {
+		t.Fatalf("nested refs=%v", refs)
+	}
+}
+
+func TestFinalizeDiscoveredRootsOrdersByConventionalRootSourcePriorityAndRef(t *testing.T) {
+	home := t.TempDir()
+	for _, relative := range []string{"Projects", "z-code", "a-cursor", "b-code"} {
+		mkdirDiscoveryCandidate(t, filepath.Join(home, relative))
+	}
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, []discoveryCandidate{
+		{path: filepath.Join(home, "a-cursor"), source: discoveryCursorTargetID, priority: 2},
+		{path: filepath.Join(home, "z-code"), source: discoveryVSCodeTargetID, priority: 1},
+		{path: filepath.Join(home, "Projects"), source: discoveryGitTargetID, priority: 5},
+		{path: filepath.Join(home, "b-code"), source: discoveryVSCodeTargetID, priority: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"$HOME/Projects", "$HOME/b-code", "$HOME/z-code", "$HOME/a-cursor"}
+	if refs := RootRefs(got.Roots); !reflect.DeepEqual(refs, want) {
+		t.Fatalf("refs=%v want=%v", refs, want)
+	}
+}
+
+func TestFinalizeDiscoveredRootsCapsSelectionAtThirtyTwoWithoutLeakingOmittedRefs(t *testing.T) {
+	home := t.TempDir()
+	candidates := make([]discoveryCandidate, 0, maxConfiguredRoots+2)
+	for index := maxConfiguredRoots + 1; index >= 0; index-- {
+		path := filepath.Join(home, "work", fixedDiscoveryIndex(index))
+		mkdirDiscoveryCandidate(t, path)
+		candidates = append(candidates, discoveryCandidate{
+			path: path, source: discoveryGitTargetID, priority: 5,
+		})
+	}
+
+	got, err := finalizeDiscoveredRoots(home, platform.OSFileSystem{}, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Roots) != maxConfiguredRoots {
+		t.Fatalf("roots=%d", len(got.Roots))
+	}
+	if len(got.Coverage) != 1 || got.Coverage[0].TargetID != discoveryGitTargetID || got.Coverage[0].Status != model.TargetPartial || len(got.Coverage[0].Errors) != 1 || got.Coverage[0].Errors[0].Code != "root_limit" || got.Coverage[0].Errors[0].Path != "" {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+	refs := RootRefs(got.Roots)
+	if refs[0] != "$HOME/work/00" || refs[len(refs)-1] != "$HOME/work/31" {
+		t.Fatalf("refs=%v", refs)
+	}
+	assertDiscoveryJSONExcludes(t, got, home, "$HOME/work/32", "$HOME/work/33")
+}
+
+func TestDiscoveryCandidateRequiresNoFollowAndRootedFilesystemCapabilities(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	mkdirDiscoveryCandidate(t, project)
+	osFS := platform.OSFileSystem{}
+	for _, fileSystem := range []platform.FileSystem{
+		rootedOnlyFileSystem{FileSystem: osFS, rooted: osFS},
+		noFollowOnlyFileSystem{FileSystem: osFS, noFollow: osFS},
+	} {
+		if _, err := finalizeDiscoveredRoots(home, fileSystem, []discoveryCandidate{{
+			path: project, source: discoveryVSCodeTargetID, priority: 1,
+		}}); err == nil || strings.Contains(err.Error(), home) || strings.Contains(err.Error(), project) {
+			t.Fatalf("capability error=%v", err)
+		}
+	}
+}
+
+func TestDiscoveryCoverageIsPrependedDeepCopiedAndMakesCollectionPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "empty")
+	mkdirDiscoveryCandidate(t, root)
+	roots, err := ResolveRoots(home, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage := []model.TargetCoverage{{
+		TargetID: discoveryCursorTargetID,
+		Status:   model.TargetPartial,
+		Errors:   []model.CoverageError{{Code: "metadata_malformed", Message: "project discovery metadata is malformed"}},
+	}}
+	configured := NewWithDiscovery(roots, coverage)
+	specs := configured.Targets()
+	if len(specs) != 2 || specs[0].ID != projectRootTargetID || specs[1].ID != discoveryCursorTargetID {
+		t.Fatalf("target specs=%+v", specs)
+	}
+	coverage[0].TargetID = "mutated"
+	coverage[0].Errors[0].Code = "mutated"
+
+	first, err := configured.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDiscovery := model.TargetCoverage{
+		TargetID: discoveryCursorTargetID,
+		Status:   model.TargetPartial,
+		Errors:   []model.CoverageError{{Code: "metadata_malformed", Message: "project discovery metadata is malformed"}},
+	}
+	if len(first.Targets) != 2 || !reflect.DeepEqual(first.Targets[0], wantDiscovery) || first.Targets[1].TargetID != projectRootTargetID {
+		t.Fatalf("targets=%+v", first.Targets)
+	}
+	if first.Status != model.CoveragePartial || len(first.Assets) != 0 || len(first.Observations) != 0 {
+		t.Fatalf("result=%+v", first)
+	}
+
+	first.Targets[0].Errors[0].Code = "mutated-output"
+	second, err := configured.Collect(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(second.Targets[0], wantDiscovery) {
+		t.Fatalf("second discovery coverage=%+v", second.Targets[0])
+	}
+}
+
+func mkdirDiscoveryCandidate(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fixedDiscoveryIndex(index int) string {
+	return string([]byte{'0' + byte(index/10), '0' + byte(index%10)})
+}
+
+func assertDiscoveryIssue(t *testing.T, discovery Discovery, targetID, code string) {
+	t.Helper()
+	if len(discovery.Roots) != 0 {
+		t.Fatalf("unsafe candidate produced roots=%v", RootRefs(discovery.Roots))
+	}
+	if len(discovery.Coverage) != 1 || discovery.Coverage[0].TargetID != targetID || discovery.Coverage[0].Status != model.TargetPartial || len(discovery.Coverage[0].Errors) != 1 || discovery.Coverage[0].Errors[0].Code != code || discovery.Coverage[0].Errors[0].Path != "" {
+		t.Fatalf("coverage=%+v want target=%q code=%q", discovery.Coverage, targetID, code)
+	}
+}
+
+func assertDiscoveryJSONExcludes(t *testing.T, discovery Discovery, markers ...string) {
+	t.Helper()
+	encoded, err := json.Marshal(discovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range markers {
+		if marker != "" && strings.Contains(string(encoded), marker) {
+			t.Fatalf("discovery JSON leaked marker %q: %s", marker, encoded)
+		}
+	}
+}
+
+type discoverySwapFileSystem struct {
+	platform.OSFileSystem
+	target      string
+	replacement string
+	swapped     bool
+}
+
+func (f *discoverySwapFileSystem) Lstat(name string) (os.FileInfo, error) {
+	info, err := f.OSFileSystem.Lstat(name)
+	if err != nil || name != f.target || f.swapped {
+		return info, err
+	}
+	f.swapped = true
+	if err := os.Rename(f.target, f.target+"-original"); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(f.replacement, f.target); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+type discoveryRedirectFileSystem struct {
+	platform.OSFileSystem
+	redirects map[string]string
+}
+
+func (f *discoveryRedirectFileSystem) Lstat(name string) (os.FileInfo, error) {
+	if redirected, ok := f.redirects[name]; ok {
+		name = redirected
+	}
+	return f.OSFileSystem.Lstat(name)
+}
+
+func (f *discoveryRedirectFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
+	if redirected, ok := f.redirects[name]; ok {
+		name = redirected
+	}
+	return f.OSFileSystem.OpenRoot(name)
+}

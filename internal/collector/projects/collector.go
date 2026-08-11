@@ -32,15 +32,18 @@ const (
 // Root is a canonical configured project root and its persistence-safe
 // reference. Path is host-local and must never be copied into model output.
 type Root struct {
-	Path string
-	Ref  string
+	Path string `json:"-"`
+	Ref  string `json:"ref"`
 
-	home string
-	seal [sha256.Size]byte
+	home              string
+	seal              [sha256.Size]byte
+	automatic         bool
+	discoveryPriority int
 }
 
 type projectCollector struct {
 	roots                []Root
+	discoveryCoverage    []model.TargetCoverage
 	invalid              bool
 	limits               walkLimits
 	beforeOpen           func(string)
@@ -148,24 +151,67 @@ func RootRefs(roots []Root) []string {
 
 // New returns a targeted project collector for roots produced by ResolveRoots.
 func New(roots []Root) collector.TargetedCollector {
+	return NewWithDiscovery(roots, nil)
+}
+
+// NewWithDiscovery returns a project collector that reports the discovery
+// prepass coverage before ordinary configured-root coverage.
+func NewWithDiscovery(roots []Root, coverage []model.TargetCoverage) collector.TargetedCollector {
 	return &projectCollector{
-		roots:   append([]Root(nil), roots...),
-		invalid: validateResolvedRoots(roots) != nil,
-		limits:  defaultWalkLimits(),
+		roots:             append([]Root(nil), roots...),
+		discoveryCoverage: cloneTargetCoverage(coverage),
+		invalid:           validateResolvedRoots(roots) != nil,
+		limits:            defaultWalkLimits(),
 	}
+}
+
+func cloneTargetCoverage(coverage []model.TargetCoverage) []model.TargetCoverage {
+	if coverage == nil {
+		return nil
+	}
+	cloned := append([]model.TargetCoverage(nil), coverage...)
+	for index := range cloned {
+		cloned[index].Errors = append([]model.CoverageError(nil), coverage[index].Errors...)
+	}
+	return cloned
 }
 
 func (*projectCollector) Name() string { return "projects" }
 
-func (*projectCollector) Targets() []model.TargetSpec {
-	return []model.TargetSpec{{
+func (c *projectCollector) Targets() []model.TargetSpec {
+	specs := []model.TargetSpec{{
 		ID: projectRootTargetID, Collector: "projects", Scope: model.ScopeProject,
 		Platform: "darwin", Method: model.TargetDirectory,
 	}}
+	seen := map[string]struct{}{projectRootTargetID: {}}
+	for _, target := range c.discoveryCoverage {
+		if !isDiscoveryTargetID(target.TargetID) {
+			continue
+		}
+		if _, duplicate := seen[target.TargetID]; duplicate {
+			continue
+		}
+		seen[target.TargetID] = struct{}{}
+		specs = append(specs, model.TargetSpec{
+			ID: target.TargetID, Collector: "projects", Scope: model.ScopeProject,
+			Platform: "darwin", Method: model.TargetDirectory,
+		})
+	}
+	return specs
+}
+
+func isDiscoveryTargetID(targetID string) bool {
+	switch targetID {
+	case discoveryVSCodeTargetID, discoveryCursorTargetID, discoveryWindsurfTargetID, discoveryJetBrainsTargetID, discoveryGitTargetID:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *projectCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
-	result := model.CollectorResult{Collector: c.Name()}
+	result := model.CollectorResult{Collector: c.Name(), Targets: cloneTargetCoverage(c.discoveryCoverage)}
+	discoveryTargetCount := len(result.Targets)
 	if err := ctx.Err(); err != nil {
 		return abortProjectCollection(&result, err)
 	}
@@ -225,7 +271,9 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 	}
 
 	aggregateProjectPackageAssets(&result)
-	sort.Slice(result.Targets, func(i, j int) bool { return result.Targets[i].InstanceRef < result.Targets[j].InstanceRef })
+	sort.Slice(result.Targets[discoveryTargetCount:], func(i, j int) bool {
+		return result.Targets[discoveryTargetCount+i].InstanceRef < result.Targets[discoveryTargetCount+j].InstanceRef
+	})
 	sort.Slice(result.Assets, func(i, j int) bool { return result.Assets[i].ID < result.Assets[j].ID })
 	sort.Slice(result.Relationships, func(i, j int) bool {
 		left, right := result.Relationships[i], result.Relationships[j]
@@ -251,6 +299,12 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		return result.LocalEvidenceTargets[i].ObservationID < result.LocalEvidenceTargets[j].ObservationID
 	})
 	result.Status = collector.AggregateTargetStatus(result.Targets)
+	for _, target := range result.Targets[:discoveryTargetCount] {
+		if target.Status == model.TargetPartial || target.Status == model.TargetUnavailable {
+			result.Status = model.CoveragePartial
+			break
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return abortProjectCollection(&result, err)
 	}
@@ -268,7 +322,11 @@ func abortProjectCollection(result *model.CollectorResult, err error) (model.Col
 }
 
 func sealRoot(root Root) [sha256.Size]byte {
-	return sha256.Sum256([]byte("ssc-init.resolved-project-root.v1\x00" + root.home + "\x00" + root.Path + "\x00" + root.Ref))
+	automatic := "0"
+	if root.automatic {
+		automatic = "1"
+	}
+	return sha256.Sum256([]byte("ssc-init.resolved-project-root.v1\x00" + root.home + "\x00" + root.Path + "\x00" + root.Ref + "\x00" + automatic + "\x00" + fmt.Sprint(root.discoveryPriority)))
 }
 
 func validateResolvedRoots(roots []Root) error {
@@ -281,6 +339,13 @@ func validateResolvedRoots(roots []Root) error {
 	}
 	seenPaths := make(map[string]struct{}, len(roots))
 	seenRefs := make(map[string]struct{}, len(roots))
+	automatic := false
+	for _, root := range roots {
+		automatic = automatic || root.automatic
+	}
+	if automatic {
+		return validateAutomaticRoots(home, roots, seenPaths, seenRefs)
+	}
 	previousHomePath := ""
 	previousExternalPath := ""
 	externalIndex := 0
@@ -312,6 +377,48 @@ func validateResolvedRoots(roots []Root) error {
 		previousExternalPath = root.Path
 	}
 	return nil
+}
+
+func validateAutomaticRoots(home string, roots []Root, seenPaths, seenRefs map[string]struct{}) error {
+	for index, root := range roots {
+		if root.home != home || root.Path == "" || root.Ref == "" || !filepath.IsAbs(root.Path) || filepath.Clean(root.Path) != root.Path || strings.ContainsRune(root.Path, '\x00') || strings.ContainsRune(root.Ref, '\x00') || root.seal != sealRoot(root) {
+			return errors.New("invalid project roots")
+		}
+		ref, insideHome := homeRootRef(home, root.Path)
+		if !insideHome || ref == "$HOME" || root.Ref != ref {
+			return errors.New("invalid project roots")
+		}
+		if !root.automatic && (index != 0 || root.Ref != "$HOME/Projects") {
+			return errors.New("invalid project roots")
+		}
+		if _, duplicate := seenPaths[root.Path]; duplicate {
+			return errors.New("invalid project roots")
+		}
+		if _, duplicate := seenRefs[root.Ref]; duplicate {
+			return errors.New("invalid project roots")
+		}
+		seenPaths[root.Path] = struct{}{}
+		seenRefs[root.Ref] = struct{}{}
+		if index > 0 && !automaticRootLess(roots[index-1], root) {
+			return errors.New("invalid project roots")
+		}
+		for previous := 0; previous < index; previous++ {
+			if strictPathAncestor(roots[previous].Path, root.Path) || strictPathAncestor(root.Path, roots[previous].Path) {
+				return errors.New("invalid project roots")
+			}
+		}
+	}
+	return nil
+}
+
+func automaticRootLess(left, right Root) bool {
+	if left.Ref == "$HOME/Projects" || right.Ref == "$HOME/Projects" {
+		return left.Ref == "$HOME/Projects" && right.Ref != "$HOME/Projects"
+	}
+	if left.discoveryPriority != right.discoveryPriority {
+		return left.discoveryPriority < right.discoveryPriority
+	}
+	return left.Ref < right.Ref
 }
 
 func buildEvidence(ctx context.Context, owner *projectCollector, env collector.Environment, root Root, walked rootWalk, result *model.CollectorResult) ([]model.CoverageError, error) {
