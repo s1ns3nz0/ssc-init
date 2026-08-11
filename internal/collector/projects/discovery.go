@@ -68,6 +68,7 @@ type discoveryCandidate struct {
 	path     string
 	source   string
 	priority int
+	identity os.FileInfo
 }
 
 type verifiedDiscoveryCandidate struct {
@@ -103,11 +104,12 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 		return Discovery{}, err
 	}
 	defer clearDiscoveryCandidates(verifiedIDE)
+	bindVerifiedDiscoveryIdentities(ideCandidates, verifiedIDE)
 
 	seeds := make([]discoveryCandidate, 0, len(verifiedIDE)+1)
 	allCandidates := make([]discoveryCandidate, 0, len(ideCandidates)+1)
 	if info, statErr := discoveryConventionalRootInfo(env.FS, conventional[0].Path); statErr == nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
-		seed := discoveryCandidate{path: conventional[0].Path, source: discoveryGitTargetID, priority: 0}
+		seed := discoveryCandidate{path: conventional[0].Path, source: discoveryGitTargetID, priority: 0, identity: info}
 		seeds = append(seeds, seed)
 		allCandidates = append(allCandidates, seed)
 	}
@@ -146,6 +148,16 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 	return finalized, nil
 }
 
+func bindVerifiedDiscoveryIdentities(candidates, verified []discoveryCandidate) {
+	byPath := make(map[string]os.FileInfo, len(verified))
+	for _, candidate := range verified {
+		byPath[candidate.path] = candidate.identity
+	}
+	for index := range candidates {
+		candidates[index].identity = byPath[candidates[index].path]
+	}
+}
+
 func verifyDiscoverySeeds(ctx context.Context, home string, fileSystem platform.FileSystem, candidates []discoveryCandidate) ([]discoveryCandidate, error) {
 	noFollow, noFollowOK := fileSystem.(platform.NoFollowFileSystem)
 	rooted, rootedOK := fileSystem.(platform.RootedFileSystem)
@@ -167,6 +179,7 @@ func verifyDiscoverySeeds(ctx context.Context, home string, fileSystem platform.
 		if code != "" || !recheckDiscoveryCandidate(home, homeRoot, homeDevice, candidate.path, identity) {
 			continue
 		}
+		candidate.identity = identity
 		verified = append(verified, candidate)
 	}
 	return verified, nil
@@ -261,6 +274,10 @@ func finalizeDiscoveredRoots(home string, fileSystem platform.FileSystem, candid
 		ref, identity, code := validateDiscoveryCandidate(cleanHome, homeRoot, homeDevice, candidate.path)
 		if code != "" {
 			addIssue(candidate.source, code)
+			continue
+		}
+		if candidate.identity != nil && !os.SameFile(candidate.identity, identity) {
+			addIssue(candidate.source, "identity_changed")
 			continue
 		}
 		if _, duplicate := seenPaths[candidate.path]; duplicate {

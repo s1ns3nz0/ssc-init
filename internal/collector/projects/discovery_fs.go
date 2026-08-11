@@ -515,6 +515,7 @@ func clearDiscoveryCandidates(candidates []discoveryCandidate) {
 		candidates[index].path = ""
 		candidates[index].source = ""
 		candidates[index].priority = 0
+		candidates[index].identity = nil
 	}
 }
 

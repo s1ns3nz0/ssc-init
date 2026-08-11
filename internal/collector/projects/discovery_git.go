@@ -77,6 +77,14 @@ func discoverGitWorktrees(ctx context.Context, env collector.Environment, seeds 
 			addIssue(discoverySourceErrorCode(openErr))
 			continue
 		}
+		if seed.identity != nil {
+			opened, identityErr := seedRoot.Lstat(".")
+			if identityErr != nil || opened == nil || !os.SameFile(seed.identity, opened) {
+				_ = seedRoot.Close()
+				addIssue("identity_changed")
+				continue
+			}
+		}
 		walkErr := walkGitMetadata(ctx, env.Home, homeRoot, seedRoot, seed.path, 0, &entryCount, addIssue, func(candidate string) {
 			if _, exists := seen[candidate]; exists {
 				return

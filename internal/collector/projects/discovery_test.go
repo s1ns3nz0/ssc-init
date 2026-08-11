@@ -873,6 +873,40 @@ func TestDiscoverRootsDoesNotWalkRejectedIDECandidate(t *testing.T) {
 	assertDiscoveryJSONExcludes(t, got, home, rejected, linked, "private-id", "workspace-hash")
 }
 
+func TestDiscoverRootsRejectsIDESeedReplacementBeforeGitTraversal(t *testing.T) {
+	home := t.TempDir()
+	approved := filepath.Join(home, "work", "approved")
+	replacement := filepath.Join(home, "replacement")
+	displaced := filepath.Join(home, "displaced")
+	linked := filepath.Join(home, "work", "must-not-leak")
+	mkdirDiscoveryCandidate(t, approved)
+	postSwapAdmin := filepath.Join(approved, "main", ".git", "worktrees", "private-id")
+	writeGitFixture(t, filepath.Join(replacement, "main", ".git", "worktrees", "private-id", "gitdir"), filepath.Join(linked, ".git")+"\n")
+	writeGitFixture(t, filepath.Join(linked, ".git"), "gitdir: "+postSwapAdmin+"\n")
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "workspace-hash", "folder", approved)
+
+	env := testutil.Environment(t, home)
+	env.FS = &discoveryNthHomeOpenSwapFileSystem{
+		home: home,
+		nth:  3,
+		swap: func() error {
+			if err := os.Rename(approved, displaced); err != nil {
+				return err
+			}
+			return os.Rename(replacement, approved)
+		},
+	}
+	got, err := DiscoverRoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Roots) != 1 || got.Roots[0].Ref != "$HOME/Projects" {
+		t.Fatalf("roots=%+v", got.Roots)
+	}
+	assertDiscoveryCoverageCodes(t, got.Coverage, discoveryGitTargetID, "identity_changed")
+	assertDiscoveryJSONExcludes(t, got, home, approved, replacement, displaced, linked, "private-id", "workspace-hash")
+}
+
 func mkdirDiscoveryCandidate(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o700); err != nil {
@@ -1010,6 +1044,31 @@ type discoveryReadSwapFileSystem struct {
 	once    sync.Once
 	swapped bool
 	swapErr error
+}
+
+type discoveryNthHomeOpenSwapFileSystem struct {
+	platform.OSFileSystem
+	home string
+	nth  int
+	swap func() error
+
+	mu    sync.Mutex
+	opens int
+}
+
+func (f *discoveryNthHomeOpenSwapFileSystem) OpenRoot(path string) (platform.RootedDirectory, error) {
+	f.mu.Lock()
+	if path == f.home {
+		f.opens++
+		if f.opens == f.nth && f.swap != nil {
+			if err := f.swap(); err != nil {
+				f.mu.Unlock()
+				return nil, err
+			}
+		}
+	}
+	f.mu.Unlock()
+	return f.OSFileSystem.OpenRoot(path)
 }
 
 func (f *discoveryReadSwapFileSystem) OpenRoot(name string) (platform.RootedDirectory, error) {
