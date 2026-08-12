@@ -842,6 +842,61 @@ func TestDiscoverRootsKeepsMissingConventionalPlaceholderAndSafeSibling(t *testi
 	assertDiscoveryCoverageCodes(t, got.Coverage, discoveryCursorTargetID, "metadata_malformed")
 }
 
+func TestDiscoverRootsEmptyHomeReportsFixedAbsentSourceCatalog(t *testing.T) {
+	home := t.TempDir()
+
+	got, err := DiscoverRoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Coverage) != len(discoveryTargetOrder) {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+	for index, targetID := range discoveryTargetOrder {
+		coverage := got.Coverage[index]
+		if coverage.TargetID != targetID || coverage.Status != model.TargetNotPresent || len(coverage.Errors) != 0 {
+			t.Fatalf("coverage[%d]=%+v", index, coverage)
+		}
+	}
+}
+
+func TestDiscoverRootsCleanSourceReportsCompleteWithoutMaskingAbsentCatalog(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "clean")
+	mkdirDiscoveryCandidate(t, project)
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "valid", "folder", project)
+
+	got, err := DiscoverRoots(context.Background(), testutil.Environment(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatuses := []model.TargetStatus{
+		model.TargetComplete,
+		model.TargetNotPresent,
+		model.TargetNotPresent,
+		model.TargetNotPresent,
+		model.TargetNotPresent,
+	}
+	if len(got.Coverage) != len(discoveryTargetOrder) {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+	for index, targetID := range discoveryTargetOrder {
+		coverage := got.Coverage[index]
+		if coverage.TargetID != targetID || coverage.Status != wantStatuses[index] || len(coverage.Errors) != 0 {
+			t.Fatalf("coverage[%d]=%+v want target=%s status=%s", index, coverage, targetID, wantStatuses[index])
+		}
+	}
+	specs := NewWithDiscovery(got.Roots, got.Coverage).Targets()
+	if len(specs) != len(discoveryTargetOrder)+1 {
+		t.Fatalf("target specs=%+v", specs)
+	}
+	for index, targetID := range discoveryTargetOrder {
+		if specs[index+1].ID != targetID {
+			t.Fatalf("target specs[%d]=%+v want=%s", index+1, specs[index+1], targetID)
+		}
+	}
+}
+
 func TestDiscoverRootsCancellationReturnsNoPartialDiscovery(t *testing.T) {
 	home := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

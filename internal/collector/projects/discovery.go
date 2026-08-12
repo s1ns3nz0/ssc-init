@@ -99,6 +99,7 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 		return Discovery{}, err
 	}
 	defer clearDiscoveryCandidates(ideCandidates)
+	sourcePresence := discoveryIDECatalogPresence(env)
 	verifiedIDE, err := verifyDiscoverySeeds(ctx, env.Home, env.FS, ideCandidates)
 	if err != nil {
 		return Discovery{}, err
@@ -123,6 +124,9 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 		return Discovery{}, err
 	}
 	defer clearDiscoveryCandidates(gitCandidates)
+	if len(gitCandidates) > 0 {
+		sourcePresence[discoveryGitTargetID] = true
+	}
 	allCandidates = append(allCandidates, ideCandidates...)
 	allCandidates = append(allCandidates, gitCandidates...)
 	defer clearDiscoveryCandidates(allCandidates)
@@ -144,7 +148,7 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 		roots = append(roots, finalized.Roots...)
 		finalized.Roots = roots
 	}
-	finalized.Coverage = mergeDiscoveryCoverage(ideCoverage, gitCoverage, finalized.Coverage)
+	finalized.Coverage = mergeDiscoveryCoverage(sourcePresence, ideCoverage, gitCoverage, finalized.Coverage)
 	return finalized, nil
 }
 
@@ -193,7 +197,7 @@ func discoveryConventionalRootInfo(fileSystem platform.FileSystem, path string) 
 	return noFollow.Lstat(path)
 }
 
-func mergeDiscoveryCoverage(groups ...[]model.TargetCoverage) []model.TargetCoverage {
+func mergeDiscoveryCoverage(present map[string]bool, groups ...[]model.TargetCoverage) []model.TargetCoverage {
 	issues := make(map[string]map[string]struct{}, len(discoveryTargetOrder))
 	for _, group := range groups {
 		for _, target := range group {
@@ -208,7 +212,32 @@ func mergeDiscoveryCoverage(groups ...[]model.TargetCoverage) []model.TargetCove
 			}
 		}
 	}
-	return discoveryIssueCoverage(issues)
+	return discoveryCatalogCoverage(present, issues)
+}
+
+// discoveryIDECatalogPresence records only whether each closed IDE metadata
+// root exists as a directory. Parsing and rooted identity checks remain the
+// authority for issues; this state solely distinguishes a clean read from
+// metadata that was not present.
+func discoveryIDECatalogPresence(env collector.Environment) map[string]bool {
+	present := make(map[string]bool, len(discoveryTargetOrder))
+	noFollow, ok := env.FS.(platform.NoFollowFileSystem)
+	if env.FS == nil || !ok {
+		return present
+	}
+	for _, source := range vscodeDiscoverySources {
+		path := vscodeDiscoverySourcePath(env.Home, source.product)
+		info, err := noFollow.Lstat(path)
+		if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
+			present[source.targetID] = true
+		}
+	}
+	path := jetbrainsDiscoverySourcePath(env.Home)
+	info, err := noFollow.Lstat(path)
+	if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
+		present[discoveryJetBrainsTargetID] = true
+	}
+	return present
 }
 
 func clearDiscoveryRoots(roots []Root) {
@@ -642,6 +671,31 @@ func discoveryIssueCoverage(issues map[string]map[string]struct{}) []model.Targe
 		target := model.TargetCoverage{TargetID: targetID, Status: model.TargetPartial}
 		for _, code := range orderedCodes {
 			target.Errors = append(target.Errors, model.CoverageError{Code: code, Message: discoveryIssueMessage(code)})
+		}
+		coverage = append(coverage, target)
+	}
+	return coverage
+}
+
+func discoveryCatalogCoverage(present map[string]bool, issues map[string]map[string]struct{}) []model.TargetCoverage {
+	coverage := make([]model.TargetCoverage, 0, len(discoveryTargetOrder))
+	for _, targetID := range discoveryTargetOrder {
+		codes := issues[targetID]
+		status := model.TargetNotPresent
+		if present[targetID] {
+			status = model.TargetComplete
+		}
+		target := model.TargetCoverage{TargetID: targetID, Status: status}
+		if len(codes) > 0 {
+			target.Status = model.TargetPartial
+			orderedCodes := make([]string, 0, len(codes))
+			for code := range codes {
+				orderedCodes = append(orderedCodes, code)
+			}
+			sort.Strings(orderedCodes)
+			for _, code := range orderedCodes {
+				target.Errors = append(target.Errors, model.CoverageError{Code: code, Message: discoveryIssueMessage(code)})
+			}
 		}
 		coverage = append(coverage, target)
 	}
