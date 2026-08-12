@@ -59,6 +59,7 @@ type InstallLayout struct {
 	StateDatabase string // <DataDir>/state.db
 	BundlesDir    string // <DataDir>/bundles — TI and policy bundles
 	ReportsDir    string // <DataDir>/reports
+	AuditDir      string // <DataDir>/audit — managed, privacy-safe audit ZIPs
 	QuarantineDir string // <DataDir>/quarantine
 	PolicyFile    string // <DataDir>/policy.json — local levels 4 and 5
 }
@@ -76,6 +77,7 @@ func (p Paths) Install() InstallLayout {
 		StateDatabase: filepath.Join(p.DataDir, "state.db"),
 		BundlesDir:    filepath.Join(p.DataDir, "bundles"),
 		ReportsDir:    filepath.Join(p.DataDir, "reports"),
+		AuditDir:      filepath.Join(p.DataDir, "audit"),
 		QuarantineDir: filepath.Join(p.DataDir, "quarantine"),
 		PolicyFile:    filepath.Join(p.DataDir, "policy.json"),
 	}

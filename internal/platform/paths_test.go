@@ -84,6 +84,13 @@ func TestInstallLayoutIsRootedInTheDataDirectory(t *testing.T) {
 	}
 }
 
+func TestInstallLayoutIncludesOwnedAuditDirectory(t *testing.T) {
+	home := "/Users/example"
+	if got, want := PathsForHome(home).Install().AuditDir, filepath.Join(home, "Library", "Application Support", "SSC Init", "audit"); got != want {
+		t.Fatalf("AuditDir = %q, want %q", got, want)
+	}
+}
+
 func TestInstallVersionRejectsAnythingTheBuildCannotProduce(t *testing.T) {
 	for _, valid := range []string{
 		"v0.1.0",
