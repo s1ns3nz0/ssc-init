@@ -4,6 +4,7 @@ package audit
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -65,6 +66,8 @@ const (
 // Summary contains counts only, so it exposes no additional identifiers.
 type Summary struct {
 	Assets          int `json:"assets"`
+	Observations    int `json:"observations"`
+	Evidence        int `json:"evidence"`
 	Relationships   int `json:"relationships"`
 	Findings        int `json:"findings"`
 	Collectors      int `json:"collectors"`
@@ -97,18 +100,39 @@ func Build(scan model.ScanResult, inventory model.Inventory, delta model.Delta, 
 	if !ok {
 		return Record{}, errors.New("audit requires a complete or partial scan")
 	}
+	clonedInventory, err := cloneInventory(inventory)
+	if err != nil {
+		return Record{}, err
+	}
+	clonedFindings, err := cloneFindings(findings)
+	if err != nil {
+		return Record{}, err
+	}
+	clonedCoverage, err := cloneCoverage(scan.Coverage)
+	if err != nil {
+		return Record{}, err
+	}
+	clonedDelta, err := cloneDelta(delta)
+	if err != nil {
+		return Record{}, err
+	}
 	record := Record{
 		SchemaVersion: schemaVersion,
 		Profile:       ProfileInternal,
 		State:         state,
 		Run:           normalizeRun(run),
-		Inventory:     cloneInventory(inventory),
-		Findings:      cloneFindings(findings),
-		Coverage:      cloneCoverage(scan.Coverage),
-		Changes:       cloneDelta(delta),
+		Inventory:     clonedInventory,
+		Findings:      clonedFindings,
+		Coverage:      clonedCoverage,
+		Changes:       clonedDelta,
 	}
-	coverage := cloneEvidenceCoverage(scan.EvidenceCoverage)
-	record.EvidenceCoverage = &coverage
+	if scan.EvidenceCoverage.Status != "" || len(scan.EvidenceCoverage.Targets) != 0 || len(scan.EvidenceCoverage.Errors) != 0 {
+		coverage, err := cloneEvidenceCoverage(scan.EvidenceCoverage)
+		if err != nil {
+			return Record{}, err
+		}
+		record.EvidenceCoverage = &coverage
+	}
 	normalizeRecord(&record)
 	record.Summary = summarize(record)
 	if err := Validate(record); err != nil {
@@ -197,12 +221,21 @@ func normalizeRecord(record *Record) {
 	sort.Slice(record.Inventory.Assets, func(left, right int) bool {
 		return record.Inventory.Assets[left].ID < record.Inventory.Assets[right].ID
 	})
+	for index := range record.Inventory.Assets {
+		normalizeAsset(&record.Inventory.Assets[index])
+	}
 	sort.Slice(record.Inventory.Observations, func(left, right int) bool {
 		return record.Inventory.Observations[left].ID < record.Inventory.Observations[right].ID
 	})
+	for index := range record.Inventory.Observations {
+		normalizeObservation(&record.Inventory.Observations[index])
+	}
 	sort.Slice(record.Inventory.Evidence, func(left, right int) bool {
 		return record.Inventory.Evidence[left].ID < record.Inventory.Evidence[right].ID
 	})
+	for index := range record.Inventory.Evidence {
+		normalizeEvidence(&record.Inventory.Evidence[index])
+	}
 	sort.Slice(record.Inventory.Relationships, func(left, right int) bool {
 		a, b := record.Inventory.Relationships[left], record.Inventory.Relationships[right]
 		return relationshipKey(a) < relationshipKey(b)
@@ -213,6 +246,9 @@ func normalizeRecord(record *Record) {
 	sort.Slice(record.Inventory.Findings, func(left, right int) bool {
 		return record.Inventory.Findings[left].ID < record.Inventory.Findings[right].ID
 	})
+	for index := range record.Inventory.Findings {
+		normalizeFinding(&record.Inventory.Findings[index])
+	}
 	sort.Slice(record.Inventory.AnalyzerFacts, func(left, right int) bool {
 		return record.Inventory.AnalyzerFacts[left].ID < record.Inventory.AnalyzerFacts[right].ID
 	})
@@ -221,6 +257,9 @@ func normalizeRecord(record *Record) {
 		clearEvidenceErrors(record.Inventory.Evidence[index].Errors)
 	}
 	sort.Slice(record.Findings, func(left, right int) bool { return record.Findings[left].ID < record.Findings[right].ID })
+	for index := range record.Findings {
+		normalizeFinding(&record.Findings[index])
+	}
 	sort.Slice(record.Coverage, func(left, right int) bool { return record.Coverage[left].Collector < record.Coverage[right].Collector })
 	sort.Slice(record.Changes.Changes, func(left, right int) bool {
 		a, b := record.Changes.Changes[left], record.Changes.Changes[right]
@@ -238,6 +277,7 @@ func normalizeRecord(record *Record) {
 		})
 		clearCoverageErrors(record.EvidenceCoverage.Errors)
 		for index := range record.EvidenceCoverage.Targets {
+			normalizeEvidenceTarget(&record.EvidenceCoverage.Targets[index])
 			clearEvidenceErrors(record.EvidenceCoverage.Targets[index].Errors)
 		}
 	}
@@ -253,10 +293,49 @@ func normalizeCollectorResult(result *model.CollectorResult) {
 	})
 	sort.Slice(result.Targets, func(left, right int) bool { return result.Targets[left].TargetID < result.Targets[right].TargetID })
 	sort.Slice(result.Observations, func(left, right int) bool { return result.Observations[left].ID < result.Observations[right].ID })
+	for index := range result.Assets {
+		normalizeAsset(&result.Assets[index])
+	}
+	for index := range result.Observations {
+		normalizeObservation(&result.Observations[index])
+	}
 	clearCoverageErrors(result.Errors)
 	for index := range result.Targets {
+		sort.Slice(result.Targets[index].Errors, func(left, right int) bool {
+			return coverageErrorKey(result.Targets[index].Errors[left]) < coverageErrorKey(result.Targets[index].Errors[right])
+		})
 		clearCoverageErrors(result.Targets[index].Errors)
 	}
+}
+
+func normalizeAsset(asset *model.Asset) {
+	asset.ObservedAt = asset.ObservedAt.UTC()
+	asset.Path, asset.Source, asset.Metadata = "", "", nil
+}
+
+func normalizeObservation(observation *model.Observation) {
+	observation.Host, observation.LocationRef, observation.Source = "", "", ""
+	observation.Consumers, observation.Metadata = nil, nil
+}
+
+func normalizeEvidence(evidence *model.ContentEvidence) {
+	evidence.Metadata = nil
+	sort.Slice(evidence.Errors, func(left, right int) bool { return evidence.Errors[left].Code < evidence.Errors[right].Code })
+}
+
+func normalizeEvidenceTarget(target *model.EvidenceTargetResult) {
+	sort.Slice(target.Errors, func(left, right int) bool { return target.Errors[left].Code < target.Errors[right].Code })
+}
+
+func normalizeFinding(finding *model.Finding) {
+	finding.DetectedAt = finding.DetectedAt.UTC()
+	for _, values := range []*[]string{&finding.RuleIDs, &finding.IntelligenceIDs, &finding.EvidenceIDs, &finding.CampaignIDs, &finding.AttackTechniques} {
+		sort.Strings(*values)
+	}
+	sort.Slice(finding.Bundles, func(left, right int) bool {
+		a, b := finding.Bundles[left], finding.Bundles[right]
+		return a.Family+"\x00"+fmt.Sprintf("%020d", a.Sequence)+"\x00"+a.Digest < b.Family+"\x00"+fmt.Sprintf("%020d", b.Sequence)+"\x00"+b.Digest
+	})
 }
 
 func relationshipKey(value model.Relationship) string {
@@ -269,6 +348,8 @@ func coverageErrorKey(value model.CoverageError) string {
 func summarize(record Record) Summary {
 	summary := Summary{
 		Assets:        len(record.Inventory.Assets),
+		Observations:  len(record.Inventory.Observations),
+		Evidence:      len(record.Inventory.Evidence),
 		Relationships: len(record.Inventory.Relationships),
 		Findings:      len(record.Findings),
 		Collectors:    len(record.Coverage),
@@ -280,20 +361,26 @@ func summarize(record Record) Summary {
 	return summary
 }
 
-func cloneInventory(value model.Inventory) model.Inventory                      { return clone(value) }
-func cloneFindings(value []model.Finding) []model.Finding                       { return clone(value) }
-func cloneCoverage(value []model.CollectorResult) []model.CollectorResult       { return clone(value) }
-func cloneEvidenceCoverage(value model.EvidenceCoverage) model.EvidenceCoverage { return clone(value) }
-func cloneDelta(value model.Delta) model.Delta                                  { return clone(value) }
+func cloneInventory(value model.Inventory) (model.Inventory, error) { return clone(value) }
+func cloneFindings(value []model.Finding) ([]model.Finding, error)  { return clone(value) }
+func cloneCoverage(value []model.CollectorResult) ([]model.CollectorResult, error) {
+	return clone(value)
+}
+func cloneEvidenceCoverage(value model.EvidenceCoverage) (model.EvidenceCoverage, error) {
+	return clone(value)
+}
+func cloneDelta(value model.Delta) (model.Delta, error) { return clone(value) }
 
-func clone[T any](value T) T {
+func clone[T any](value T) (T, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		panic("audit model must be JSON serializable: " + err.Error())
+		var zero T
+		return zero, errors.New("audit model must be JSON serializable")
 	}
 	var copied T
 	if err := json.Unmarshal(encoded, &copied); err != nil {
-		panic("audit model must be JSON deserializable: " + err.Error())
+		var zero T
+		return zero, errors.New("audit model must be JSON deserializable")
 	}
-	return copied
+	return copied, nil
 }

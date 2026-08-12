@@ -4,142 +4,414 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	privacyboundary "github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
-// Validate checks the closed audit envelope before it is stored or exported.
-// Privacy-specific content checks and profile transformation follow in this file.
+var (
+	exportTokenPattern = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
+	unsafePathPattern  = regexp.MustCompile(`(?:^|[\t\n\r "'=:(])/(?:[A-Za-z0-9_.~-]+(?:/|$))`)
+	hostnamePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:\.(?:local|test|internal|com|net|org|dev|io|co))(?::[0-9]{1,5})?(?:$|[^a-z0-9-])`)
+	envValuePattern    = regexp.MustCompile(`\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|ENV|VALUE)[A-Z0-9_]*=`)
+	privateIDPattern   = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
+)
+
+// Validate checks the closed audit envelope, persisted model vocabularies,
+// graph references, normalized order, and privacy boundary.
 func Validate(record Record) error {
-	if record.SchemaVersion != schemaVersion || !validProfile(record.Profile) || !validRecordRun(record.Profile, record.Run) || record.Summary != summarize(record) {
+	if record.SchemaVersion != schemaVersion || !validProfile(record.Profile) || record.Summary != summarize(record) || !validRecordRun(record.Profile, record.State, record.Run) {
 		return errors.New("invalid audit record")
 	}
 	if record.State == StateFailed {
 		if record.Failure == nil || !validFailure(record.Failure.Stage, record.Failure.Code) || !emptyFailurePayload(record) {
 			return errors.New("invalid failed audit record")
 		}
-		return validatePrivacy(record)
+		return nil
 	}
-	if (record.State != StateComplete && record.State != StatePartial) || record.Failure != nil {
+	if (record.State != StateComplete && record.State != StatePartial) || record.Failure != nil || containsOriginalErrorText(record) {
 		return errors.New("invalid completed audit record")
 	}
-	if containsOriginalErrorText(record) {
-		return errors.New("audit record retains error detail")
+	if err := validateInventory(record.Profile, record.Inventory); err != nil {
+		return err
 	}
-	if record.Profile == ProfileRedacted {
-		if err := validateRedactedFields(record); err != nil {
-			return err
-		}
+	if err := validateCoverage(record.Profile, record.Coverage); err != nil {
+		return err
 	}
-	return validatePrivacy(record)
+	if err := validateTopLevelGraph(record.Profile, record); err != nil {
+		return err
+	}
+	if record.Profile == ProfileRedacted && !validRedactedDisplay(record) {
+		return errors.New("redacted audit record retains display identity")
+	}
+	return nil
 }
 
 func validProfile(value Profile) bool { return value == ProfileInternal || value == ProfileRedacted }
 
-func validRecordRun(profile Profile, run Run) bool {
-	if !validRunIDs(profile, run) || !validRunText(profile, run) {
+func validRecordRun(profile Profile, state State, run Run) bool {
+	if !utcRange(run.StartedAt, run.FinishedAt) {
 		return false
 	}
-	return !run.StartedAt.IsZero() && !run.FinishedAt.IsZero() && run.StartedAt.Location() == runUTC && run.FinishedAt.Location() == runUTC && !run.FinishedAt.Before(run.StartedAt)
-}
-
-var runUTC = normalizeRunTimestamp()
-
-func normalizeRunTimestamp() *time.Location { return time.UTC }
-
-func closedValue(value string) bool { return value != "" && len(value) <= 128 }
-
-func validRunIDs(profile Profile, run Run) bool {
-	if profile == ProfileInternal {
-		return runIDPattern.MatchString(run.ID) && run.ScanID != "" && deviceIDPattern.MatchString(run.DeviceID)
+	if profile == ProfileInternal && (!runIDPattern.MatchString(run.ID) || !deviceIDPattern.MatchString(run.DeviceID)) {
+		return false
 	}
-	return exportToken("run", run.ID) && exportToken("scan", run.ScanID) && exportToken("device", run.DeviceID)
-}
-
-func validRunText(profile Profile, run Run) bool {
-	if profile == ProfileInternal {
-		return ValidLabel(run.Label) && closedValue(run.Product) && closedValue(run.Version)
+	if profile == ProfileRedacted && (!exportIdentityToken("run", run.ID) || !exportIdentityToken("device", run.DeviceID)) {
+		return false
 	}
-	return run.Label == "redacted" && run.Product == "" && run.Version == ""
+	if state == StateComplete || state == StatePartial {
+		if run.ScanID == "" || profile == ProfileRedacted && !exportIdentityToken("scan", run.ScanID) || profile == ProfileInternal && !safeIdentifier(run.ScanID) {
+			return false
+		}
+	} else if run.ScanID != "" && (profile == ProfileRedacted && !exportIdentityToken("scan", run.ScanID) || profile == ProfileInternal && !safeIdentifier(run.ScanID)) {
+		return false
+	}
+	if profile == ProfileRedacted {
+		return run.Label == "redacted" && run.Product == "" && run.Version == ""
+	}
+	return (run.Label == "" || ValidLabel(run.Label) && !strings.Contains(strings.ToLower(run.Label), "worktree")) && run.Product == "ssc-init" && validVersion(run.Version)
 }
 
-func exportToken(kind, value string) bool {
+func utcRange(started, finished time.Time) bool {
+	return !started.IsZero() && !finished.IsZero() && started.Location() == time.UTC && finished.Location() == time.UTC && !finished.Before(started)
+}
+
+func validVersion(value string) bool {
+	return regexp.MustCompile(`\A(?:v[0-9][0-9A-Za-z.+-]*|dev\+git\.[0-9a-f]{40})\z`).MatchString(value)
+}
+
+func exportToken(value string) bool { return exportTokenPattern.MatchString(value) }
+
+func exportIdentityToken(kind, value string) bool {
 	prefix := kind + ":export-sha256:"
 	if !strings.HasPrefix(value, prefix) || len(strings.TrimPrefix(value, prefix)) != 64 {
 		return false
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
-	return err == nil
+	return err == nil && strings.ToLower(strings.TrimPrefix(value, prefix)) == strings.TrimPrefix(value, prefix)
 }
 
 func emptyFailurePayload(record Record) bool {
 	return len(record.Inventory.Assets) == 0 && len(record.Inventory.Observations) == 0 && len(record.Inventory.Evidence) == 0 &&
 		len(record.Inventory.Relationships) == 0 && len(record.Inventory.Errors) == 0 && len(record.Inventory.Findings) == 0 && len(record.Inventory.AnalyzerFacts) == 0 &&
-		len(record.Findings) == 0 && len(record.Coverage) == 0 &&
-		record.EvidenceCoverage == nil && len(record.Changes.Changes) == 0
+		len(record.Findings) == 0 && len(record.Coverage) == 0 && record.EvidenceCoverage == nil && len(record.Changes.Changes) == 0
 }
 
 func containsOriginalErrorText(record Record) bool {
-	if coverageErrorsContainText(record.Inventory.Errors) || evidenceContainsErrorText(record.Inventory.Evidence) {
-		return true
-	}
-	for _, result := range record.Coverage {
-		if coverageErrorsContainText(result.Errors) {
+	for _, errorValue := range append(append([]model.CoverageError(nil), record.Inventory.Errors...), coverageErrors(record.Coverage)...) {
+		if errorValue.Message != "" || errorValue.Path != "" || !validAuditErrorCode(errorValue.Code) {
 			return true
+		}
+	}
+	for _, evidence := range record.Inventory.Evidence {
+		for _, errorValue := range evidence.Errors {
+			if errorValue.Message != "" || !validAuditErrorCode(errorValue.Code) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func coverageErrors(results []model.CollectorResult) []model.CoverageError {
+	var errors []model.CoverageError
+	for _, result := range results {
+		errors = append(errors, result.Errors...)
+		for _, target := range result.Targets {
+			errors = append(errors, target.Errors...)
+		}
+	}
+	return errors
+}
+
+func validateInventory(profile Profile, inventory model.Inventory) error {
+	assetIDs := map[string]struct{}{}
+	for _, asset := range inventory.Assets {
+		if !validAsset(profile, asset) || !addUnique(assetIDs, asset.ID) {
+			return errors.New("invalid audit asset")
+		}
+	}
+	observationIDs := map[string]struct{}{}
+	for _, observation := range inventory.Observations {
+		if !validObservation(profile, observation, assetIDs) || !addUnique(observationIDs, observation.ID) {
+			return errors.New("invalid audit observation")
+		}
+	}
+	evidenceIDs := map[string]struct{}{}
+	for _, evidence := range inventory.Evidence {
+		if !validEvidence(profile, evidence, assetIDs, observationIDs) || !addUnique(evidenceIDs, evidence.ID) {
+			return errors.New("invalid audit evidence")
+		}
+	}
+	if !sortedBy(inventory.Assets, func(asset model.Asset) string { return asset.ID }) || !sortedBy(inventory.Observations, func(observation model.Observation) string { return observation.ID }) || !sortedBy(inventory.Evidence, func(evidence model.ContentEvidence) string { return evidence.ID }) {
+		return errors.New("unsorted audit inventory")
+	}
+	for _, relationship := range inventory.Relationships {
+		if !validReference(profile, relationship.From) || !validReference(profile, relationship.To) || !model.ValidRelationshipKind(relationship.Kind) || !contains(assetIDs, relationship.From) || !contains(assetIDs, relationship.To) {
+			return errors.New("invalid audit relationship")
+		}
+	}
+	if !sort.SliceIsSorted(inventory.Relationships, func(left, right int) bool {
+		return relationshipKey(inventory.Relationships[left]) < relationshipKey(inventory.Relationships[right])
+	}) || duplicateRelationships(inventory.Relationships) {
+		return errors.New("unsorted audit relationships")
+	}
+	for _, finding := range inventory.Findings {
+		if !validFinding(profile, finding, assetIDs, evidenceIDs) {
+			return errors.New("invalid audit finding")
+		}
+	}
+	if !sortedBy(inventory.Findings, func(finding model.Finding) string { return finding.ID }) {
+		return errors.New("unsorted audit findings")
+	}
+	factIDs := map[string]struct{}{}
+	for _, fact := range inventory.AnalyzerFacts {
+		if !validAnalyzerFact(profile, fact, assetIDs, evidenceIDs) || !addUnique(factIDs, fact.ID) {
+			return errors.New("invalid audit analyzer fact")
+		}
+	}
+	if !sortedBy(inventory.AnalyzerFacts, func(fact model.AnalyzerFact) string { return fact.ID }) {
+		return errors.New("unsorted audit analyzer facts")
+	}
+	if !validCoverageErrors(inventory.Errors) || !sort.SliceIsSorted(inventory.Errors, func(left, right int) bool {
+		return coverageErrorKey(inventory.Errors[left]) < coverageErrorKey(inventory.Errors[right])
+	}) {
+		return errors.New("invalid audit inventory errors")
+	}
+	return nil
+}
+
+func validateCoverage(profile Profile, coverage []model.CollectorResult) error {
+	seen := map[string]struct{}{}
+	for _, result := range coverage {
+		if !validCollector(result.Collector) || !validCoverageStatus(result.Status) || !addUnique(seen, result.Collector) || !validCoverageErrors(result.Errors) {
+			return errors.New("invalid audit collector coverage")
+		}
+		assetIDs := map[string]struct{}{}
+		for _, asset := range result.Assets {
+			if !validAsset(profile, asset) || !addUnique(assetIDs, asset.ID) {
+				return errors.New("invalid audit collector asset")
+			}
+		}
+		for _, relationship := range result.Relationships {
+			if !model.ValidRelationshipKind(relationship.Kind) || !contains(assetIDs, relationship.From) || !contains(assetIDs, relationship.To) {
+				return errors.New("invalid audit collector relationship")
+			}
+		}
+		for _, observation := range result.Observations {
+			if !validObservation(profile, observation, assetIDs) {
+				return errors.New("invalid audit collector observation")
+			}
 		}
 		for _, target := range result.Targets {
-			if coverageErrorsContainText(target.Errors) {
-				return true
+			if !validTarget(profile, target) {
+				return errors.New("invalid audit target")
 			}
 		}
 	}
-	if record.EvidenceCoverage != nil {
-		if coverageErrorsContainText(record.EvidenceCoverage.Errors) {
-			return true
+	if !sortedBy(coverage, func(result model.CollectorResult) string { return result.Collector }) {
+		return errors.New("unsorted audit collector coverage")
+	}
+	return nil
+}
+
+func validateTopLevelGraph(profile Profile, record Record) error {
+	assetIDs, observationIDs, evidenceIDs := inventoryIDs(record.Inventory)
+	for _, finding := range record.Findings {
+		if !validFinding(profile, finding, assetIDs, evidenceIDs) {
+			return errors.New("invalid audit finding")
 		}
-		for _, target := range record.EvidenceCoverage.Targets {
-			for _, evidenceError := range target.Errors {
-				if evidenceError.Message != "" {
-					return true
-				}
+	}
+	if !sortedBy(record.Findings, func(finding model.Finding) string { return finding.ID }) {
+		return errors.New("unsorted audit findings")
+	}
+	for _, change := range record.Changes.Changes {
+		if !validChange(profile, change, assetIDs, observationIDs, evidenceIDs) {
+			return errors.New("invalid audit change")
+		}
+	}
+	if !sort.SliceIsSorted(record.Changes.Changes, func(left, right int) bool {
+		a, b := record.Changes.Changes[left], record.Changes.Changes[right]
+		return string(a.Entity)+"\x00"+a.EntityID+"\x00"+string(a.Kind) < string(b.Entity)+"\x00"+b.EntityID+"\x00"+string(b.Kind)
+	}) {
+		return errors.New("unsorted audit changes")
+	}
+	if record.EvidenceCoverage == nil {
+		return nil
+	}
+	if !validCoverageStatus(record.EvidenceCoverage.Status) || !validCoverageErrors(record.EvidenceCoverage.Errors) {
+		return errors.New("invalid audit evidence coverage")
+	}
+	seen := map[string]struct{}{}
+	for _, target := range record.EvidenceCoverage.Targets {
+		if !validEvidenceTarget(profile, target, assetIDs, observationIDs, evidenceIDs) || !addUnique(seen, target.TargetID) {
+			return errors.New("invalid audit evidence target")
+		}
+	}
+	if !sortedBy(record.EvidenceCoverage.Targets, func(target model.EvidenceTargetResult) string { return target.TargetID }) {
+		return errors.New("unsorted audit evidence targets")
+	}
+	return nil
+}
+
+func inventoryIDs(inventory model.Inventory) (map[string]struct{}, map[string]struct{}, map[string]struct{}) {
+	assets, observations, evidence := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+	for _, value := range inventory.Assets {
+		assets[value.ID] = struct{}{}
+	}
+	for _, value := range inventory.Observations {
+		observations[value.ID] = struct{}{}
+	}
+	for _, value := range inventory.Evidence {
+		evidence[value.ID] = struct{}{}
+	}
+	return assets, observations, evidence
+}
+
+func validAsset(profile Profile, asset model.Asset) bool {
+	if !validReference(profile, asset.ID) || !validAssetType(asset.Type) || !utcOrZero(asset.ObservedAt) || asset.Path != "" || asset.Source != "" || len(asset.Metadata) != 0 {
+		return false
+	}
+	if profile == ProfileRedacted {
+		return redactedAsset(asset) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+	}
+	return safeText(asset.Name) && (asset.Version == "" || safeText(asset.Version)) && (asset.SHA256 == "" || sha256Hex(asset.SHA256)) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+}
+
+func validObservation(profile Profile, observation model.Observation, assetIDs map[string]struct{}) bool {
+	if !validReference(profile, observation.ID) || !validReference(profile, observation.AssetID) || !contains(assetIDs, observation.AssetID) || !validCollector(observation.Collector) || !validScope(observation.Scope) || observation.Host != "" || observation.LocationRef != "" || observation.Source != "" || len(observation.Consumers) != 0 || len(observation.Metadata) != 0 {
+		return false
+	}
+	return observation.ProjectID == "" || validReference(profile, observation.ProjectID) && contains(assetIDs, observation.ProjectID)
+}
+
+func validEvidence(profile Profile, evidence model.ContentEvidence, assetIDs, observationIDs map[string]struct{}) bool {
+	return validReference(profile, evidence.ID) && validReference(profile, evidence.AssetID) && validReference(profile, evidence.ObservationID) && contains(assetIDs, evidence.AssetID) && contains(observationIDs, evidence.ObservationID) && validEvidenceKind(evidence.Kind) && validEvidenceSubject(evidence.Subject) && validEvidenceStatus(evidence.Status) && safeOptionalText(evidence.Algorithm) && (evidence.Digest == "" || sha256Hex(evidence.Digest)) && evidence.Size >= 0 && evidence.Files >= 0 && evidence.Directories >= 0 && evidence.Symlinks >= 0 && len(evidence.Metadata) == 0 && validEvidenceErrors(evidence.Errors) && sortedEvidenceErrors(evidence.Errors)
+}
+
+func validFinding(profile Profile, finding model.Finding, assetIDs, evidenceIDs map[string]struct{}) bool {
+	if !validReference(profile, finding.ID) || !validReference(profile, finding.AssetID) || !contains(assetIDs, finding.AssetID) || !validAssetType(finding.AssetType) || !utcOrZero(finding.DetectedAt) || finding.Level < 1 || finding.Level > 5 || !validVerdict(finding.Verdict) || !validSeverity(finding.Severity) || !validConfidence(finding.Confidence) || !validAction(finding.Action) || !sortedSafeStrings(finding.RuleIDs) || !sortedSafeStrings(finding.IntelligenceIDs) || !sortedSafeStrings(finding.CampaignIDs) || !sortedSafeStrings(finding.AttackTechniques) {
+		return false
+	}
+	if profile == ProfileRedacted {
+		if finding.Version != "" || finding.SHA256 != "" {
+			return false
+		}
+	} else if !safeOptionalText(finding.Version) || finding.SHA256 != "" && !sha256Hex(finding.SHA256) {
+		return false
+	}
+	for _, evidenceID := range finding.EvidenceIDs {
+		if !validReference(profile, evidenceID) || !contains(evidenceIDs, evidenceID) {
+			return false
+		}
+	}
+	if !sort.StringsAreSorted(finding.EvidenceIDs) || hasDuplicateStrings(finding.EvidenceIDs) {
+		return false
+	}
+	for _, bundle := range finding.Bundles {
+		if (bundle.Family != "ti" && bundle.Family != "policy") || bundle.Sequence == 0 || profile == ProfileInternal && !sha256Hex(bundle.Digest) || profile == ProfileRedacted && bundle.Digest != "" {
+			return false
+		}
+	}
+	return sort.SliceIsSorted(finding.Bundles, func(left, right int) bool {
+		return bundleKey(finding.Bundles[left]) < bundleKey(finding.Bundles[right])
+	})
+}
+
+func validAnalyzerFact(profile Profile, fact model.AnalyzerFact, assetIDs, evidenceIDs map[string]struct{}) bool {
+	return validReference(profile, fact.ID) && validReference(profile, fact.AssetID) && contains(assetIDs, fact.AssetID) && (fact.EvidenceID == "" || validReference(profile, fact.EvidenceID) && contains(evidenceIDs, fact.EvidenceID)) && safeText(fact.RuleID) && validAnalyzerCategory(fact.Category) && validConfidence(fact.Confidence) && fact.Occurrences > 0 && fact.Occurrences <= 10_000
+}
+
+func validTarget(profile Profile, target model.TargetCoverage) bool {
+	return validReference(profile, target.TargetID) && target.InstanceRef == "" && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
+}
+
+func validEvidenceTarget(profile Profile, target model.EvidenceTargetResult, assetIDs, observationIDs, evidenceIDs map[string]struct{}) bool {
+	return validReference(profile, target.TargetID) && validReference(profile, target.AssetID) && validReference(profile, target.ObservationID) && validReference(profile, target.EvidenceID) && contains(assetIDs, target.AssetID) && contains(observationIDs, target.ObservationID) && contains(evidenceIDs, target.EvidenceID) && validEvidenceStatus(target.Status) && validEvidenceErrors(target.Errors) && sortedEvidenceErrors(target.Errors)
+}
+
+func validChange(profile Profile, change model.Change, assets, observations, evidence map[string]struct{}) bool {
+	if !validReference(profile, change.EntityID) || !validChangeKind(change.Kind) {
+		return false
+	}
+	switch change.Entity {
+	case model.ChangeEntityAsset:
+		return contains(assets, change.EntityID)
+	case model.ChangeEntityObservation:
+		return contains(observations, change.EntityID)
+	case model.ChangeEntityEvidence:
+		return contains(evidence, change.EntityID)
+	default:
+		return false
+	}
+}
+
+func validRedactedDisplay(record Record) bool {
+	for _, asset := range record.Inventory.Assets {
+		if !redactedAsset(asset) {
+			return false
+		}
+	}
+	for _, result := range record.Coverage {
+		for _, asset := range result.Assets {
+			if !redactedAsset(asset) {
+				return false
 			}
 		}
 	}
-	return false
-}
-
-func coverageErrorsContainText(errors []model.CoverageError) bool {
-	for _, coverageError := range errors {
-		if coverageError.Message != "" || coverageError.Path != "" {
-			return true
+	for _, observation := range append(append([]model.Observation(nil), record.Inventory.Observations...), coverageObservations(record.Coverage)...) {
+		if observation.Host != "" || observation.LocationRef != "" || observation.Source != "" || len(observation.Consumers) != 0 || len(observation.Metadata) != 0 {
+			return false
 		}
 	}
-	return false
-}
-
-func evidenceContainsErrorText(evidence []model.ContentEvidence) bool {
-	for _, item := range evidence {
-		for _, evidenceError := range item.Errors {
-			if evidenceError.Message != "" {
-				return true
+	for _, evidence := range record.Inventory.Evidence {
+		if evidence.Digest != "" || len(evidence.Metadata) != 0 {
+			return false
+		}
+	}
+	for _, finding := range append(append([]model.Finding(nil), record.Inventory.Findings...), record.Findings...) {
+		if finding.Version != "" || finding.SHA256 != "" {
+			return false
+		}
+		for _, bundle := range finding.Bundles {
+			if bundle.Digest != "" {
+				return false
 			}
 		}
 	}
-	return false
+	return true
 }
 
-// Redact produces an export-local record that cannot correlate inventory
-// identities with another export. It never mutates the source record.
+func coverageObservations(results []model.CollectorResult) []model.Observation {
+	var observations []model.Observation
+	for _, result := range results {
+		observations = append(observations, result.Observations...)
+	}
+	return observations
+}
+
+func redactedAsset(asset model.Asset) bool {
+	return asset.Name == "" && asset.Version == "" && asset.Path == "" && asset.Source == "" && asset.SHA256 == "" && len(asset.Metadata) == 0 &&
+		(asset.Signature == nil || asset.Signature.Identifier == "" && asset.Signature.TeamID == "") &&
+		(asset.Provenance == nil || asset.Provenance.Source == "" && asset.Provenance.Integrity == "")
+}
+
+// Redact produces an export-local record that cannot correlate identities with another export.
 func Redact(record Record, salt [32]byte) (Record, error) {
 	if err := Validate(record); err != nil {
 		return Record{}, err
 	}
-	redacted := clone(record)
+	redacted, err := clone(record)
+	if err != nil {
+		return Record{}, err
+	}
 	identities := map[string]string{}
 	token := func(value string) string {
 		if value == "" {
@@ -154,7 +426,6 @@ func Redact(record Record, salt [32]byte) (Record, error) {
 		identities[value] = result
 		return result
 	}
-
 	for index := range redacted.Inventory.Assets {
 		redactAsset(&redacted.Inventory.Assets[index], token)
 	}
@@ -162,8 +433,7 @@ func Redact(record Record, salt [32]byte) (Record, error) {
 		redactCollector(&redacted.Coverage[index], token)
 	}
 	for index := range redacted.Inventory.Relationships {
-		redacted.Inventory.Relationships[index].From = token(redacted.Inventory.Relationships[index].From)
-		redacted.Inventory.Relationships[index].To = token(redacted.Inventory.Relationships[index].To)
+		redacted.Inventory.Relationships[index].From, redacted.Inventory.Relationships[index].To = token(redacted.Inventory.Relationships[index].From), token(redacted.Inventory.Relationships[index].To)
 	}
 	for index := range redacted.Inventory.Observations {
 		redactObservation(&redacted.Inventory.Observations[index], token)
@@ -176,9 +446,7 @@ func Redact(record Record, salt [32]byte) (Record, error) {
 	}
 	for index := range redacted.Inventory.AnalyzerFacts {
 		fact := &redacted.Inventory.AnalyzerFacts[index]
-		fact.ID = token(fact.ID)
-		fact.AssetID = token(fact.AssetID)
-		fact.EvidenceID = token(fact.EvidenceID)
+		fact.ID, fact.AssetID, fact.EvidenceID = token(fact.ID), token(fact.AssetID), token(fact.EvidenceID)
 	}
 	for index := range redacted.Findings {
 		redactFinding(&redacted.Findings[index], token)
@@ -189,19 +457,14 @@ func Redact(record Record, salt [32]byte) (Record, error) {
 	if redacted.EvidenceCoverage != nil {
 		for index := range redacted.EvidenceCoverage.Targets {
 			target := &redacted.EvidenceCoverage.Targets[index]
-			target.TargetID = token(target.TargetID)
-			target.AssetID = token(target.AssetID)
-			target.ObservationID = token(target.ObservationID)
-			target.EvidenceID = token(target.EvidenceID)
-			clearEvidenceErrors(target.Errors)
+			target.TargetID, target.AssetID, target.ObservationID, target.EvidenceID = token(target.TargetID), token(target.AssetID), token(target.ObservationID), token(target.EvidenceID)
 		}
-		clearCoverageErrors(redacted.EvidenceCoverage.Errors)
 	}
-	clearCoverageErrors(redacted.Inventory.Errors)
 	redacted.Profile = ProfileRedacted
-	redacted.Run.ID = exportIdentity("run", redacted.Run.ID, salt)
-	redacted.Run.ScanID = exportIdentity("scan", redacted.Run.ScanID, salt)
-	redacted.Run.DeviceID = exportIdentity("device", redacted.Run.DeviceID, salt)
+	redacted.Run.ID, redacted.Run.DeviceID = exportIdentity("run", redacted.Run.ID, salt), exportIdentity("device", redacted.Run.DeviceID, salt)
+	if redacted.Run.ScanID != "" {
+		redacted.Run.ScanID = exportIdentity("scan", redacted.Run.ScanID, salt)
+	}
 	redacted.Run.Label, redacted.Run.Product, redacted.Run.Version = "redacted", "", ""
 	normalizeRecord(&redacted)
 	redacted.Summary = summarize(redacted)
@@ -216,11 +479,9 @@ func exportIdentity(kind, value string, salt [32]byte) string {
 	_, _ = mac.Write([]byte(value))
 	return kind + ":export-sha256:" + hex.EncodeToString(mac.Sum(nil))
 }
-
 func redactAsset(asset *model.Asset, token func(string) string) {
 	asset.ID = token(asset.ID)
-	asset.Name, asset.Version, asset.Path, asset.Source, asset.SHA256 = "", "", "", "", ""
-	asset.Metadata = nil
+	asset.Name, asset.Version, asset.Path, asset.Source, asset.SHA256, asset.Metadata = "", "", "", "", "", nil
 	if asset.Signature != nil {
 		asset.Signature.Identifier, asset.Signature.TeamID = "", ""
 	}
@@ -228,45 +489,30 @@ func redactAsset(asset *model.Asset, token func(string) string) {
 		asset.Provenance.Source, asset.Provenance.Integrity = "", ""
 	}
 }
-
 func redactCollector(result *model.CollectorResult, token func(string) string) {
 	for index := range result.Assets {
 		redactAsset(&result.Assets[index], token)
 	}
 	for index := range result.Relationships {
-		result.Relationships[index].From = token(result.Relationships[index].From)
-		result.Relationships[index].To = token(result.Relationships[index].To)
+		result.Relationships[index].From, result.Relationships[index].To = token(result.Relationships[index].From), token(result.Relationships[index].To)
 	}
 	for index := range result.Observations {
 		redactObservation(&result.Observations[index], token)
 	}
 	for index := range result.Targets {
-		result.Targets[index].TargetID = token(result.Targets[index].TargetID)
-		result.Targets[index].InstanceRef = ""
-		clearCoverageErrors(result.Targets[index].Errors)
+		result.Targets[index].TargetID, result.Targets[index].InstanceRef = token(result.Targets[index].TargetID), ""
 	}
-	clearCoverageErrors(result.Errors)
 }
-
 func redactObservation(observation *model.Observation, token func(string) string) {
-	observation.ID, observation.AssetID = token(observation.ID), token(observation.AssetID)
-	observation.Host, observation.LocationRef, observation.ProjectID, observation.Source = "", "", "", ""
-	observation.Consumers, observation.Metadata = nil, nil
+	observation.ID, observation.AssetID, observation.ProjectID = token(observation.ID), token(observation.AssetID), token(observation.ProjectID)
+	observation.Host, observation.LocationRef, observation.Source, observation.Consumers, observation.Metadata = "", "", "", nil, nil
 }
-
 func redactEvidence(evidence *model.ContentEvidence, token func(string) string) {
-	evidence.ID = token(evidence.ID)
-	evidence.AssetID = token(evidence.AssetID)
-	evidence.ObservationID = token(evidence.ObservationID)
+	evidence.ID, evidence.AssetID, evidence.ObservationID = token(evidence.ID), token(evidence.AssetID), token(evidence.ObservationID)
 	evidence.Digest, evidence.Metadata = "", nil
-	for index := range evidence.Errors {
-		evidence.Errors[index].Message = ""
-	}
 }
-
 func redactFinding(finding *model.Finding, token func(string) string) {
-	finding.ID, finding.AssetID = token(finding.ID), token(finding.AssetID)
-	finding.Version, finding.SHA256 = "", ""
+	finding.ID, finding.AssetID, finding.Version, finding.SHA256 = token(finding.ID), token(finding.AssetID), "", ""
 	for index := range finding.EvidenceIDs {
 		finding.EvidenceIDs[index] = token(finding.EvidenceIDs[index])
 	}
@@ -280,84 +526,203 @@ func clearCoverageErrors(errors []model.CoverageError) {
 		errors[index].Message, errors[index].Path = "", ""
 	}
 }
-
 func clearEvidenceErrors(errors []model.EvidenceError) {
 	for index := range errors {
 		errors[index].Message = ""
 	}
 }
 
-func validateRedactedFields(record Record) error {
-	for _, asset := range record.Inventory.Assets {
-		if !redactedAsset(asset) {
-			return errors.New("redacted audit record retains asset display identity")
-		}
+func validReference(profile Profile, value string) bool {
+	if profile == ProfileRedacted {
+		return exportToken(value)
 	}
-	for _, result := range record.Coverage {
-		for _, asset := range result.Assets {
-			if !redactedAsset(asset) {
-				return errors.New("redacted audit record retains asset display identity")
-			}
-		}
-	}
-	for _, finding := range append(append([]model.Finding(nil), record.Inventory.Findings...), record.Findings...) {
-		if finding.Version != "" || finding.SHA256 != "" {
-			return errors.New("redacted audit record retains finding display identity")
-		}
-		for _, bundle := range finding.Bundles {
-			if bundle.Digest != "" {
-				return errors.New("redacted audit record retains bundle digest")
-			}
-		}
-	}
-	for _, evidence := range record.Inventory.Evidence {
-		if evidence.Digest != "" || len(evidence.Metadata) != 0 {
-			return errors.New("redacted audit record retains evidence display identity")
-		}
-	}
-	return nil
+	return safeIdentifier(value)
 }
-
-func redactedAsset(asset model.Asset) bool {
-	return asset.Name == "" && asset.Version == "" && asset.Path == "" && asset.Source == "" && asset.SHA256 == "" && len(asset.Metadata) == 0 &&
-		(asset.Signature == nil || asset.Signature.Identifier == "" && asset.Signature.TeamID == "") &&
-		(asset.Provenance == nil || asset.Provenance.Source == "" && asset.Provenance.Integrity == "")
+func safeIdentifier(value string) bool {
+	lower := strings.ToLower(value)
+	return value != "" && len(value) <= 256 && safeString(value) && !strings.ContainsAny(value, " /\\") && !strings.Contains(lower, "workspace") && !strings.Contains(lower, "worktree") && !strings.Contains(lower, "product-private")
 }
-
-func validatePrivacy(record Record) error {
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		return errors.New("invalid audit record")
-	}
-	var value any
-	if err := json.Unmarshal(encoded, &value); err != nil || containsUnsafeValue(value) {
-		return errors.New("audit record contains sensitive value")
-	}
-	return nil
+func safeText(value string) bool         { return value != "" && len(value) <= 256 && safeString(value) }
+func safeOptionalText(value string) bool { return value == "" || safeText(value) }
+func safeString(value string) bool       { return utf8.ValidString(value) && !unsafeAuditString(value) }
+func unsafeAuditString(value string) bool {
+	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || strings.Contains(value, "://") || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || strings.HasPrefix(value, "--") || strings.Contains(value, " --") || strings.ContainsRune(value, '\x00')
 }
-
-func containsUnsafeValue(value any) bool {
-	switch item := value.(type) {
-	case string:
-		return unsafeAuditString(item)
-	case []any:
-		for _, nested := range item {
-			if containsUnsafeValue(nested) {
-				return true
+func addUnique(values map[string]struct{}, value string) bool {
+	if _, found := values[value]; found {
+		return false
+	}
+	values[value] = struct{}{}
+	return true
+}
+func contains(values map[string]struct{}, value string) bool { _, found := values[value]; return found }
+func utcOrZero(value time.Time) bool                         { return value.IsZero() || value.Location() == time.UTC }
+func sortedBy[T any](values []T, key func(T) string) bool {
+	for index := 1; index < len(values); index++ {
+		if key(values[index-1]) >= key(values[index]) {
+			return false
+		}
+	}
+	return true
+}
+func sortedSafeStrings(values []string) bool {
+	return sort.StringsAreSorted(values) && !hasDuplicateStrings(values) && func() bool {
+		for _, value := range values {
+			if !safeText(value) {
+				return false
 			}
 		}
-	case map[string]any:
-		for key, nested := range item {
-			if unsafeAuditString(key) || containsUnsafeValue(nested) {
-				return true
-			}
+		return true
+	}()
+}
+func hasDuplicateStrings(values []string) bool {
+	for index := 1; index < len(values); index++ {
+		if values[index-1] == values[index] {
+			return true
 		}
 	}
 	return false
 }
+func duplicateRelationships(values []model.Relationship) bool {
+	for index := 1; index < len(values); index++ {
+		if relationshipKey(values[index-1]) == relationshipKey(values[index]) {
+			return true
+		}
+	}
+	return false
+}
+func sortedEvidenceErrors(values []model.EvidenceError) bool {
+	for index := 1; index < len(values); index++ {
+		if values[index-1].Code >= values[index].Code {
+			return false
+		}
+	}
+	return true
+}
+func validCoverageErrors(values []model.CoverageError) bool {
+	for _, value := range values {
+		if !validAuditErrorCode(value.Code) || value.Message != "" || value.Path != "" {
+			return false
+		}
+	}
+	return true
+}
+func validEvidenceErrors(values []model.EvidenceError) bool {
+	for _, value := range values {
+		if !validAuditErrorCode(value.Code) || value.Message != "" {
+			return false
+		}
+	}
+	return true
+}
+func sha256Hex(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32 && strings.ToLower(value) == value
+}
+func bundleKey(value model.BundleReference) string {
+	return value.Family + "\x00" + fmt.Sprintf("%020d", value.Sequence) + "\x00" + value.Digest
+}
 
-func unsafeAuditString(value string) bool {
-	lower := strings.ToLower(value)
-	return privacyboundary.ContainsSensitiveValue(value) || strings.HasPrefix(value, "/") || strings.Contains(value, `\`) ||
-		strings.Contains(value, "://") || strings.Contains(lower, "/users/") || strings.Contains(lower, "worktree")
+func validAssetType(value model.AssetType) bool {
+	switch value {
+	case model.AssetAgentPlugin, model.AssetSkill, model.AssetMCP, model.AssetIDEExtension, model.AssetPackage, model.AssetProject, model.AssetTool, model.AssetShellStartup, model.AssetGitHook, model.AssetCredentialHelper, model.AssetLaunchConfig, model.AssetProcess, model.AssetListeningEndpoint:
+		return true
+	}
+	return false
+}
+func validCoverageStatus(value model.CoverageStatus) bool {
+	switch value {
+	case model.CoverageComplete, model.CoveragePartial, model.CoverageSkipped, model.CoverageUnavailable, model.CoverageFailed:
+		return true
+	}
+	return false
+}
+func validTargetStatus(value model.TargetStatus) bool {
+	switch value {
+	case model.TargetComplete, model.TargetNotPresent, model.TargetPartial, model.TargetUnavailable, model.TargetUnsupported, model.TargetSkipped:
+		return true
+	}
+	return false
+}
+func validEvidenceKind(value model.EvidenceKind) bool {
+	switch value {
+	case model.EvidenceFileSHA256, model.EvidenceTreeSHA256, model.EvidenceSemanticSHA256, model.EvidencePackageContent, model.EvidenceContainerIdentity:
+		return true
+	}
+	return false
+}
+func validEvidenceStatus(value model.EvidenceStatus) bool {
+	switch value {
+	case model.EvidenceComplete, model.EvidencePartial, model.EvidenceOversize, model.EvidenceUnavailable, model.EvidenceUnsupported, model.EvidenceSkipped:
+		return true
+	}
+	return false
+}
+func validEvidenceSubject(value string) bool {
+	switch value {
+	case model.EvidenceSubjectManifest, model.EvidenceSubjectSkillDocument, model.EvidenceSubjectEntrypointMain, model.EvidenceSubjectEntrypointBrowser, model.EvidenceSubjectPayloadTree, model.EvidenceSubjectMCPDeclaration, model.EvidenceSubjectPackageContent, model.EvidenceSubjectContainerImage, model.EvidenceSubjectShellStartup, model.EvidenceSubjectGitHook, model.EvidenceSubjectLaunchConfig, model.EvidenceSubjectCredentialConfig:
+		return true
+	}
+	return model.ProjectEvidenceSubject(value)
+}
+func validScope(value model.ObservationScope) bool {
+	switch value {
+	case model.ScopeUser, model.ScopeProject, model.ScopeIDEProfile, model.ScopeToolEnvironment, model.ScopeSystem:
+		return true
+	}
+	return false
+}
+func validCollector(value string) bool {
+	switch value {
+	case "agents", "ide", "mcp", "packages", "projects", "runtime", "surfaces":
+		return true
+	}
+	return false
+}
+func validVerdict(value model.Verdict) bool {
+	switch value {
+	case model.VerdictKnownMalicious, model.VerdictBehaviorMalicious, model.VerdictSuspicious, model.VerdictNeedsReview, model.VerdictNoFinding:
+		return true
+	}
+	return false
+}
+func validSeverity(value model.Severity) bool {
+	switch value {
+	case model.SeverityCritical, model.SeverityHigh, model.SeverityMedium, model.SeverityLow, model.SeverityInformational:
+		return true
+	}
+	return false
+}
+func validConfidence(value model.Confidence) bool {
+	return value == model.ConfidenceHigh || value == model.ConfidenceMedium || value == model.ConfidenceLow
+}
+func validAction(value model.FindingAction) bool {
+	switch value {
+	case model.ActionAdvisory, model.ActionBlocked, model.ActionPaused, model.ActionExcepted, model.ActionAllowed:
+		return true
+	}
+	return false
+}
+func validAnalyzerCategory(value model.AnalyzerCategory) bool {
+	switch value {
+	case model.AnalyzerVersionAdvisory, model.AnalyzerMutableReference, model.AnalyzerDynamicExecution, model.AnalyzerProcessLaunch, model.AnalyzerCredentialAccess, model.AnalyzerOutboundNetwork, model.AnalyzerObfuscation, model.AnalyzerCredentialEgress:
+		return true
+	}
+	return false
+}
+func validChangeKind(value model.ChangeKind) bool {
+	return value == model.ChangeAdded || value == model.ChangeRemoved || value == model.ChangeChanged
+}
+func validSignature(value *model.Signature) bool {
+	return value == nil || value.Status.Valid() && safeOptionalText(value.Identifier) && safeOptionalText(value.TeamID)
+}
+func validProvenance(value *model.Provenance) bool {
+	return value == nil || value.Status.Valid() && safeText(value.Ecosystem) && safeOptionalText(value.Source) && (value.Integrity == "" || sha256Hex(value.Integrity))
+}
+func validAuditErrorCode(value string) bool {
+	switch value {
+	case "identity_changed", "symlink_rejected", "byte_limit", "read_unavailable", "special_file_rejected", "file_limit", "depth_limit", "time_limit", "path_invalid", "target_rejected", "collector_failed", "collector_error", "collector_timeout", "collector_panic", "coverage_contract_violation", "root_unavailable", "identity_rejected", "metadata_malformed", "probe_failed", "probe_output_truncated", "executable_replaced", "metadata-conflict", "observation-conflict", "orphan-observation", "read_failed", "stale", "evidence_unavailable", "unsupported":
+		return true
+	}
+	return false
 }
