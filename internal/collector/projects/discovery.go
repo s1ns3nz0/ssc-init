@@ -93,13 +93,12 @@ func DiscoverRoots(ctx context.Context, env collector.Environment) (Discovery, e
 		return Discovery{}, errors.New("invalid conventional project root")
 	}
 
-	ideCandidates, ideCoverage, err := discoverIDERoots(ctx, env)
+	ideCandidates, ideCoverage, sourcePresence, err := discoverIDERootsWithPresence(ctx, env)
 	if err != nil {
 		clearDiscoveryCandidates(ideCandidates)
 		return Discovery{}, err
 	}
 	defer clearDiscoveryCandidates(ideCandidates)
-	sourcePresence := discoveryIDECatalogPresence(env)
 	verifiedIDE, err := verifyDiscoverySeeds(ctx, env.Home, env.FS, ideCandidates)
 	if err != nil {
 		return Discovery{}, err
@@ -213,31 +212,6 @@ func mergeDiscoveryCoverage(present map[string]bool, groups ...[]model.TargetCov
 		}
 	}
 	return discoveryCatalogCoverage(present, issues)
-}
-
-// discoveryIDECatalogPresence records only whether each closed IDE metadata
-// root exists as a directory. Parsing and rooted identity checks remain the
-// authority for issues; this state solely distinguishes a clean read from
-// metadata that was not present.
-func discoveryIDECatalogPresence(env collector.Environment) map[string]bool {
-	present := make(map[string]bool, len(discoveryTargetOrder))
-	noFollow, ok := env.FS.(platform.NoFollowFileSystem)
-	if env.FS == nil || !ok {
-		return present
-	}
-	for _, source := range vscodeDiscoverySources {
-		path := filepath.Join(env.Home, "Library", "Application Support", source.product, "User", "workspaceStorage")
-		info, err := noFollow.Lstat(path)
-		if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
-			present[source.targetID] = true
-		}
-	}
-	path := filepath.Join(env.Home, jetBrainsDiscoveryComponents[0], jetBrainsDiscoveryComponents[1], jetBrainsDiscoveryComponents[2])
-	info, err := noFollow.Lstat(path)
-	if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
-		present[discoveryJetBrainsTargetID] = true
-	}
-	return present
 }
 
 func clearDiscoveryRoots(roots []Root) {

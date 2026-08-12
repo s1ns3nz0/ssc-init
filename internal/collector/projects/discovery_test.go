@@ -897,6 +897,53 @@ func TestDiscoverRootsCleanSourceReportsCompleteWithoutMaskingAbsentCatalog(t *t
 	}
 }
 
+func TestDiscoverRootsDoesNotReprobeCatalogAfterDescriptorRootedRead(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "work", "clean")
+	mkdirDiscoveryCandidate(t, project)
+	writeVSCodeDiscoveryWorkspace(t, home, "Code", "valid", "folder", project)
+	source := filepath.Join(home, "Library", "Application Support", "Code", "User", "workspaceStorage")
+	fileSystem := &discoveryCatalogProbeFileSystem{target: source, remove: true}
+	env := testutil.Environment(t, home)
+	env.FS = fileSystem
+
+	got, err := DiscoverRoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileSystem.calls != 0 {
+		t.Fatalf("absolute catalog probes=%d", fileSystem.calls)
+	}
+	if got.Coverage[0].TargetID != discoveryVSCodeTargetID || got.Coverage[0].Status != model.TargetComplete {
+		t.Fatalf("coverage=%+v", got.Coverage)
+	}
+}
+
+func TestDiscoverRootsNeverProbesCatalogThroughIntermediateSymlink(t *testing.T) {
+	home := t.TempDir()
+	external := t.TempDir()
+	externalLibrary := filepath.Join(external, "Library")
+	if err := os.MkdirAll(filepath.Join(externalLibrary, "Application Support", "Code", "User", "workspaceStorage"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalLibrary, filepath.Join(home, "Library")); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(home, "Library", "Application Support", "Code", "User", "workspaceStorage")
+	fileSystem := &discoveryCatalogProbeFileSystem{target: source}
+	env := testutil.Environment(t, home)
+	env.FS = fileSystem
+
+	got, err := DiscoverRoots(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileSystem.calls != 0 {
+		t.Fatalf("absolute catalog probes=%d", fileSystem.calls)
+	}
+	assertDiscoveryCoverageCodes(t, got.Coverage, discoveryVSCodeTargetID, "symlink_rejected")
+}
+
 func TestDiscoverRootsCancellationReturnsNoPartialDiscovery(t *testing.T) {
 	home := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -967,6 +1014,25 @@ func mkdirDiscoveryCandidate(t *testing.T, path string) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type discoveryCatalogProbeFileSystem struct {
+	platform.OSFileSystem
+	target string
+	remove bool
+	calls  int
+}
+
+func (f *discoveryCatalogProbeFileSystem) Lstat(path string) (os.FileInfo, error) {
+	if path == f.target {
+		f.calls++
+		if f.remove {
+			if err := os.RemoveAll(path); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return f.OSFileSystem.Lstat(path)
 }
 
 func fixedDiscoveryIndex(index int) string {

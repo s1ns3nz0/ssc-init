@@ -23,19 +23,24 @@ const maxDiscoveryRawEntries = 4096
 // Returned candidate paths are runtime-only and must pass final validation
 // before they are sealed or persisted.
 func discoverIDERoots(ctx context.Context, env collector.Environment) ([]discoveryCandidate, []model.TargetCoverage, error) {
+	candidates, coverage, _, err := discoverIDERootsWithPresence(ctx, env)
+	return candidates, coverage, err
+}
+
+func discoverIDERootsWithPresence(ctx context.Context, env collector.Environment) ([]discoveryCandidate, []model.TargetCoverage, map[string]bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if env.Home == "" || !filepath.IsAbs(env.Home) || filepath.Clean(env.Home) != env.Home || !validMetadataText(env.Home) {
-		return nil, nil, errors.New("invalid project discovery home")
+		return nil, nil, nil, errors.New("invalid project discovery home")
 	}
 	rooted, ok := env.FS.(platform.RootedFileSystem)
 	if env.FS == nil || !ok {
-		return nil, nil, errors.New("project discovery filesystem unavailable")
+		return nil, nil, nil, errors.New("project discovery filesystem unavailable")
 	}
 	homeRoot, err := rooted.OpenRoot(env.Home)
 	if err != nil {
-		return nil, nil, errors.New("project discovery home unavailable")
+		return nil, nil, nil, errors.New("project discovery home unavailable")
 	}
 	defer homeRoot.Close()
 
@@ -50,14 +55,15 @@ func discoverIDERoots(ctx context.Context, env collector.Environment) ([]discove
 		issues[targetID][code] = struct{}{}
 	}
 	var candidates []discoveryCandidate
-	clearOnError := func(err error) ([]discoveryCandidate, []model.TargetCoverage, error) {
+	present := make(map[string]bool, len(discoveryTargetOrder))
+	clearOnError := func(err error) ([]discoveryCandidate, []model.TargetCoverage, map[string]bool, error) {
 		clearDiscoveryCandidates(candidates)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	for _, source := range vscodeDiscoverySources {
 		components := []string{"Library", "Application Support", source.product, "User", "workspaceStorage"}
-		found, sourceIssues, sourceErr := discoverVSCodeSource(ctx, homeRoot, components, source)
+		found, sourceIssues, sourceErr := discoverVSCodeSource(ctx, homeRoot, components, source, present)
 		clearStrings(components)
 		if sourceErr != nil {
 			return clearOnError(sourceErr)
@@ -67,7 +73,7 @@ func discoverIDERoots(ctx context.Context, env collector.Environment) ([]discove
 			addIssue(source.targetID, code)
 		}
 	}
-	found, sourceIssues, sourceErr := discoverJetBrainsSource(ctx, homeRoot, env.Home)
+	found, sourceIssues, sourceErr := discoverJetBrainsSource(ctx, homeRoot, env.Home, present)
 	if sourceErr != nil {
 		return clearOnError(sourceErr)
 	}
@@ -78,14 +84,15 @@ func discoverIDERoots(ctx context.Context, env collector.Environment) ([]discove
 	if err := ctx.Err(); err != nil {
 		return clearOnError(err)
 	}
-	return candidates, discoveryIssueCoverage(issues), nil
+	return candidates, discoveryIssueCoverage(issues), present, nil
 }
 
-func discoverVSCodeSource(ctx context.Context, homeRoot platform.RootedDirectory, components []string, source vscodeDiscoverySource) ([]discoveryCandidate, []string, error) {
+func discoverVSCodeSource(ctx context.Context, homeRoot platform.RootedDirectory, components []string, source vscodeDiscoverySource, present map[string]bool) ([]discoveryCandidate, []string, error) {
 	sourceRoot, expectedSource, code, err := openDiscoverySource(ctx, homeRoot, components)
 	if err != nil || sourceRoot == nil {
 		return nil, issueSlice(code), err
 	}
+	present[source.targetID] = true
 	defer sourceRoot.Close()
 
 	entries, readCode, err := readDiscoveryDirectory(ctx, sourceRoot, maxVSCodeDiscoveryChildren)
@@ -180,11 +187,12 @@ func discoverVSCodeSource(ctx context.Context, homeRoot platform.RootedDirectory
 	return candidates, issues, nil
 }
 
-func discoverJetBrainsSource(ctx context.Context, homeRoot platform.RootedDirectory, home string) ([]discoveryCandidate, []string, error) {
+func discoverJetBrainsSource(ctx context.Context, homeRoot platform.RootedDirectory, home string, present map[string]bool) ([]discoveryCandidate, []string, error) {
 	sourceRoot, expectedSource, code, err := openDiscoverySource(ctx, homeRoot, jetBrainsDiscoveryComponents)
 	if err != nil || sourceRoot == nil {
 		return nil, issueSlice(code), err
 	}
+	present[discoveryJetBrainsTargetID] = true
 	defer sourceRoot.Close()
 
 	entries, readCode, err := readDiscoveryDirectory(ctx, sourceRoot, maxJetBrainsProducts)
