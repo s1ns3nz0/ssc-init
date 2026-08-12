@@ -226,13 +226,13 @@ func discoveryIDECatalogPresence(env collector.Environment) map[string]bool {
 		return present
 	}
 	for _, source := range vscodeDiscoverySources {
-		path := vscodeDiscoverySourcePath(env.Home, source.product)
+		path := filepath.Join(env.Home, "Library", "Application Support", source.product, "User", "workspaceStorage")
 		info, err := noFollow.Lstat(path)
 		if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
 			present[source.targetID] = true
 		}
 	}
-	path := jetbrainsDiscoverySourcePath(env.Home)
+	path := filepath.Join(env.Home, jetBrainsDiscoveryComponents[0], jetBrainsDiscoveryComponents[1], jetBrainsDiscoveryComponents[2])
 	info, err := noFollow.Lstat(path)
 	if err == nil && info != nil && info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
 		present[discoveryJetBrainsTargetID] = true
