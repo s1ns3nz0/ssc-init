@@ -248,7 +248,7 @@ func discoverMainWorktree(ctx context.Context, home string, homeRoot, repoRoot p
 }
 
 func validateLinkedSeed(ctx context.Context, home string, homeRoot, linkedRoot platform.RootedDirectory, linkedPath string) (string, string) {
-	contents, code := readGitPathFile(linkedRoot, ".git", true)
+	contents, code := readGitPathFile(ctx, linkedRoot, ".git", true)
 	if code != "" {
 		return "", code
 	}
@@ -266,18 +266,29 @@ func validateLinkedSeed(ctx context.Context, home string, homeRoot, linkedRoot p
 		return "", discoverySourceErrorCode(err)
 	}
 	defer admin.Close()
-	target, targetCode := readGitPathFile(admin, "gitdir", false)
+	target, targetCode := readGitPathFile(ctx, admin, "gitdir", false)
 	if targetCode != "" {
 		return "", targetCode
 	}
 	if target != filepath.Join(linkedPath, ".git") {
 		return "", "metadata_malformed"
 	}
+	currentBacklink, backlinkCode := readGitPathFile(ctx, linkedRoot, ".git", true)
+	if backlinkCode != "" {
+		return "", backlinkCode
+	}
+	currentTarget, targetCode := readGitPathFile(ctx, admin, "gitdir", false)
+	if targetCode != "" {
+		return "", targetCode
+	}
+	if currentBacklink != contents || currentTarget != target {
+		return "", "identity_changed"
+	}
 	return linkedPath, ""
 }
 
 func validateAdminBacklink(ctx context.Context, home string, homeRoot, admin platform.RootedDirectory, adminPath string) (string, string) {
-	target, code := readGitPathFile(admin, "gitdir", false)
+	target, code := readGitPathFile(ctx, admin, "gitdir", false)
 	if code != "" {
 		return "", code
 	}
@@ -295,7 +306,7 @@ func validateAdminBacklink(ctx context.Context, home string, homeRoot, admin pla
 		return "", discoverySourceErrorCode(err)
 	}
 	defer linked.Close()
-	backlink, backlinkCode := readGitPathFile(linked, ".git", true)
+	backlink, backlinkCode := readGitPathFile(ctx, linked, ".git", true)
 	if backlinkCode != "" {
 		return "", backlinkCode
 	}
@@ -303,30 +314,36 @@ func validateAdminBacklink(ctx context.Context, home string, homeRoot, admin pla
 	if !canonicalGitPath(backlink) || backlink != adminPath {
 		return "", "metadata_malformed"
 	}
+	currentTarget, targetCode := readGitPathFile(ctx, admin, "gitdir", false)
+	if targetCode != "" {
+		return "", targetCode
+	}
+	currentBacklink, backlinkCode := readGitPathFile(ctx, linked, ".git", true)
+	if backlinkCode != "" {
+		return "", backlinkCode
+	}
+	if currentTarget != target || currentBacklink != "gitdir: "+backlink {
+		return "", "identity_changed"
+	}
 	return linkedPath, ""
 }
 
-func readGitPathFile(root platform.RootedDirectory, name string, requirePrefix bool) (string, string) {
-	file, expected, opened, err := platform.OpenVerifiedFile(root, name)
+func readGitPathFile(ctx context.Context, root platform.RootedDirectory, name string, requirePrefix bool) (string, string) {
+	metadata, code, err := readDiscoveryMetadata(ctx, root, name, gitDiscoveryMetadataBytes)
 	if err != nil {
 		return "", discoverySourceErrorCode(err)
 	}
-	defer file.Close()
-	if expected == nil || opened == nil || expected.Mode()&fs.ModeSymlink != 0 || !expected.Mode().IsRegular() || !os.SameFile(expected, opened) {
-		return "", "identity_changed"
+	if code != "" {
+		return "", code
 	}
-	limited := io.LimitReader(file, gitDiscoveryMetadataBytes+1)
-	contents, err := io.ReadAll(limited)
-	if err != nil {
-		clear(contents)
+	if metadata == nil {
 		return "", "metadata_unavailable"
 	}
-	if len(contents) > gitDiscoveryMetadataBytes {
-		clear(contents)
-		return "", "metadata_oversize"
+	defer metadata.clearAndClose()
+	if !metadata.identityMatches(root) {
+		return "", "identity_changed"
 	}
-	value := strings.TrimSpace(string(contents))
-	clear(contents)
+	value := strings.TrimSpace(string(metadata.contents))
 	if !validMetadataText(value) || strings.ContainsAny(value, "\r\n\t") {
 		return "", "metadata_malformed"
 	}

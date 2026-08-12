@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/testutil"
 )
@@ -105,6 +106,62 @@ func TestDiscoverGitWorktreesAcceptsLinkedRepositorySeed(t *testing.T) {
 	got, _, err := discoverGitWorktrees(context.Background(), testutil.Environment(t, home), []discoveryCandidate{{path: linked}})
 	if err != nil || len(got) != 1 || got[0].path != linked {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func TestDiscoverGitWorktreesRejectsMetadataMutationDuringRead(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetFile func(admin, linked string) string
+		replace    bool
+	}{
+		{name: "admin gitdir replacement", targetFile: func(admin, _ string) string { return filepath.Join(admin, "gitdir") }, replace: true},
+		{name: "admin gitdir in-place mutation", targetFile: func(admin, _ string) string { return filepath.Join(admin, "gitdir") }},
+		{name: "linked backlink replacement", targetFile: func(_, linked string) string { return filepath.Join(linked, ".git") }, replace: true},
+		{name: "linked backlink in-place mutation", targetFile: func(_, linked string) string { return filepath.Join(linked, ".git") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			main := filepath.Join(home, "Projects", "main")
+			linked := filepath.Join(home, "work", "feature")
+			admin := makeGitPair(t, main, linked, "feature")
+			target := tt.targetFile(admin, linked)
+			mutated := filepath.Join(home, "untrusted", "metadata") + "\n"
+			if filepath.Base(target) == ".git" {
+				mutated = "gitdir: " + filepath.Join(home, "untrusted", "admin") + "\n"
+			}
+			var mutate func() error
+			if tt.replace {
+				replacement := target + "-replacement"
+				writeGitFixture(t, replacement, mutated)
+				mutate = func() error { return replaceDiscoveryPath(target, replacement) }
+			} else {
+				mutate = func() error {
+					if err := os.WriteFile(target, []byte(mutated), 0o600); err != nil {
+						return err
+					}
+					future := time.Now().Add(time.Hour)
+					return os.Chtimes(target, future, future)
+				}
+			}
+			fileSystem := &discoveryReadSwapFileSystem{target: target, swap: mutate}
+			env := testutil.Environment(t, home)
+			env.FS = fileSystem
+
+			got, coverage, err := discoverGitWorktrees(context.Background(), env, []discoveryCandidate{{path: filepath.Join(home, "Projects")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fileSystem.swapErr != nil {
+				t.Fatal(fileSystem.swapErr)
+			}
+			if !fileSystem.swapped || len(got) != 0 {
+				t.Fatalf("swapped=%v got=%+v", fileSystem.swapped, got)
+			}
+			assertDiscoveryCoverageCodes(t, coverage, discoveryGitTargetID, "identity_changed")
+			assertCoverageExcludes(t, coverage, home, main, linked, admin)
+		})
 	}
 }
 
