@@ -18,10 +18,12 @@ import (
 
 var (
 	exportTokenPattern = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
-	unsafePathPattern  = regexp.MustCompile(`(?:^|[\t\n\r "'=:(\[])\/(?:[A-Za-z0-9_.~-]+(?:/|$))`)
+	unsafePathPattern  = regexp.MustCompile(`(?:^|[^A-Za-z0-9._~-])/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
+	uriPattern         = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*:/{1,2}`)
 	hostnamePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:\.(?:local|test|internal))(?::[0-9]{1,5})?(?:$|[^a-z0-9-])`)
 	ipEndpointPattern  = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
-	envValuePattern    = regexp.MustCompile(`\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|ENV|VALUE)[A-Z0-9_]*=`)
+	envValuePattern    = regexp.MustCompile(`(?i)(?:\benv\[[a-z][a-z0-9_]*\]|\b[a-z][a-z0-9_]*(?:token|secret|password|credential|api_key|env|value)[a-z0-9_]*)\s*=`)
+	argumentPattern    = regexp.MustCompile(`(?:^|[^a-z0-9_])--[a-z][a-z0-9_-]*`)
 	privateIDPattern   = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
 )
 
@@ -267,7 +269,9 @@ func validateTopLevelGraph(profile Profile, record Record) error {
 	if record.EvidenceCoverage == nil {
 		return nil
 	}
-	if !validCoverageStatus(record.EvidenceCoverage.Status) || !validCoverageErrors(record.EvidenceCoverage.Errors) {
+	if !validCoverageStatus(record.EvidenceCoverage.Status) || !validCoverageErrors(record.EvidenceCoverage.Errors) || !sort.SliceIsSorted(record.EvidenceCoverage.Errors, func(left, right int) bool {
+		return coverageErrorKey(record.EvidenceCoverage.Errors[left]) < coverageErrorKey(record.EvidenceCoverage.Errors[right])
+	}) {
 		return errors.New("invalid audit evidence coverage")
 	}
 	seen := map[string]struct{}{}
@@ -352,7 +356,17 @@ func validAnalyzerFact(profile Profile, fact model.AnalyzerFact, assetIDs, evide
 }
 
 func validTarget(profile Profile, target model.TargetCoverage) bool {
-	return validReference(profile, target.TargetID) && (profile == ProfileRedacted && target.InstanceRef == "" || profile == ProfileInternal && safeOptionalText(target.InstanceRef)) && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
+	return validReference(profile, target.TargetID) && validTargetInstance(profile, target.InstanceRef) && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
+}
+
+func validTargetInstance(profile Profile, value string) bool {
+	if value == "" {
+		return true
+	}
+	if profile == ProfileRedacted {
+		return exportToken(value)
+	}
+	return instanceToken(value)
 }
 
 func validEvidenceTarget(profile Profile, target model.EvidenceTargetResult, assetIDs, observationIDs, evidenceIDs map[string]struct{}) bool {
@@ -530,7 +544,7 @@ func redactCollector(result *model.CollectorResult, token func(string) string) {
 		redactObservation(&result.Observations[index], token)
 	}
 	for index := range result.Targets {
-		result.Targets[index].TargetID, result.Targets[index].InstanceRef = token(result.Targets[index].TargetID), ""
+		result.Targets[index].TargetID, result.Targets[index].InstanceRef = token(result.Targets[index].TargetID), token(result.Targets[index].InstanceRef)
 	}
 }
 func redactObservation(observation *model.Observation, token func(string) string) {
@@ -575,7 +589,7 @@ func safeText(value string) bool         { return value != "" && len(value) <= 2
 func safeOptionalText(value string) bool { return value == "" || safeText(value) }
 func safeString(value string) bool       { return utf8.ValidString(value) && !unsafeAuditString(value) }
 func unsafeAuditString(value string) bool {
-	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || strings.Contains(value, "://") || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || ipEndpointPattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || strings.HasPrefix(value, "--") || strings.Contains(value, " --") || strings.ContainsRune(value, '\x00')
+	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || uriPattern.MatchString(value) || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || ipEndpointPattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || argumentPattern.MatchString(value) || strings.ContainsRune(value, '\x00')
 }
 func addUnique(values map[string]struct{}, value string) bool {
 	if _, found := values[value]; found {
@@ -751,10 +765,15 @@ func validProvenance(value *model.Provenance) bool {
 func sha256Integrity(value string) bool {
 	return strings.HasPrefix(value, "sha256:") && sha256Hex(strings.TrimPrefix(value, "sha256:"))
 }
+
+// auditCoverageErrorCodes is the closed union of the current collector error
+// contracts. The producer-source parity test prevents an emitted code from
+// becoming silently unavailable in the audit receipt.
+var auditCoverageErrorCodes = map[string]struct{}{
+	"byte_limit": {}, "collector_error": {}, "collector_failed": {}, "collector_panic": {}, "collector_timeout": {}, "config_invalid": {}, "config_limit": {}, "config_malformed": {}, "config_oversized": {}, "config_size_limit": {}, "config_unavailable": {}, "coverage_contract_violation": {}, "depth_limit": {}, "docker_unavailable": {}, "entry_limit": {}, "evidence_unavailable": {}, "executable_evidence_invalid": {}, "executable_replaced": {}, "executable_unavailable": {}, "file_limit": {}, "filesystem_unavailable": {}, "identity_changed": {}, "identity_rejected": {}, "inspector_unavailable": {}, "invalid_local_target": {}, "invalid_server": {}, "launch_malformed": {}, "launch_unavailable": {}, "legacy_manifest_partial": {}, "legacy_transport_unknown": {}, "manifest_changed": {}, "manifest_invalid": {}, "manifest_limit": {}, "manifest_oversized": {}, "manifest_size_limit": {}, "manifest_unavailable": {}, "metadata-conflict": {}, "metadata_malformed": {}, "metadata_oversize": {}, "metadata_unavailable": {}, "observation-conflict": {}, "orphan-observation": {}, "outside_home": {}, "output_malformed": {}, "output_truncated": {}, "path_invalid": {}, "path_unavailable": {}, "probe_failed": {}, "probe_output_invalid": {}, "probe_output_truncated": {}, "provenance_identity_changed": {}, "provenance_identity_rejected": {}, "provenance_malformed": {}, "provenance_unavailable": {}, "read_failed": {}, "read_unavailable": {}, "rejected_identity": {}, "rejected_metadata": {}, "root_limit": {}, "root_unavailable": {}, "rooted_access_unavailable": {}, "runner_unavailable": {}, "signature_unavailable": {}, "special_file_rejected": {}, "stale": {}, "symlink_rejected": {}, "target_not_reported": {}, "target_rejected": {}, "time_limit": {}, "unknown_server_field": {}, "unsupported": {}, "unsupported_target": {},
+}
+
 func validAuditErrorCode(value string) bool {
-	switch value {
-	case "identity_changed", "symlink_rejected", "byte_limit", "read_unavailable", "special_file_rejected", "file_limit", "depth_limit", "time_limit", "path_invalid", "target_rejected", "target_not_reported", "unsupported_target", "invalid_local_target", "invalid_server", "unknown_server_field", "rejected_metadata", "rejected_identity", "config_invalid", "config_unavailable", "config_oversized", "entry_limit", "root_limit", "manifest_invalid", "manifest_oversized", "legacy_manifest_partial", "legacy_transport_unknown", "collector_failed", "collector_error", "collector_timeout", "collector_panic", "coverage_contract_violation", "root_unavailable", "identity_rejected", "metadata_malformed", "probe_failed", "probe_output_truncated", "executable_replaced", "metadata-conflict", "observation-conflict", "orphan-observation", "read_failed", "stale", "evidence_unavailable", "unsupported":
-		return true
-	}
-	return false
+	_, ok := auditCoverageErrorCodes[value]
+	return ok
 }

@@ -1,6 +1,11 @@
 package audit
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +36,142 @@ func TestValidateRejectsEmbeddedPrivateMarkersWithoutRejectingDottedDisplayNames
 	if err := Validate(record); err != nil {
 		t.Fatalf("Validate rejected dotted display name: %v", err)
 	}
+}
+
+func TestValidateRejectsPunctuationBypassedPrivateMarkers(t *testing.T) {
+	for _, marker := range []string{"note,/home/alice/private", "note,/private-project/secret", "file:/Users/alice/private", "host{10.0.0.1:8443}", "env[API_KEY]=private", "cmd(--private-argument)"} {
+		record := namedRecord()
+		record.Inventory.Assets[0].Name = marker
+		if err := Validate(record); err == nil {
+			t.Fatalf("Validate accepted punctuated marker %q", marker)
+		}
+	}
+}
+
+func TestRedactPreservesDistinctCollectorTargetInstances(t *testing.T) {
+	input := richInputRecord(time.UTC)
+	input.Scan.Coverage[0].Targets = []model.TargetCoverage{
+		{TargetID: "projects.discovery.git-worktrees", InstanceRef: "instance-a", Status: model.TargetPartial},
+		{TargetID: "projects.discovery.git-worktrees", InstanceRef: "instance-b", Status: model.TargetPartial},
+	}
+	record, err := Build(input.Scan, input.Inventory, input.Delta, input.Findings, validRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := Redact(record, [32]byte{9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := redacted.Coverage[0].Targets
+	if len(targets) != 2 || targets[0].InstanceRef == "" || targets[0].InstanceRef == targets[1].InstanceRef {
+		t.Fatalf("redacted target instances lost distinction: %+v", targets)
+	}
+}
+
+func TestBuildTokenizesPrivateCollectorTargetInstances(t *testing.T) {
+	input := richInputRecord(time.UTC)
+	input.Scan.Coverage[0].Targets = []model.TargetCoverage{{
+		TargetID: "mcp:vscode:workspace", InstanceRef: "JetBrains-IntelliJIdea2025.2-private-worktree", Status: model.TargetPartial,
+	}}
+	record, err := Build(input.Scan, input.Inventory, input.Delta, input.Findings, validRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := record.Coverage[0].Targets[0].InstanceRef
+	if !instanceToken(instance) || strings.Contains(instance, "IntelliJ") || strings.Contains(instance, "worktree") {
+		t.Fatalf("Build retained collector instance identity %q", instance)
+	}
+	redacted, err := Redact(record, [32]byte{10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exportToken(redacted.Coverage[0].Targets[0].InstanceRef) {
+		t.Fatalf("Redact did not retokenize collector instance %q", redacted.Coverage[0].Targets[0].InstanceRef)
+	}
+}
+
+func TestValidateRejectsUnsortedEvidenceCoverageErrors(t *testing.T) {
+	record := graphRecord()
+	record.EvidenceCoverage.Errors = []model.CoverageError{{Code: "target_rejected"}, {Code: "identity_changed"}}
+	if err := Validate(record); err == nil {
+		t.Fatal("Validate accepted unsorted evidence coverage errors")
+	}
+}
+
+func TestCoverageErrorCatalogParsesEveryProductionConstructorCode(t *testing.T) {
+	root := filepath.Join("..", "collector")
+	for _, code := range producerCoverageErrorCodes {
+		if !validAuditErrorCode(code) {
+			t.Fatalf("producer coverage code %q is absent from audit catalog", code)
+		}
+	}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return walkErr
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for _, index := range coverageCodeArgumentIndexes(callName(call.Fun)) {
+				if index >= len(call.Args) {
+					continue
+				}
+				literal, ok := call.Args[index].(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					continue
+				}
+				code := strings.Trim(literal.Value, `"`)
+				if !validAuditErrorCode(code) {
+					t.Fatalf("producer code %q from %s is absent from audit catalog", code, path)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// producerCoverageErrorCodes is the extracted, audited union of every code
+// emitted by current collector contracts, including helper-returned codes that
+// cannot be discovered from a call literal alone.
+var producerCoverageErrorCodes = []string{
+	"byte_limit", "collector_error", "collector_failed", "collector_panic", "collector_timeout", "config_invalid", "config_limit", "config_malformed", "config_oversized", "config_size_limit", "config_unavailable", "coverage_contract_violation", "depth_limit", "docker_unavailable", "entry_limit", "evidence_unavailable", "executable_evidence_invalid", "executable_replaced", "executable_unavailable", "file_limit", "filesystem_unavailable", "identity_changed", "identity_rejected", "inspector_unavailable", "invalid_local_target", "invalid_server", "launch_malformed", "launch_unavailable", "legacy_manifest_partial", "legacy_transport_unknown", "manifest_changed", "manifest_invalid", "manifest_limit", "manifest_oversized", "manifest_size_limit", "manifest_unavailable", "metadata-conflict", "metadata_malformed", "metadata_oversize", "metadata_unavailable", "observation-conflict", "orphan-observation", "outside_home", "output_malformed", "output_truncated", "path_invalid", "path_unavailable", "probe_failed", "probe_output_invalid", "probe_output_truncated", "provenance_identity_changed", "provenance_identity_rejected", "provenance_malformed", "provenance_unavailable", "read_failed", "read_unavailable", "rejected_identity", "rejected_metadata", "root_limit", "root_unavailable", "rooted_access_unavailable", "runner_unavailable", "signature_unavailable", "special_file_rejected", "stale", "symlink_rejected", "target_not_reported", "target_rejected", "time_limit", "unknown_server_field", "unsupported", "unsupported_target",
+}
+
+func callName(expression ast.Expr) string {
+	switch value := expression.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		return value.Sel.Name
+	default:
+		return ""
+	}
+}
+
+func coverageCodeArgumentIndexes(name string) []int {
+	switch name {
+	case "coverageError", "targetError", "ideCoverageError", "agentCoverageError", "runtimeTargetError", "addError":
+		return []int{0}
+	case "unavailableTarget", "appendProjectProvenanceError", "appendAgentTargetIssue":
+		return []int{1}
+	case "addIssue":
+		return []int{0, 3}
+	case "surfaceTargetError":
+		return []int{2}
+	case "appendPackageIssue":
+		return []int{3}
+	}
+	return nil
 }
 
 func TestRedactRemovesNamesVersionsAndRetokenizesIDs(t *testing.T) {

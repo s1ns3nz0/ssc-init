@@ -2,6 +2,8 @@
 package audit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -303,11 +305,26 @@ func normalizeCollectorResult(result *model.CollectorResult) {
 	}
 	clearCoverageErrors(result.Errors)
 	for index := range result.Targets {
+		if result.Targets[index].InstanceRef != "" && !instanceToken(result.Targets[index].InstanceRef) && !exportToken(result.Targets[index].InstanceRef) {
+			result.Targets[index].InstanceRef = targetInstanceToken(result.Targets[index].InstanceRef)
+		}
 		sort.Slice(result.Targets[index].Errors, func(left, right int) bool {
 			return coverageErrorKey(result.Targets[index].Errors[left]) < coverageErrorKey(result.Targets[index].Errors[right])
 		})
 		clearCoverageErrors(result.Targets[index].Errors)
 	}
+	sort.Slice(result.Targets, func(left, right int) bool {
+		return targetCoverageKey(result.Targets[left]) < targetCoverageKey(result.Targets[right])
+	})
+}
+
+func targetInstanceToken(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return "instance:sha256:" + hex.EncodeToString(digest[:])
+}
+
+func instanceToken(value string) bool {
+	return strings.HasPrefix(value, "instance:sha256:") && sha256Hex(strings.TrimPrefix(value, "instance:sha256:"))
 }
 
 func normalizeAsset(asset *model.Asset) {
