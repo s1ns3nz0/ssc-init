@@ -1,11 +1,15 @@
 package audit
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +49,18 @@ func TestValidateRejectsPunctuationBypassedPrivateMarkers(t *testing.T) {
 		if err := Validate(record); err == nil {
 			t.Fatalf("Validate accepted punctuated marker %q", marker)
 		}
+	}
+}
+
+func TestValidateRejectsRawSensitiveCategoriesInSafeTextField(t *testing.T) {
+	for _, marker := range []string{"note/home/alice/private", "mailto:alice@example.com", "localhost:8080", "foo=private", "cmd(-p secret)"} {
+		t.Run(marker, func(t *testing.T) {
+			record := namedRecord()
+			record.Inventory.Assets[0].Name = marker
+			if err := Validate(record); err == nil {
+				t.Fatalf("Validate accepted raw sensitive value %q in asset name", marker)
+			}
+		})
 	}
 }
 
@@ -98,80 +114,585 @@ func TestValidateRejectsUnsortedEvidenceCoverageErrors(t *testing.T) {
 	}
 }
 
-func TestCoverageErrorCatalogParsesEveryProductionConstructorCode(t *testing.T) {
-	root := filepath.Join("..", "collector")
-	for _, code := range producerCoverageErrorCodes {
-		if !validAuditErrorCode(code) {
-			t.Fatalf("producer coverage code %q is absent from audit catalog", code)
-		}
-	}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return walkErr
-		}
-		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if parseErr != nil {
-			return parseErr
-		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			for _, index := range coverageCodeArgumentIndexes(callName(call.Fun)) {
-				if index >= len(call.Args) {
-					continue
-				}
-				literal, ok := call.Args[index].(*ast.BasicLit)
-				if !ok || literal.Kind != token.STRING {
-					continue
-				}
-				code := strings.Trim(literal.Value, `"`)
-				if !validAuditErrorCode(code) {
-					t.Fatalf("producer code %q from %s is absent from audit catalog", code, path)
-				}
-			}
-			return true
-		})
-		return nil
-	})
+func TestCoverageErrorCatalogMatchesEveryProductionValueFlow(t *testing.T) {
+	codes, unresolved, err := productionCoverageErrorCodes([]string{filepath.Join("..", "collector"), filepath.Join("..", "evidence"), filepath.Join("..", "inventory")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(unresolved) != 0 {
+		t.Fatalf("production error-code sinks have unresolved value flow: %s", strings.Join(unresolved, ", "))
+	}
+	if _, found := codes["remote_unsupported"]; !found {
+		t.Fatal("producer value flow did not reach indirect remote_unsupported materialization")
+	}
+	ordered := make([]string, 0, len(codes))
+	for code := range codes {
+		ordered = append(ordered, code)
+	}
+	sort.Strings(ordered)
+	for _, code := range ordered {
+		if !validAuditErrorCode(code) {
+			t.Errorf("production error code %q is absent from audit catalog", code)
+		}
+	}
 }
 
-// producerCoverageErrorCodes is the extracted, audited union of every code
-// emitted by current collector contracts, including helper-returned codes that
-// cannot be discovered from a call literal alone.
-var producerCoverageErrorCodes = []string{
-	"byte_limit", "collector_error", "collector_failed", "collector_panic", "collector_timeout", "config_invalid", "config_limit", "config_malformed", "config_oversized", "config_size_limit", "config_unavailable", "coverage_contract_violation", "depth_limit", "docker_unavailable", "entry_limit", "evidence_unavailable", "executable_evidence_invalid", "executable_replaced", "executable_unavailable", "file_limit", "filesystem_unavailable", "identity_changed", "identity_rejected", "inspector_unavailable", "invalid_local_target", "invalid_server", "launch_malformed", "launch_unavailable", "legacy_manifest_partial", "legacy_transport_unknown", "manifest_changed", "manifest_invalid", "manifest_limit", "manifest_oversized", "manifest_size_limit", "manifest_unavailable", "metadata-conflict", "metadata_malformed", "metadata_oversize", "metadata_unavailable", "observation-conflict", "orphan-observation", "outside_home", "output_malformed", "output_truncated", "path_invalid", "path_unavailable", "probe_failed", "probe_output_invalid", "probe_output_truncated", "provenance_identity_changed", "provenance_identity_rejected", "provenance_malformed", "provenance_unavailable", "read_failed", "read_unavailable", "rejected_identity", "rejected_metadata", "root_limit", "root_unavailable", "rooted_access_unavailable", "runner_unavailable", "signature_unavailable", "special_file_rejected", "stale", "symlink_rejected", "target_not_reported", "target_rejected", "time_limit", "unknown_server_field", "unsupported", "unsupported_target",
+func TestProductionCoverageErrorValueFlowFollowsConstantsVariablesAndMaterialization(t *testing.T) {
+	root := t.TempDir()
+	source := `package fixture
+
+const indirectCode = "constant_indirect"
+
+type CoverageError struct { Code string }
+
+func materialize(codes []string) []CoverageError {
+	var errors []CoverageError
+	for _, code := range codes {
+		errors = append(errors, CoverageError{Code: code})
+	}
+	return errors
 }
 
-func callName(expression ast.Expr) string {
-	switch value := expression.(type) {
-	case *ast.Ident:
-		return value.Name
-	case *ast.SelectorExpr:
-		return value.Sel.Name
-	default:
+func produce() []CoverageError {
+	variable := indirectCode
+	return materialize([]string{variable})
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "producer.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codes, unresolved, err := productionCoverageErrorCodes([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unresolved) != 0 {
+		t.Fatalf("unresolved synthetic value flow: %v", unresolved)
+	}
+	if _, found := codes["constant_indirect"]; !found {
+		t.Fatalf("constant/variable/materialized code absent: %v", codes)
+	}
+}
+
+var productionErrorCodePattern = regexp.MustCompile(`\A(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)+|stale|unsupported)\z`)
+
+type sourceValueFlow struct {
+	prefix       string
+	packageNames map[string]struct{}
+	topLevel     map[*ast.Object]string
+	functions    map[string][]*sourceFunction
+	direct       map[string]map[string]struct{}
+	edges        map[string]map[string]struct{}
+	sinks        map[string]string
+	fieldCode    string
+	nextSink     int
+}
+
+type sourceFunction struct {
+	body         *ast.BlockStmt
+	parameters   []string
+	results      []string
+	namedResults []string
+}
+
+func productionCoverageErrorCodes(roots []string) (map[string]struct{}, []string, error) {
+	packageFiles := map[string][]string{}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return walkErr
+			}
+			packageFiles[filepath.Dir(path)] = append(packageFiles[filepath.Dir(path)], path)
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	allCodes := map[string]struct{}{}
+	var unresolved []string
+	for directory, paths := range packageFiles {
+		flow, err := newSourceValueFlow(directory, paths)
+		if err != nil {
+			return nil, nil, err
+		}
+		codes, missing := flow.resolveSinks()
+		for code := range codes {
+			allCodes[code] = struct{}{}
+		}
+		unresolved = append(unresolved, missing...)
+	}
+	sort.Strings(unresolved)
+	return allCodes, unresolved, nil
+}
+
+func newSourceValueFlow(directory string, paths []string) (*sourceValueFlow, error) {
+	files := make([]*ast.File, 0, len(paths))
+	fileSet := token.NewFileSet()
+	for _, path := range paths {
+		file, err := parser.ParseFile(fileSet, path, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	flow := &sourceValueFlow{
+		prefix:       filepath.ToSlash(directory),
+		packageNames: map[string]struct{}{},
+		topLevel:     map[*ast.Object]string{},
+		functions:    map[string][]*sourceFunction{},
+		direct:       map[string]map[string]struct{}{},
+		edges:        map[string]map[string]struct{}{},
+		sinks:        map[string]string{},
+	}
+	flow.fieldCode = flow.prefix + ":field:Code"
+	for _, file := range files {
+		for name, object := range file.Scope.Objects {
+			flow.packageNames[name] = struct{}{}
+			flow.topLevel[object] = flow.packageNode(name)
+		}
+	}
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			if function, ok := declaration.(*ast.FuncDecl); ok {
+				flow.registerFunction(flow.packageNode(function.Name.Name), function.Type, function.Body)
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch value := node.(type) {
+			case *ast.AssignStmt:
+				flow.registerAssignedFunctionLiterals(value.Lhs, value.Rhs)
+			case *ast.ValueSpec:
+				names := make([]ast.Expr, len(value.Names))
+				for index := range value.Names {
+					names[index] = value.Names[index]
+				}
+				flow.registerAssignedFunctionLiterals(names, value.Values)
+			}
+			return true
+		})
+	}
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if ok {
+				flow.analyzeGeneralDeclaration(general)
+			}
+		}
+	}
+	functions := make([]*sourceFunction, 0, len(flow.functions))
+	for _, candidates := range flow.functions {
+		functions = append(functions, candidates...)
+	}
+	for _, function := range functions {
+		flow.analyzeFunction(function)
+	}
+	return flow, nil
+}
+
+func (flow *sourceValueFlow) packageNode(name string) string {
+	return flow.prefix + ":package:" + name
+}
+
+func (flow *sourceValueFlow) identifierNode(identifier *ast.Ident) string {
+	if identifier == nil || identifier.Name == "_" {
 		return ""
 	}
+	if node, found := flow.topLevel[identifier.Obj]; found {
+		return node
+	}
+	if identifier.Obj != nil {
+		return fmt.Sprintf("%s:object:%p", flow.prefix, identifier.Obj)
+	}
+	if _, found := flow.packageNames[identifier.Name]; found {
+		return flow.packageNode(identifier.Name)
+	}
+	return flow.prefix + ":external:" + identifier.Name
 }
 
-func coverageCodeArgumentIndexes(name string) []int {
-	switch name {
-	case "coverageError", "targetError", "ideCoverageError", "agentCoverageError", "runtimeTargetError", "addError":
-		return []int{0}
-	case "unavailableTarget", "appendProjectProvenanceError", "appendAgentTargetIssue":
-		return []int{1}
-	case "addIssue":
-		return []int{0, 3}
-	case "surfaceTargetError":
-		return []int{2}
-	case "appendPackageIssue":
-		return []int{3}
+func (flow *sourceValueFlow) registerAssignedFunctionLiterals(left, right []ast.Expr) {
+	for index, expression := range right {
+		literal, ok := expression.(*ast.FuncLit)
+		if !ok || index >= len(left) {
+			continue
+		}
+		identifier, ok := left[index].(*ast.Ident)
+		if !ok {
+			continue
+		}
+		flow.registerFunction(flow.identifierNode(identifier), literal.Type, literal.Body)
+	}
+}
+
+func (flow *sourceValueFlow) registerFunction(node string, typeValue *ast.FuncType, body *ast.BlockStmt) {
+	if node == "" || body == nil {
+		return
+	}
+	function := &sourceFunction{body: body}
+	function.parameters = flow.fieldNodes(typeValue.Params)
+	function.results, function.namedResults = flow.resultNodes(node, typeValue.Results)
+	flow.functions[node] = append(flow.functions[node], function)
+}
+
+func (flow *sourceValueFlow) fieldNodes(fields *ast.FieldList) []string {
+	if fields == nil {
+		return nil
+	}
+	var nodes []string
+	for _, field := range fields.List {
+		for _, name := range field.Names {
+			nodes = append(nodes, flow.identifierNode(name))
+		}
+		if len(field.Names) == 0 {
+			nodes = append(nodes, "")
+		}
+	}
+	return nodes
+}
+
+func (flow *sourceValueFlow) resultNodes(functionNode string, fields *ast.FieldList) ([]string, []string) {
+	if fields == nil {
+		return nil, nil
+	}
+	var results, named []string
+	for _, field := range fields.List {
+		count := len(field.Names)
+		if count == 0 {
+			count = 1
+		}
+		for index := 0; index < count; index++ {
+			results = append(results, fmt.Sprintf("%s:return:%d", functionNode, len(results)))
+			if len(field.Names) != 0 {
+				named = append(named, flow.identifierNode(field.Names[index]))
+			} else {
+				named = append(named, "")
+			}
+		}
+	}
+	return results, named
+}
+
+func (flow *sourceValueFlow) analyzeGeneralDeclaration(declaration *ast.GenDecl) {
+	var previous []ast.Expr
+	for _, specification := range declaration.Specs {
+		value, ok := specification.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		expressions := value.Values
+		if len(expressions) == 0 {
+			expressions = previous
+		} else {
+			previous = expressions
+		}
+		for index, name := range value.Names {
+			if len(expressions) == 0 {
+				continue
+			}
+			expression := expressions[min(index, len(expressions)-1)]
+			flow.linkExpression(flow.identifierNode(name), expression)
+		}
+	}
+}
+
+func (flow *sourceValueFlow) analyzeFunction(function *sourceFunction) {
+	ast.Inspect(function.body, func(node ast.Node) bool {
+		if literal, ok := node.(*ast.FuncLit); ok && literal.Body != function.body {
+			return false
+		}
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			flow.analyzeAssignment(value)
+		case *ast.DeclStmt:
+			if declaration, ok := value.Decl.(*ast.GenDecl); ok {
+				flow.analyzeGeneralDeclaration(declaration)
+			}
+		case *ast.RangeStmt:
+			flow.linkRangeVariable(value.Key, value.X)
+			flow.linkRangeVariable(value.Value, value.X)
+		case *ast.ReturnStmt:
+			flow.analyzeReturn(function, value)
+		case *ast.CallExpr:
+			flow.connectCall(value)
+		case *ast.CompositeLit:
+			flow.analyzeCodeComposite(value)
+		}
+		return true
+	})
+}
+
+func (flow *sourceValueFlow) analyzeAssignment(assignment *ast.AssignStmt) {
+	if len(assignment.Rhs) == 1 && len(assignment.Lhs) > 1 {
+		if call, ok := assignment.Rhs[0].(*ast.CallExpr); ok {
+			if functions := flow.calledFunctions(call); len(functions) != 0 {
+				for index, left := range assignment.Lhs {
+					for _, function := range functions {
+						if index < len(function.results) {
+							flow.linkLeft(left, nil, function.results[index])
+						}
+					}
+				}
+				return
+			}
+		}
+	}
+	for index, left := range assignment.Lhs {
+		if len(assignment.Rhs) == 0 {
+			continue
+		}
+		right := assignment.Rhs[min(index, len(assignment.Rhs)-1)]
+		flow.linkLeft(left, right, "")
+	}
+}
+
+func (flow *sourceValueFlow) linkLeft(left ast.Expr, right ast.Expr, sourceNode string) {
+	switch value := left.(type) {
+	case *ast.Ident:
+		destination := flow.identifierNode(value)
+		if sourceNode != "" {
+			flow.addEdge(destination, sourceNode)
+		} else {
+			flow.linkExpression(destination, right)
+		}
+	case *ast.IndexExpr:
+		if destination := flow.baseIdentifierNode(value.X); destination != "" {
+			flow.linkExpression(destination, value.Index)
+			if sourceNode != "" {
+				flow.addEdge(destination, sourceNode)
+			} else {
+				flow.linkExpression(destination, right)
+			}
+		}
+	case *ast.SelectorExpr:
+		if value.Sel.Name == "Code" {
+			if sourceNode != "" {
+				flow.addEdge(flow.fieldCode, sourceNode)
+			} else {
+				flow.linkExpression(flow.fieldCode, right)
+			}
+			flow.addSink(right, "assigned Code field")
+		}
+	}
+}
+
+func (flow *sourceValueFlow) baseIdentifierNode(expression ast.Expr) string {
+	switch value := expression.(type) {
+	case *ast.Ident:
+		return flow.identifierNode(value)
+	case *ast.IndexExpr:
+		return flow.baseIdentifierNode(value.X)
+	case *ast.SelectorExpr:
+		return flow.baseIdentifierNode(value.X)
+	}
+	return ""
+}
+
+func (flow *sourceValueFlow) linkRangeVariable(expression ast.Expr, ranged ast.Expr) {
+	identifier, ok := expression.(*ast.Ident)
+	if ok {
+		flow.linkExpression(flow.identifierNode(identifier), ranged)
+	}
+}
+
+func (flow *sourceValueFlow) analyzeReturn(function *sourceFunction, statement *ast.ReturnStmt) {
+	if len(statement.Results) == 0 {
+		for index, named := range function.namedResults {
+			if named != "" {
+				flow.addEdge(function.results[index], named)
+			}
+		}
+		return
+	}
+	if len(statement.Results) == 1 && len(function.results) > 1 {
+		if call, ok := statement.Results[0].(*ast.CallExpr); ok {
+			if calledFunctions := flow.calledFunctions(call); len(calledFunctions) != 0 {
+				for index := range function.results {
+					for _, called := range calledFunctions {
+						if index < len(called.results) {
+							flow.addEdge(function.results[index], called.results[index])
+						}
+					}
+				}
+				return
+			}
+		}
+	}
+	for index, result := range statement.Results {
+		if index < len(function.results) {
+			flow.linkExpression(function.results[index], result)
+		}
+	}
+}
+
+func (flow *sourceValueFlow) connectCall(call *ast.CallExpr) {
+	for _, function := range flow.calledFunctions(call) {
+		for index, argument := range call.Args {
+			if index < len(function.parameters) && function.parameters[index] != "" {
+				flow.linkExpression(function.parameters[index], argument)
+			}
+		}
+	}
+}
+
+func (flow *sourceValueFlow) calledFunctions(call *ast.CallExpr) []*sourceFunction {
+	switch value := call.Fun.(type) {
+	case *ast.Ident:
+		return flow.functions[flow.identifierNode(value)]
+	case *ast.SelectorExpr:
+		return flow.functions[flow.packageNode(value.Sel.Name)]
 	}
 	return nil
+}
+
+func (flow *sourceValueFlow) analyzeCodeComposite(composite *ast.CompositeLit) {
+	typeName := ""
+	switch value := composite.Type.(type) {
+	case *ast.Ident:
+		typeName = value.Name
+	case *ast.SelectorExpr:
+		typeName = value.Sel.Name
+	}
+	for _, element := range composite.Elts {
+		keyed, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := keyed.Key.(*ast.Ident)
+		if !ok || key.Name != "Code" {
+			continue
+		}
+		flow.linkExpression(flow.fieldCode, keyed.Value)
+		if typeName == "CoverageError" || typeName == "EvidenceError" {
+			flow.addSink(keyed.Value, typeName)
+		}
+	}
+}
+
+func (flow *sourceValueFlow) addSink(expression ast.Expr, label string) {
+	flow.nextSink++
+	node := fmt.Sprintf("%s:sink:%d", flow.prefix, flow.nextSink)
+	flow.sinks[node] = label
+	flow.linkExpression(node, expression)
+}
+
+func (flow *sourceValueFlow) linkExpression(destination string, expression ast.Expr) {
+	if destination == "" || expression == nil {
+		return
+	}
+	switch value := expression.(type) {
+	case *ast.BasicLit:
+		if value.Kind == token.STRING {
+			if decoded, err := strconv.Unquote(value.Value); err == nil {
+				flow.addDirect(destination, decoded)
+			}
+		}
+	case *ast.Ident:
+		flow.addEdge(destination, flow.identifierNode(value))
+	case *ast.ParenExpr:
+		flow.linkExpression(destination, value.X)
+	case *ast.UnaryExpr:
+		flow.linkExpression(destination, value.X)
+	case *ast.BinaryExpr:
+		flow.linkExpression(destination, value.X)
+		flow.linkExpression(destination, value.Y)
+	case *ast.CallExpr:
+		if identifier, ok := value.Fun.(*ast.Ident); ok && identifier.Name == "append" {
+			for _, argument := range value.Args {
+				flow.linkExpression(destination, argument)
+			}
+			return
+		}
+		if functions := flow.calledFunctions(value); len(functions) != 0 {
+			for _, function := range functions {
+				if len(function.results) != 0 {
+					flow.addEdge(destination, function.results[0])
+				}
+			}
+			return
+		}
+		for _, argument := range value.Args {
+			flow.linkExpression(destination, argument)
+		}
+	case *ast.IndexExpr:
+		flow.linkExpression(destination, value.X)
+		flow.linkExpression(destination, value.Index)
+	case *ast.SelectorExpr:
+		if value.Sel.Name == "Code" {
+			flow.addEdge(destination, flow.fieldCode)
+		} else {
+			flow.linkExpression(destination, value.X)
+		}
+	case *ast.CompositeLit:
+		for _, element := range value.Elts {
+			if keyed, ok := element.(*ast.KeyValueExpr); ok {
+				flow.linkExpression(destination, keyed.Value)
+			} else {
+				flow.linkExpression(destination, element)
+			}
+		}
+	case *ast.KeyValueExpr:
+		flow.linkExpression(destination, value.Value)
+	case *ast.TypeAssertExpr:
+		flow.linkExpression(destination, value.X)
+	}
+}
+
+func (flow *sourceValueFlow) addDirect(node, value string) {
+	if flow.direct[node] == nil {
+		flow.direct[node] = map[string]struct{}{}
+	}
+	flow.direct[node][value] = struct{}{}
+}
+
+func (flow *sourceValueFlow) addEdge(destination, source string) {
+	if destination == "" || source == "" || destination == source {
+		return
+	}
+	if flow.edges[destination] == nil {
+		flow.edges[destination] = map[string]struct{}{}
+	}
+	flow.edges[destination][source] = struct{}{}
+}
+
+func (flow *sourceValueFlow) resolveSinks() (map[string]struct{}, []string) {
+	values := map[string]map[string]struct{}{}
+	for node, direct := range flow.direct {
+		values[node] = map[string]struct{}{}
+		for value := range direct {
+			values[node][value] = struct{}{}
+		}
+	}
+	changed := true
+	for changed {
+		changed = false
+		for destination, sources := range flow.edges {
+			if values[destination] == nil {
+				values[destination] = map[string]struct{}{}
+			}
+			for source := range sources {
+				for value := range values[source] {
+					if _, found := values[destination][value]; !found {
+						values[destination][value] = struct{}{}
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	codes := map[string]struct{}{}
+	var unresolved []string
+	for node, label := range flow.sinks {
+		found := false
+		for value := range values[node] {
+			if productionErrorCodePattern.MatchString(value) {
+				codes[value] = struct{}{}
+				found = true
+			}
+		}
+		if !found {
+			unresolved = append(unresolved, flow.prefix+":"+label)
+		}
+	}
+	return codes, unresolved
 }
 
 func TestRedactRemovesNamesVersionsAndRetokenizesIDs(t *testing.T) {

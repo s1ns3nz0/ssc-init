@@ -144,6 +144,14 @@ func TestBuildAcceptsLiveProducerContracts(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesCanonicalPackageIDsDottedNamesVersionsAndRuleIDs(t *testing.T) {
+	asset := model.Asset{ID: "pkg:npm/socket.io@1.2.3", Type: model.AssetPackage, Name: "socket.io", Version: "1.2.3"}
+	fact := model.AnalyzerFact{ID: "analyzer:sha256:" + strings.Repeat("a", 64), AssetID: asset.ID, RuleID: "ssc-init/api/dynamic-execution", Category: model.AnalyzerDynamicExecution, Confidence: model.ConfidenceHigh, Occurrences: 1}
+	if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}, AnalyzerFacts: []model.AnalyzerFact{fact}}, model.Delta{}, nil, validRun()); err != nil {
+		t.Fatalf("Build rejected canonical package identity: %v", err)
+	}
+}
+
 func TestBuildAcceptsEveryLiveCoverageErrorCode(t *testing.T) {
 	for _, code := range []string{"target_not_reported", "unsupported_target", "invalid_local_target", "invalid_server", "unknown_server_field", "rejected_metadata", "rejected_identity", "config_invalid", "config_unavailable", "config_oversized", "entry_limit", "root_limit", "manifest_invalid", "manifest_oversized", "legacy_manifest_partial", "legacy_transport_unknown"} {
 		t.Run(code, func(t *testing.T) {
@@ -152,6 +160,21 @@ func TestBuildAcceptsEveryLiveCoverageErrorCode(t *testing.T) {
 				t.Fatalf("Build rejected producer error %q: %v", code, err)
 			}
 		})
+	}
+}
+
+func TestBuildAcceptsMaterializedRemoteUnsupportedCoverageError(t *testing.T) {
+	scan := model.ScanResult{Status: model.ScanPartial, Coverage: []model.CollectorResult{{
+		Collector: "projects",
+		Status:    model.CoveragePartial,
+		Targets: []model.TargetCoverage{{
+			TargetID: "projects.discovery.vscode",
+			Status:   model.TargetPartial,
+			Errors:   []model.CoverageError{{Code: "remote_unsupported", Message: "remote project metadata is unsupported"}},
+		}},
+	}}}
+	if _, err := Build(scan, model.Inventory{}, model.Delta{}, nil, validRun()); err != nil {
+		t.Fatalf("Build rejected materialized remote_unsupported producer error: %v", err)
 	}
 }
 

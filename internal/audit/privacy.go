@@ -17,14 +17,16 @@ import (
 )
 
 var (
-	exportTokenPattern = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
-	unsafePathPattern  = regexp.MustCompile(`(?:^|[^A-Za-z0-9._~-])/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
-	uriPattern         = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*:/{1,2}`)
-	hostnamePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:\.(?:local|test|internal))(?::[0-9]{1,5})?(?:$|[^a-z0-9-])`)
-	ipEndpointPattern  = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
-	envValuePattern    = regexp.MustCompile(`(?i)(?:\benv\[[a-z][a-z0-9_]*\]|\b[a-z][a-z0-9_]*(?:token|secret|password|credential|api_key|env|value)[a-z0-9_]*)\s*=`)
-	argumentPattern    = regexp.MustCompile(`(?:^|[^a-z0-9_])--[a-z][a-z0-9_-]*`)
-	privateIDPattern   = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
+	exportTokenPattern   = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
+	canonicalPURLPattern = regexp.MustCompile(`\Apkg:[a-z0-9.+-]+/[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*(?:@[A-Za-z0-9%._~+-]+)?(?:\?[A-Za-z0-9%._~=&+-]+)?(?:#[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*)?\z`)
+	ruleIDPattern        = regexp.MustCompile(`\A[A-Za-z0-9._~:+-]+(?:/[A-Za-z0-9._~:+-]+)+\z`)
+	unsafePathPattern    = regexp.MustCompile(`/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
+	uriPattern           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s]`)
+	hostnamePattern      = regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:(?:[a-z0-9-]+\.)*(?:local|test|internal)(?::[0-9]{1,5})?|(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):[0-9]{1,5})(?:$|[^a-z0-9.-])`)
+	ipEndpointPattern    = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
+	envValuePattern      = regexp.MustCompile(`(?i)(?:\benv\[[a-z][a-z0-9_]*\]|\b[a-z_][a-z0-9_]*)\s*=`)
+	argumentPattern      = regexp.MustCompile(`(?i)(?:^|[\s(\[{,;])-{1,2}[a-z0-9][a-z0-9_-]*`)
+	privateIDPattern     = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
 )
 
 // Validate checks the closed audit envelope, persisted model vocabularies,
@@ -323,7 +325,7 @@ func validEvidence(profile Profile, evidence model.ContentEvidence, assetIDs, ob
 }
 
 func validFinding(profile Profile, finding model.Finding, assetIDs, evidenceIDs map[string]struct{}) bool {
-	if !validReference(profile, finding.ID) || !validReference(profile, finding.AssetID) || !contains(assetIDs, finding.AssetID) || !validAssetType(finding.AssetType) || finding.DetectedAt.IsZero() || !utcOrZero(finding.DetectedAt) || finding.Level < 1 || finding.Level > 5 || !validVerdict(finding.Verdict) || !validSeverity(finding.Severity) || !validConfidence(finding.Confidence) || !validAction(finding.Action) || !sortedSafeStrings(finding.RuleIDs) || !sortedSafeStrings(finding.IntelligenceIDs) || !sortedSafeStrings(finding.CampaignIDs) || !sortedSafeStrings(finding.AttackTechniques) {
+	if !validReference(profile, finding.ID) || !validReference(profile, finding.AssetID) || !contains(assetIDs, finding.AssetID) || !validAssetType(finding.AssetType) || finding.DetectedAt.IsZero() || !utcOrZero(finding.DetectedAt) || finding.Level < 1 || finding.Level > 5 || !validVerdict(finding.Verdict) || !validSeverity(finding.Severity) || !validConfidence(finding.Confidence) || !validAction(finding.Action) || !sortedSafeRuleIDs(finding.RuleIDs) || !sortedSafeStrings(finding.IntelligenceIDs) || !sortedSafeStrings(finding.CampaignIDs) || !sortedSafeStrings(finding.AttackTechniques) {
 		return false
 	}
 	if profile == ProfileRedacted {
@@ -352,7 +354,7 @@ func validFinding(profile Profile, finding model.Finding, assetIDs, evidenceIDs 
 }
 
 func validAnalyzerFact(profile Profile, fact model.AnalyzerFact, assetIDs, evidenceIDs map[string]struct{}) bool {
-	return validReference(profile, fact.ID) && validReference(profile, fact.AssetID) && contains(assetIDs, fact.AssetID) && (fact.EvidenceID == "" || validReference(profile, fact.EvidenceID) && contains(evidenceIDs, fact.EvidenceID)) && safeText(fact.RuleID) && validAnalyzerCategory(fact.Category) && validConfidence(fact.Confidence) && fact.Occurrences > 0 && fact.Occurrences <= 10_000
+	return validReference(profile, fact.ID) && validReference(profile, fact.AssetID) && contains(assetIDs, fact.AssetID) && (fact.EvidenceID == "" || validReference(profile, fact.EvidenceID) && contains(evidenceIDs, fact.EvidenceID)) && safeRuleID(fact.RuleID) && validAnalyzerCategory(fact.Category) && validConfidence(fact.Confidence) && fact.Occurrences > 0 && fact.Occurrences <= 10_000
 }
 
 func validTarget(profile Profile, target model.TargetCoverage) bool {
@@ -583,13 +585,25 @@ func validReference(profile Profile, value string) bool {
 	return safeIdentifier(value)
 }
 func safeIdentifier(value string) bool {
-	return value != "" && len(value) <= 256 && safeString(value) && !strings.ContainsAny(value, " /\\")
+	if value == "" || len(value) > 256 || !utf8.ValidString(value) || privacyboundary.ContainsSensitiveValue(value) || strings.Contains(value, `\`) || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	if strings.HasPrefix(value, "pkg:") {
+		return canonicalPURLPattern.MatchString(value)
+	}
+	return safeStructuredString(value) && !strings.ContainsAny(value, " /\\")
+}
+func safeRuleID(value string) bool {
+	return value != "" && len(value) <= 256 && safeStructuredString(value) && (safeIdentifier(value) || ruleIDPattern.MatchString(value))
 }
 func safeText(value string) bool         { return value != "" && len(value) <= 256 && safeString(value) }
 func safeOptionalText(value string) bool { return value == "" || safeText(value) }
 func safeString(value string) bool       { return utf8.ValidString(value) && !unsafeAuditString(value) }
+func safeStructuredString(value string) bool {
+	return utf8.ValidString(value) && !privacyboundary.ContainsSensitiveValue(value) && !strings.Contains(value, `\`) && !hostnamePattern.MatchString(value) && !ipEndpointPattern.MatchString(value) && !envValuePattern.MatchString(value) && !privateIDPattern.MatchString(value) && !argumentPattern.MatchString(value) && !strings.ContainsRune(value, '\x00')
+}
 func unsafeAuditString(value string) bool {
-	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || uriPattern.MatchString(value) || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || ipEndpointPattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || argumentPattern.MatchString(value) || strings.ContainsRune(value, '\x00')
+	return !safeStructuredString(value) || uriPattern.MatchString(value) || unsafePathPattern.MatchString(value)
 }
 func addUnique(values map[string]struct{}, value string) bool {
 	if _, found := values[value]; found {
@@ -612,6 +626,16 @@ func sortedSafeStrings(values []string) bool {
 	return sort.StringsAreSorted(values) && !hasDuplicateStrings(values) && func() bool {
 		for _, value := range values {
 			if !safeText(value) {
+				return false
+			}
+		}
+		return true
+	}()
+}
+func sortedSafeRuleIDs(values []string) bool {
+	return sort.StringsAreSorted(values) && !hasDuplicateStrings(values) && func() bool {
+		for _, value := range values {
+			if !safeRuleID(value) {
 				return false
 			}
 		}
@@ -770,7 +794,7 @@ func sha256Integrity(value string) bool {
 // contracts. The producer-source parity test prevents an emitted code from
 // becoming silently unavailable in the audit receipt.
 var auditCoverageErrorCodes = map[string]struct{}{
-	"byte_limit": {}, "collector_error": {}, "collector_failed": {}, "collector_panic": {}, "collector_timeout": {}, "config_invalid": {}, "config_limit": {}, "config_malformed": {}, "config_oversized": {}, "config_size_limit": {}, "config_unavailable": {}, "coverage_contract_violation": {}, "depth_limit": {}, "docker_unavailable": {}, "entry_limit": {}, "evidence_unavailable": {}, "executable_evidence_invalid": {}, "executable_replaced": {}, "executable_unavailable": {}, "file_limit": {}, "filesystem_unavailable": {}, "identity_changed": {}, "identity_rejected": {}, "inspector_unavailable": {}, "invalid_local_target": {}, "invalid_server": {}, "launch_malformed": {}, "launch_unavailable": {}, "legacy_manifest_partial": {}, "legacy_transport_unknown": {}, "manifest_changed": {}, "manifest_invalid": {}, "manifest_limit": {}, "manifest_oversized": {}, "manifest_size_limit": {}, "manifest_unavailable": {}, "metadata-conflict": {}, "metadata_malformed": {}, "metadata_oversize": {}, "metadata_unavailable": {}, "observation-conflict": {}, "orphan-observation": {}, "outside_home": {}, "output_malformed": {}, "output_truncated": {}, "path_invalid": {}, "path_unavailable": {}, "probe_failed": {}, "probe_output_invalid": {}, "probe_output_truncated": {}, "provenance_identity_changed": {}, "provenance_identity_rejected": {}, "provenance_malformed": {}, "provenance_unavailable": {}, "read_failed": {}, "read_unavailable": {}, "rejected_identity": {}, "rejected_metadata": {}, "root_limit": {}, "root_unavailable": {}, "rooted_access_unavailable": {}, "runner_unavailable": {}, "signature_unavailable": {}, "special_file_rejected": {}, "stale": {}, "symlink_rejected": {}, "target_not_reported": {}, "target_rejected": {}, "time_limit": {}, "unknown_server_field": {}, "unsupported": {}, "unsupported_target": {},
+	"byte_limit": {}, "collector_error": {}, "collector_failed": {}, "collector_panic": {}, "collector_timeout": {}, "config_invalid": {}, "config_limit": {}, "config_malformed": {}, "config_oversized": {}, "config_size_limit": {}, "config_unavailable": {}, "coverage_contract_violation": {}, "depth_limit": {}, "docker_unavailable": {}, "entry_limit": {}, "evidence_unavailable": {}, "executable_evidence_invalid": {}, "executable_replaced": {}, "executable_unavailable": {}, "file_limit": {}, "filesystem_unavailable": {}, "identity_changed": {}, "identity_rejected": {}, "inspector_unavailable": {}, "invalid_local_target": {}, "invalid_server": {}, "launch_malformed": {}, "launch_unavailable": {}, "legacy_manifest_partial": {}, "legacy_transport_unknown": {}, "manifest_changed": {}, "manifest_invalid": {}, "manifest_limit": {}, "manifest_oversized": {}, "manifest_size_limit": {}, "manifest_unavailable": {}, "metadata-conflict": {}, "metadata_malformed": {}, "metadata_oversize": {}, "metadata_unavailable": {}, "observation-conflict": {}, "orphan-observation": {}, "outside_home": {}, "output_malformed": {}, "output_truncated": {}, "path_invalid": {}, "path_unavailable": {}, "probe_failed": {}, "probe_output_invalid": {}, "probe_output_truncated": {}, "provenance_identity_changed": {}, "provenance_identity_rejected": {}, "provenance_malformed": {}, "provenance_unavailable": {}, "read_failed": {}, "read_unavailable": {}, "rejected_identity": {}, "rejected_metadata": {}, "remote_unsupported": {}, "root_limit": {}, "root_unavailable": {}, "rooted_access_unavailable": {}, "runner_unavailable": {}, "signature_unavailable": {}, "special_file_rejected": {}, "stale": {}, "symlink_rejected": {}, "target_not_reported": {}, "target_rejected": {}, "time_limit": {}, "unknown_server_field": {}, "unsupported": {}, "unsupported_target": {},
 }
 
 func validAuditErrorCode(value string) bool {
