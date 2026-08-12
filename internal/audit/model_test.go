@@ -152,6 +152,48 @@ func TestBuildPreservesCanonicalPackageIDsDottedNamesVersionsAndRuleIDs(t *testi
 	}
 }
 
+func TestBuildAcceptsSlashBearingLivePackageNames(t *testing.T) {
+	assets := []model.Asset{
+		{ID: "pkg:npm/%40scope/tool@2.0.0", Type: model.AssetPackage, Name: "@scope/tool", Version: "2.0.0", Source: "npm"},
+		{ID: "pkg:go/example.com/demo@v1.2.3", Type: model.AssetPackage, Name: "example.com/demo", Version: "v1.2.3", Provenance: &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "go", Source: "lockfile"}},
+		{ID: "pkg:docker/org/image@latest", Type: model.AssetPackage, Name: "org/image", Version: "latest", Source: "docker", Provenance: &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "docker", Source: "local-daemon"}},
+		{ID: "pkg:docker/ghcr.io/org/image@latest", Type: model.AssetPackage, Name: "ghcr.io/org/image", Version: "latest", Source: "docker", Provenance: &model.Provenance{Status: model.ProvenanceUnknown, Ecosystem: "docker", Source: "local-daemon"}},
+	}
+	for _, asset := range assets {
+		t.Run(asset.Name, func(t *testing.T) {
+			if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, validRun()); err != nil {
+				t.Fatalf("Build rejected live package name %q: %v", asset.Name, err)
+			}
+		})
+	}
+}
+
+func TestBuildAcceptsClosedProjectConfigAssetNames(t *testing.T) {
+	for index, name := range []string{".codex/config.toml", ".cursor/mcp.json", ".mcp.json", ".vscode/mcp.json"} {
+		asset := model.Asset{ID: "project-config:sha256:" + strings.Repeat(string(rune('a'+index)), 64), Type: model.AssetProject, Name: name, Source: "project-config"}
+		if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, validRun()); err != nil {
+			t.Fatalf("Build rejected closed project config name %q: %v", name, err)
+		}
+	}
+}
+
+func TestBuildRejectsMalformedSlashBearingAssetNames(t *testing.T) {
+	assets := []model.Asset{
+		{ID: "pkg:npm/%40scope/%40tool@2.0.0", Type: model.AssetPackage, Name: "@scope/@tool", Version: "2.0.0"},
+		{ID: "pkg:go/example.com/%40demo@v1.2.3", Type: model.AssetPackage, Name: "example.com/@demo", Version: "v1.2.3"},
+		{ID: "pkg:docker/note/home/alice/private@latest", Type: model.AssetPackage, Name: "note/home/alice/private", Version: "latest"},
+		{ID: "tool:one", Type: model.AssetTool, Name: "org/image"},
+		{ID: "project:one", Type: model.AssetProject, Name: ".codex/config.toml"},
+	}
+	for _, asset := range assets {
+		t.Run(asset.Name+"/"+string(asset.Type), func(t *testing.T) {
+			if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, validRun()); err == nil {
+				t.Fatalf("Build accepted malformed slash-bearing %s name %q", asset.Type, asset.Name)
+			}
+		})
+	}
+}
+
 func TestBuildAcceptsEveryLiveCoverageErrorCode(t *testing.T) {
 	for _, code := range []string{"target_not_reported", "unsupported_target", "invalid_local_target", "invalid_server", "unknown_server_field", "rejected_metadata", "rejected_identity", "config_invalid", "config_unavailable", "config_oversized", "entry_limit", "root_limit", "manifest_invalid", "manifest_oversized", "legacy_manifest_partial", "legacy_transport_unknown"} {
 		t.Run(code, func(t *testing.T) {

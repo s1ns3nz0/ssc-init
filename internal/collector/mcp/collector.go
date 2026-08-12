@@ -184,7 +184,7 @@ func collectReadEvidence(result *model.CollectorResult, home, locationRef string
 	}
 	for _, issue := range parsed.Issues {
 		target.Status = model.TargetPartial
-		target.Errors = append(target.Errors, serverIssue(issue.Code, locationRef))
+		target.Errors = append(target.Errors, serverIssue(issue, locationRef))
 	}
 	for _, server := range parsed.Servers {
 		asset, observation, evidenceErr := buildServerEvidence(home, locationRef, declaration, server)
@@ -1005,10 +1005,9 @@ func rejectedEvidenceError(err error) model.CoverageError {
 	return coverageError(code, message, "")
 }
 
-func serverIssue(code, locationRef string) model.CoverageError {
-	message := "MCP server entry is invalid"
-	if code == "unknown_server_field" {
-		message = "MCP server contains an unknown field"
+func serverIssue(issue ParseIssue, locationRef string) model.CoverageError {
+	if issue.Code == "unknown_server_field" {
+		return coverageError("unknown_server_field", "MCP server contains an unknown field", locationRef)
 	}
-	return coverageError(code, message, locationRef)
+	return coverageError("invalid_server", "MCP server entry is invalid", locationRef)
 }

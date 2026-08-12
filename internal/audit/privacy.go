@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,16 +18,19 @@ import (
 )
 
 var (
-	exportTokenPattern   = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
-	canonicalPURLPattern = regexp.MustCompile(`\Apkg:[a-z0-9.+-]+/[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*(?:@[A-Za-z0-9%._~+-]+)?(?:\?[A-Za-z0-9%._~=&+-]+)?(?:#[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*)?\z`)
-	ruleIDPattern        = regexp.MustCompile(`\A[A-Za-z0-9._~:+-]+(?:/[A-Za-z0-9._~:+-]+)+\z`)
-	unsafePathPattern    = regexp.MustCompile(`/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
-	uriPattern           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s]`)
-	hostnamePattern      = regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:(?:[a-z0-9-]+\.)*(?:local|test|internal)(?::[0-9]{1,5})?|(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):[0-9]{1,5})(?:$|[^a-z0-9.-])`)
-	ipEndpointPattern    = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
-	envValuePattern      = regexp.MustCompile(`(?i)(?:\benv\[[a-z][a-z0-9_]*\]|\b[a-z_][a-z0-9_]*)\s*=`)
-	argumentPattern      = regexp.MustCompile(`(?i)(?:^|[\s(\[{,;])-{1,2}[a-z0-9][a-z0-9_-]*`)
-	privateIDPattern     = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
+	exportTokenPattern    = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
+	canonicalPURLPattern  = regexp.MustCompile(`\Apkg:[a-z0-9.+-]+/[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*(?:@[A-Za-z0-9%._~+-]+)?(?:\?[A-Za-z0-9%._~=&+-]+)?(?:#[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*)?\z`)
+	ruleIDPattern         = regexp.MustCompile(`\A[A-Za-z0-9._~:+-]+(?:/[A-Za-z0-9._~:+-]+)+\z`)
+	unsafePathPattern     = regexp.MustCompile(`/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
+	uriPattern            = regexp.MustCompile(`(?i)(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s]`)
+	hostnamePattern       = regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:(?:[a-z0-9-]+\.)*(?:local|test|internal)(?::[0-9]{1,5})?|(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):[0-9]{1,5})(?:$|[^a-z0-9.-])`)
+	ipEndpointPattern     = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
+	envValuePattern       = regexp.MustCompile(`(?i)(?:\benv\[[a-z][a-z0-9_]*\]|\b[a-z_][a-z0-9_]*)\s*=`)
+	argumentPattern       = regexp.MustCompile(`(?i)(?:^|[\s(\[{,;])-{1,2}[a-z0-9][a-z0-9_-]*`)
+	privateIDPattern      = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
+	packageSegmentPattern = regexp.MustCompile(`\A[A-Za-z0-9][A-Za-z0-9._~+-]*\z`)
+	dockerSegmentPattern  = regexp.MustCompile(`\A[a-z0-9]+(?:[._-][a-z0-9]+)*\z`)
+	domainLabelPattern    = regexp.MustCompile(`\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\z`)
 )
 
 // Validate checks the closed audit envelope, persisted model vocabularies,
@@ -310,7 +314,129 @@ func validAsset(profile Profile, asset model.Asset) bool {
 	if profile == ProfileRedacted {
 		return redactedAsset(asset) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
 	}
-	return safeText(asset.Name) && (asset.Version == "" || safeText(asset.Version)) && (asset.SHA256 == "" || sha256Hex(asset.SHA256)) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+	return validAssetName(asset) && (asset.Version == "" || safeText(asset.Version)) && (asset.SHA256 == "" || sha256Hex(asset.SHA256)) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+}
+
+func validAssetName(asset model.Asset) bool {
+	if !strings.ContainsRune(asset.Name, '/') {
+		return safeText(asset.Name)
+	}
+	switch asset.Type {
+	case model.AssetPackage:
+		return validPackageAssetName(asset.ID, asset.Name)
+	case model.AssetProject:
+		return validProjectConfigAssetName(asset.ID, asset.Name)
+	default:
+		return false
+	}
+}
+
+func validPackageAssetName(id, name string) bool {
+	if name == "" || len(name) > 256 || !safeStructuredString(name) || uriPattern.MatchString(name) {
+		return false
+	}
+	ecosystem, purlName, ok := packagePURLName(id)
+	if !ok || purlName != name {
+		return false
+	}
+	parts := strings.Split(name, "/")
+	if !validPackageSegments(parts) {
+		return false
+	}
+	switch ecosystem {
+	case "npm":
+		return len(parts) == 2 && strings.HasPrefix(parts[0], "@") && packageSegmentPattern.MatchString(strings.TrimPrefix(parts[0], "@"))
+	case "go":
+		return len(parts) >= 2 && validDottedPackageRoot(parts[0])
+	case "docker":
+		if !allDockerSegments(parts) {
+			return false
+		}
+		return len(parts) == 2 || len(parts) >= 3 && validDottedPackageRoot(parts[0])
+	default:
+		return false
+	}
+}
+
+func packagePURLName(id string) (string, string, bool) {
+	if !canonicalPURLPattern.MatchString(id) {
+		return "", "", false
+	}
+	coordinate := strings.TrimPrefix(id, "pkg:")
+	slash := strings.IndexByte(coordinate, '/')
+	if slash <= 0 {
+		return "", "", false
+	}
+	ecosystem, encoded := coordinate[:slash], coordinate[slash+1:]
+	if boundary := strings.IndexAny(encoded, "?#"); boundary >= 0 {
+		encoded = encoded[:boundary]
+	}
+	if version := strings.LastIndexByte(encoded, '@'); version >= 0 {
+		encoded = encoded[:version]
+	}
+	encodedParts := strings.Split(encoded, "/")
+	decodedParts := make([]string, len(encodedParts))
+	for index, part := range encodedParts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil || decoded == "" || strings.ContainsAny(decoded, `/\\`) {
+			return "", "", false
+		}
+		decodedParts[index] = decoded
+	}
+	return ecosystem, strings.Join(decodedParts, "/"), true
+}
+
+func validPackageSegments(parts []string) bool {
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		plain := part
+		if strings.HasPrefix(part, "@") {
+			if part != parts[0] {
+				return false
+			}
+			plain = strings.TrimPrefix(part, "@")
+		}
+		if plain == "" || plain == "." || plain == ".." || !packageSegmentPattern.MatchString(plain) {
+			return false
+		}
+	}
+	return true
+}
+
+func allDockerSegments(parts []string) bool {
+	for _, part := range parts {
+		if !dockerSegmentPattern.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDottedPackageRoot(value string) bool {
+	labels := strings.Split(value, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if !domainLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validProjectConfigAssetName(id, name string) bool {
+	if !strings.HasPrefix(id, "project-config:sha256:") || !sha256Hex(strings.TrimPrefix(id, "project-config:sha256:")) {
+		return false
+	}
+	switch name {
+	case ".codex/config.toml", ".cursor/mcp.json", ".mcp.json", ".vscode/mcp.json":
+		return true
+	default:
+		return false
+	}
 }
 
 func validObservation(profile Profile, observation model.Observation, assetIDs map[string]struct{}) bool {

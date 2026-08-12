@@ -142,7 +142,7 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 		}
 		status, code, message := classifyIDERootError(err, "IDE extension root")
 		target.Status = status
-		if status != model.TargetNotPresent {
+		if status != model.TargetNotPresent && code != "" {
 			c.addIssue(result, &target, status, code, message, redactPath(home, rootPath))
 		}
 		result.Targets = append(result.Targets, target)
@@ -214,8 +214,7 @@ func (c *ideCollector) collectVSCodeTarget(ctx context.Context, homeRoot platfor
 		manifestPath := filepath.Join(entryPath, declaration.manifestPath)
 		if code != "" {
 			_ = extensionRoot.Close()
-			issue := manifestError(code, redactPath(home, manifestPath))
-			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
+			c.addIssue(result, &target, model.TargetPartial, code, manifestErrorMessage(code), redactPath(home, manifestPath))
 			continue
 		}
 		parsed, err := parseVSCodeManifest(manifest.contents, declaration.spec.Host, home)
@@ -254,7 +253,7 @@ func (c *ideCollector) collectJetBrains(ctx context.Context, homeRoot platform.R
 		}
 		status, code, message := classifyIDERootError(err, "JetBrains product root")
 		target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: status}
-		if status != model.TargetNotPresent {
+		if status != model.TargetNotPresent && code != "" {
 			c.addIssue(result, &target, status, code, message, redactPath(home, rootPath))
 		}
 		result.Targets = append(result.Targets, target)
@@ -459,8 +458,7 @@ func (c *ideCollector) collectJetBrainsProduct(ctx context.Context, jetBrainsRoo
 		manifestPath := filepath.Join(pluginPath, "META-INF", "plugin.xml")
 		if code != "" {
 			_ = pluginRoot.Close()
-			issue := manifestError(code, redactPath(home, manifestPath))
-			c.addIssue(result, &target, model.TargetPartial, issue.Code, issue.Message, issue.Path)
+			c.addIssue(result, &target, model.TargetPartial, code, manifestErrorMessage(code), redactPath(home, manifestPath))
 			continue
 		}
 		parsed, err := parseJetBrainsManifest(manifest.contents)
@@ -689,7 +687,7 @@ func (r *contextReader) Read(buffer []byte) (int, error) {
 	return r.reader.Read(buffer)
 }
 
-func manifestError(code, path string) model.CoverageError {
+func manifestErrorMessage(code string) string {
 	message := "IDE extension manifest is unavailable"
 	if code == "manifest_invalid" {
 		message = "IDE extension manifest is invalid"
@@ -700,7 +698,7 @@ func manifestError(code, path string) model.CoverageError {
 	if code == "manifest_changed" {
 		message = "IDE extension manifest changed while being read"
 	}
-	return ideCoverageError(code, message, path)
+	return message
 }
 
 func unsupportedIDETarget(id string) model.TargetCoverage {

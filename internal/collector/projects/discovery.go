@@ -207,11 +207,34 @@ func mergeDiscoveryCoverage(present map[string]bool, groups ...[]model.TargetCov
 				if issues[target.TargetID] == nil {
 					issues[target.TargetID] = make(map[string]struct{})
 				}
-				issues[target.TargetID][issue.Code] = struct{}{}
+				issues[target.TargetID][normalizeDiscoveryIssueCode(issue.Code)] = struct{}{}
 			}
 		}
 	}
 	return discoveryCatalogCoverage(present, issues)
+}
+
+func normalizeDiscoveryIssueCode(code string) string {
+	switch code {
+	case "identity_changed":
+		return "identity_changed"
+	case "metadata_malformed":
+		return "metadata_malformed"
+	case "metadata_oversize":
+		return "metadata_oversize"
+	case "metadata_unavailable":
+		return "metadata_unavailable"
+	case "outside_home":
+		return "outside_home"
+	case "root_limit":
+		return "root_limit"
+	case "remote_unsupported":
+		return "remote_unsupported"
+	case "symlink_rejected":
+		return "symlink_rejected"
+	default:
+		return "metadata_malformed"
+	}
 }
 
 func clearDiscoveryRoots(roots []Root) {

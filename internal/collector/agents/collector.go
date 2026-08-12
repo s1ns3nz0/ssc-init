@@ -139,7 +139,7 @@ func (c *agentCollector) collectTarget(ctx context.Context, result *model.Collec
 		}
 		status, code, message := classifyAgentRootError(err)
 		target := model.TargetCoverage{TargetID: declaration.spec.ID, Status: status}
-		if status != model.TargetNotPresent {
+		if status != model.TargetNotPresent && code != "" {
 			target.Errors = []model.CoverageError{agentCoverageError(code, message, "$HOME/"+filepath.ToSlash(declaration.relativePath))}
 		}
 		result.Targets = append(result.Targets, target)
