@@ -18,8 +18,9 @@ import (
 
 var (
 	exportTokenPattern = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
-	unsafePathPattern  = regexp.MustCompile(`(?:^|[\t\n\r "'=:(])/(?:[A-Za-z0-9_.~-]+(?:/|$))`)
-	hostnamePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:\.(?:local|test|internal|com|net|org|dev|io|co))(?::[0-9]{1,5})?(?:$|[^a-z0-9-])`)
+	unsafePathPattern  = regexp.MustCompile(`(?:^|[\t\n\r "'=:(\[])\/(?:[A-Za-z0-9_.~-]+(?:/|$))`)
+	hostnamePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:\.(?:local|test|internal))(?::[0-9]{1,5})?(?:$|[^a-z0-9-])`)
+	ipEndpointPattern  = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}:[0-9]{1,5}\b`)
 	envValuePattern    = regexp.MustCompile(`\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|ENV|VALUE)[A-Z0-9_]*=`)
 	privateIDPattern   = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
 )
@@ -76,7 +77,7 @@ func validRecordRun(profile Profile, state State, run Run) bool {
 	if profile == ProfileRedacted {
 		return run.Label == "redacted" && run.Product == "" && run.Version == ""
 	}
-	return (run.Label == "" || ValidLabel(run.Label) && !strings.Contains(strings.ToLower(run.Label), "worktree")) && run.Product == "ssc-init" && validVersion(run.Version)
+	return (run.Label == "" || ValidLabel(run.Label) && safeString(run.Label) && !strings.Contains(strings.ToLower(run.Label), "worktree") && !strings.Contains(strings.ToLower(run.Label), "workspace")) && run.Product == "ssc-init" && validVersion(run.Version)
 }
 
 func utcRange(started, finished time.Time) bool {
@@ -84,7 +85,7 @@ func utcRange(started, finished time.Time) bool {
 }
 
 func validVersion(value string) bool {
-	return regexp.MustCompile(`\A(?:v[0-9][0-9A-Za-z.+-]*|dev\+git\.[0-9a-f]{40})\z`).MatchString(value)
+	return value == "dev" || regexp.MustCompile(`\A(?:v[0-9][0-9A-Za-z.+-]*|dev\+git\.[0-9a-f]{40})\z`).MatchString(value)
 }
 
 func exportToken(value string) bool { return exportTokenPattern.MatchString(value) }
@@ -200,20 +201,40 @@ func validateCoverage(profile Profile, coverage []model.CollectorResult) error {
 				return errors.New("invalid audit collector asset")
 			}
 		}
+		if !sortedBy(result.Assets, func(asset model.Asset) string { return asset.ID }) {
+			return errors.New("unsorted audit collector assets")
+		}
 		for _, relationship := range result.Relationships {
 			if !model.ValidRelationshipKind(relationship.Kind) || !contains(assetIDs, relationship.From) || !contains(assetIDs, relationship.To) {
 				return errors.New("invalid audit collector relationship")
 			}
 		}
+		if !sort.SliceIsSorted(result.Relationships, func(left, right int) bool {
+			return relationshipKey(result.Relationships[left]) < relationshipKey(result.Relationships[right])
+		}) || duplicateRelationships(result.Relationships) {
+			return errors.New("unsorted audit collector relationships")
+		}
+		observationIDs := map[string]struct{}{}
 		for _, observation := range result.Observations {
-			if !validObservation(profile, observation, assetIDs) {
+			if !validObservation(profile, observation, assetIDs) || !addUnique(observationIDs, observation.ID) {
 				return errors.New("invalid audit collector observation")
 			}
 		}
+		if !sortedBy(result.Observations, func(observation model.Observation) string { return observation.ID }) {
+			return errors.New("unsorted audit collector observations")
+		}
+		targets := map[string]struct{}{}
 		for _, target := range result.Targets {
-			if !validTarget(profile, target) {
+			if !validTarget(profile, target) || !addUnique(targets, targetCoverageKey(target)) || !sort.SliceIsSorted(target.Errors, func(left, right int) bool {
+				return coverageErrorKey(target.Errors[left]) < coverageErrorKey(target.Errors[right])
+			}) {
 				return errors.New("invalid audit target")
 			}
+		}
+		if !sortedBy(result.Targets, targetCoverageKey) || !sort.SliceIsSorted(result.Errors, func(left, right int) bool {
+			return coverageErrorKey(result.Errors[left]) < coverageErrorKey(result.Errors[right])
+		}) {
+			return errors.New("unsorted audit collector coverage")
 		}
 	}
 	if !sortedBy(coverage, func(result model.CollectorResult) string { return result.Collector }) {
@@ -251,11 +272,12 @@ func validateTopLevelGraph(profile Profile, record Record) error {
 	}
 	seen := map[string]struct{}{}
 	for _, target := range record.EvidenceCoverage.Targets {
-		if !validEvidenceTarget(profile, target, assetIDs, observationIDs, evidenceIDs) || !addUnique(seen, target.TargetID) {
+		key := evidenceTargetKey(target)
+		if !validEvidenceTarget(profile, target, assetIDs, observationIDs, evidenceIDs) || !addUnique(seen, key) {
 			return errors.New("invalid audit evidence target")
 		}
 	}
-	if !sortedBy(record.EvidenceCoverage.Targets, func(target model.EvidenceTargetResult) string { return target.TargetID }) {
+	if !sortedBy(record.EvidenceCoverage.Targets, evidenceTargetKey) {
 		return errors.New("unsorted audit evidence targets")
 	}
 	return nil
@@ -297,7 +319,7 @@ func validEvidence(profile Profile, evidence model.ContentEvidence, assetIDs, ob
 }
 
 func validFinding(profile Profile, finding model.Finding, assetIDs, evidenceIDs map[string]struct{}) bool {
-	if !validReference(profile, finding.ID) || !validReference(profile, finding.AssetID) || !contains(assetIDs, finding.AssetID) || !validAssetType(finding.AssetType) || !utcOrZero(finding.DetectedAt) || finding.Level < 1 || finding.Level > 5 || !validVerdict(finding.Verdict) || !validSeverity(finding.Severity) || !validConfidence(finding.Confidence) || !validAction(finding.Action) || !sortedSafeStrings(finding.RuleIDs) || !sortedSafeStrings(finding.IntelligenceIDs) || !sortedSafeStrings(finding.CampaignIDs) || !sortedSafeStrings(finding.AttackTechniques) {
+	if !validReference(profile, finding.ID) || !validReference(profile, finding.AssetID) || !contains(assetIDs, finding.AssetID) || !validAssetType(finding.AssetType) || finding.DetectedAt.IsZero() || !utcOrZero(finding.DetectedAt) || finding.Level < 1 || finding.Level > 5 || !validVerdict(finding.Verdict) || !validSeverity(finding.Severity) || !validConfidence(finding.Confidence) || !validAction(finding.Action) || !sortedSafeStrings(finding.RuleIDs) || !sortedSafeStrings(finding.IntelligenceIDs) || !sortedSafeStrings(finding.CampaignIDs) || !sortedSafeStrings(finding.AttackTechniques) {
 		return false
 	}
 	if profile == ProfileRedacted {
@@ -330,7 +352,7 @@ func validAnalyzerFact(profile Profile, fact model.AnalyzerFact, assetIDs, evide
 }
 
 func validTarget(profile Profile, target model.TargetCoverage) bool {
-	return validReference(profile, target.TargetID) && target.InstanceRef == "" && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
+	return validReference(profile, target.TargetID) && (profile == ProfileRedacted && target.InstanceRef == "" || profile == ProfileInternal && safeOptionalText(target.InstanceRef)) && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
 }
 
 func validEvidenceTarget(profile Profile, target model.EvidenceTargetResult, assetIDs, observationIDs, evidenceIDs map[string]struct{}) bool {
@@ -340,6 +362,14 @@ func validEvidenceTarget(profile Profile, target model.EvidenceTargetResult, ass
 func validChange(profile Profile, change model.Change, assets, observations, evidence map[string]struct{}) bool {
 	if !validReference(profile, change.EntityID) || !validChangeKind(change.Kind) {
 		return false
+	}
+	if change.Kind == model.ChangeRemoved {
+		switch change.Entity {
+		case model.ChangeEntityAsset, model.ChangeEntityObservation, model.ChangeEntityEvidence:
+			return true
+		default:
+			return false
+		}
 	}
 	switch change.Entity {
 	case model.ChangeEntityAsset:
@@ -539,14 +569,13 @@ func validReference(profile Profile, value string) bool {
 	return safeIdentifier(value)
 }
 func safeIdentifier(value string) bool {
-	lower := strings.ToLower(value)
-	return value != "" && len(value) <= 256 && safeString(value) && !strings.ContainsAny(value, " /\\") && !strings.Contains(lower, "workspace") && !strings.Contains(lower, "worktree") && !strings.Contains(lower, "product-private")
+	return value != "" && len(value) <= 256 && safeString(value) && !strings.ContainsAny(value, " /\\")
 }
 func safeText(value string) bool         { return value != "" && len(value) <= 256 && safeString(value) }
 func safeOptionalText(value string) bool { return value == "" || safeText(value) }
 func safeString(value string) bool       { return utf8.ValidString(value) && !unsafeAuditString(value) }
 func unsafeAuditString(value string) bool {
-	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || strings.Contains(value, "://") || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || strings.HasPrefix(value, "--") || strings.Contains(value, " --") || strings.ContainsRune(value, '\x00')
+	return privacyboundary.ContainsSensitiveValue(value) || !utf8.ValidString(value) || strings.Contains(value, `\`) || strings.Contains(value, "://") || unsafePathPattern.MatchString(value) || hostnamePattern.MatchString(value) || ipEndpointPattern.MatchString(value) || envValuePattern.MatchString(value) || privateIDPattern.MatchString(value) || strings.HasPrefix(value, "--") || strings.Contains(value, " --") || strings.ContainsRune(value, '\x00')
 }
 func addUnique(values map[string]struct{}, value string) bool {
 	if _, found := values[value]; found {
@@ -717,11 +746,14 @@ func validSignature(value *model.Signature) bool {
 	return value == nil || value.Status.Valid() && safeOptionalText(value.Identifier) && safeOptionalText(value.TeamID)
 }
 func validProvenance(value *model.Provenance) bool {
-	return value == nil || value.Status.Valid() && safeText(value.Ecosystem) && safeOptionalText(value.Source) && (value.Integrity == "" || sha256Hex(value.Integrity))
+	return value == nil || value.Status.Valid() && safeText(value.Ecosystem) && safeOptionalText(value.Source) && (value.Integrity == "" || sha256Integrity(value.Integrity))
+}
+func sha256Integrity(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && sha256Hex(strings.TrimPrefix(value, "sha256:"))
 }
 func validAuditErrorCode(value string) bool {
 	switch value {
-	case "identity_changed", "symlink_rejected", "byte_limit", "read_unavailable", "special_file_rejected", "file_limit", "depth_limit", "time_limit", "path_invalid", "target_rejected", "collector_failed", "collector_error", "collector_timeout", "collector_panic", "coverage_contract_violation", "root_unavailable", "identity_rejected", "metadata_malformed", "probe_failed", "probe_output_truncated", "executable_replaced", "metadata-conflict", "observation-conflict", "orphan-observation", "read_failed", "stale", "evidence_unavailable", "unsupported":
+	case "identity_changed", "symlink_rejected", "byte_limit", "read_unavailable", "special_file_rejected", "file_limit", "depth_limit", "time_limit", "path_invalid", "target_rejected", "target_not_reported", "unsupported_target", "invalid_local_target", "invalid_server", "unknown_server_field", "rejected_metadata", "rejected_identity", "config_invalid", "config_unavailable", "config_oversized", "entry_limit", "root_limit", "manifest_invalid", "manifest_oversized", "legacy_manifest_partial", "legacy_transport_unknown", "collector_failed", "collector_error", "collector_timeout", "collector_panic", "coverage_contract_violation", "root_unavailable", "identity_rejected", "metadata_malformed", "probe_failed", "probe_output_truncated", "executable_replaced", "metadata-conflict", "observation-conflict", "orphan-observation", "read_failed", "stale", "evidence_unavailable", "unsupported":
 		return true
 	}
 	return false

@@ -18,6 +18,21 @@ func TestValidateRejectsEverySensitiveMarker(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEmbeddedPrivateMarkersWithoutRejectingDottedDisplayNames(t *testing.T) {
+	for _, marker := range []string{"alice-macbook.local", "private workspace id", "workspace-secret", "see[/home/alice/private]", "endpoint 10.0.0.1:8443"} {
+		record := validRecord()
+		record.Run.Label = marker
+		if err := Validate(record); err == nil {
+			t.Fatalf("Validate accepted %q", marker)
+		}
+	}
+	record := namedRecord()
+	record.Inventory.Assets[0].Name = "socket.io"
+	if err := Validate(record); err != nil {
+		t.Fatalf("Validate rejected dotted display name: %v", err)
+	}
+}
+
 func TestRedactRemovesNamesVersionsAndRetokenizesIDs(t *testing.T) {
 	first, err := Redact(namedRecord(), [32]byte{1})
 	if err != nil {

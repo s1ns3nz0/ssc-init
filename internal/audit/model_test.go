@@ -118,6 +118,72 @@ func TestBuildSummaryCountsInventoryEntities(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsLiveProducerContracts(t *testing.T) {
+	run := validRun()
+	run.Version = "dev"
+	asset := model.Asset{
+		ID:   "mcp:vscode:workspace",
+		Type: model.AssetMCP,
+		Name: "socket.io",
+		Provenance: &model.Provenance{
+			Status:    model.ProvenanceImmutable,
+			Ecosystem: "npm",
+			Source:    "registry",
+			Integrity: "sha256:" + strings.Repeat("a", 64),
+		},
+	}
+	scan := model.ScanResult{Status: model.ScanPartial, Coverage: []model.CollectorResult{{
+		Collector: "projects", Status: model.CoveragePartial,
+		Targets: []model.TargetCoverage{
+			{TargetID: "projects.discovery.git-worktrees", InstanceRef: "instance-a", Status: model.TargetPartial},
+			{TargetID: "projects.discovery.git-worktrees", InstanceRef: "instance-b", Status: model.TargetPartial},
+		},
+	}}}
+	if _, err := Build(scan, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, run); err != nil {
+		t.Fatalf("Build rejected live producer values: %v", err)
+	}
+}
+
+func TestBuildAcceptsEveryLiveCoverageErrorCode(t *testing.T) {
+	for _, code := range []string{"target_not_reported", "unsupported_target", "invalid_local_target", "invalid_server", "unknown_server_field", "rejected_metadata", "rejected_identity", "config_invalid", "config_unavailable", "config_oversized", "entry_limit", "root_limit", "manifest_invalid", "manifest_oversized", "legacy_manifest_partial", "legacy_transport_unknown"} {
+		t.Run(code, func(t *testing.T) {
+			scan := model.ScanResult{Status: model.ScanPartial, Coverage: []model.CollectorResult{{Collector: "mcp", Status: model.CoveragePartial, Errors: []model.CoverageError{{Code: code, Message: "producer detail"}}}}}
+			if _, err := Build(scan, model.Inventory{}, model.Delta{}, nil, validRun()); err != nil {
+				t.Fatalf("Build rejected producer error %q: %v", code, err)
+			}
+		})
+	}
+}
+
+func TestBuildAcceptsRemovedDeltaEntitiesAbsentFromCurrentInventory(t *testing.T) {
+	for _, entity := range []model.ChangeEntity{model.ChangeEntityAsset, model.ChangeEntityObservation, model.ChangeEntityEvidence} {
+		t.Run(string(entity), func(t *testing.T) {
+			delta := model.Delta{Changes: []model.Change{{Kind: model.ChangeRemoved, Entity: entity, EntityID: string(entity) + ":removed"}}}
+			if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, delta, nil, validRun()); err != nil {
+				t.Fatalf("Build rejected removed %s: %v", entity, err)
+			}
+		})
+	}
+}
+
+func TestBuildAcceptsRepeatedEvidenceCoverageTargetsWithDistinctReferences(t *testing.T) {
+	input := richInputRecord(time.UTC)
+	input.Scan.EvidenceCoverage.Targets = append(input.Scan.EvidenceCoverage.Targets, model.EvidenceTargetResult{
+		TargetID: "target:one", AssetID: "asset:two", ObservationID: "observation:two", EvidenceID: "evidence:two", Status: model.EvidenceUnavailable,
+	})
+	if _, err := Build(input.Scan, input.Inventory, input.Delta, input.Findings, validRun()); err != nil {
+		t.Fatalf("Build rejected repeated evidence target: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsortedNestedCollectorData(t *testing.T) {
+	record := graphRecord()
+	record.Coverage[0].Assets[0], record.Coverage[0].Assets[1] = record.Coverage[0].Assets[1], record.Coverage[0].Assets[0]
+	if err := Validate(record); err == nil {
+		t.Fatal("Validate accepted unsorted collector assets")
+	}
+}
+
 type auditInput struct {
 	Scan      model.ScanResult
 	Inventory model.Inventory

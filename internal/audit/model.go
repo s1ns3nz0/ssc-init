@@ -270,7 +270,7 @@ func normalizeRecord(record *Record) {
 	}
 	if record.EvidenceCoverage != nil {
 		sort.Slice(record.EvidenceCoverage.Targets, func(left, right int) bool {
-			return record.EvidenceCoverage.Targets[left].TargetID < record.EvidenceCoverage.Targets[right].TargetID
+			return evidenceTargetKey(record.EvidenceCoverage.Targets[left]) < evidenceTargetKey(record.EvidenceCoverage.Targets[right])
 		})
 		sort.Slice(record.EvidenceCoverage.Errors, func(left, right int) bool {
 			return coverageErrorKey(record.EvidenceCoverage.Errors[left]) < coverageErrorKey(record.EvidenceCoverage.Errors[right])
@@ -291,7 +291,9 @@ func normalizeCollectorResult(result *model.CollectorResult) {
 	sort.Slice(result.Errors, func(left, right int) bool {
 		return coverageErrorKey(result.Errors[left]) < coverageErrorKey(result.Errors[right])
 	})
-	sort.Slice(result.Targets, func(left, right int) bool { return result.Targets[left].TargetID < result.Targets[right].TargetID })
+	sort.Slice(result.Targets, func(left, right int) bool {
+		return targetCoverageKey(result.Targets[left]) < targetCoverageKey(result.Targets[right])
+	})
 	sort.Slice(result.Observations, func(left, right int) bool { return result.Observations[left].ID < result.Observations[right].ID })
 	for index := range result.Assets {
 		normalizeAsset(&result.Assets[index])
@@ -343,6 +345,14 @@ func relationshipKey(value model.Relationship) string {
 }
 func coverageErrorKey(value model.CoverageError) string {
 	return value.Code + "\x00" + value.Message + "\x00" + value.Path
+}
+
+func targetCoverageKey(value model.TargetCoverage) string {
+	return value.TargetID + "\x00" + value.InstanceRef
+}
+
+func evidenceTargetKey(value model.EvidenceTargetResult) string {
+	return value.TargetID + "\x00" + value.AssetID + "\x00" + value.ObservationID + "\x00" + value.EvidenceID
 }
 
 func summarize(record Record) Summary {
