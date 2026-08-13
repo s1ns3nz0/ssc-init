@@ -164,7 +164,7 @@ func TestProjectCollectorGoSumAssetMatchesVersionRangeTI(t *testing.T) {
 	}
 	digest := sha256.Sum256([]byte("go TI fixture"))
 	active := bundle.ActiveBundle{
-		Verified: bundle.Verified{Envelope: bundle.Envelope{Family: bundle.FamilyTI, Sequence: 1, TI: &bundle.TIPayload{Records: []bundle.TIRecord{{ID: "go-range", AssetID: "pkg:go/example.com/demo", VersionRange: ">=1.0.0 <2.0.0", Verdict: "needs-review", Confidence: "medium"}}}}, Digest: digest},
+		Verified: bundle.Verified{Envelope: bundle.Envelope{Family: bundle.FamilyTI, Sequence: 1, TI: &bundle.TIPayload{Records: []bundle.TIRecord{{ID: "go-range", AssetID: "pkg:golang/example.com/demo", VersionRange: ">=1.0.0 <2.0.0", Verdict: "needs-review", Confidence: "medium"}}}}, Digest: digest},
 		Status:   bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 1},
 	}
 	findings := finding.Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC())

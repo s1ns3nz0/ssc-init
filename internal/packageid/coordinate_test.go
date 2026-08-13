@@ -14,7 +14,7 @@ func TestCoordinateMatchesCollectorAndOSVIdentities(t *testing.T) {
 	}{
 		{model.Asset{ID: "pkg:npm/%40scope/tool@2.0.0", Type: model.AssetPackage, Name: "@scope/tool", Version: "2.0.0"}, "npm", "@scope/tool", "pkg:npm/%40scope/tool"},
 		{model.Asset{ID: "pkg:pypi/Foo_Bar@1.0.0", Type: model.AssetPackage, Name: "Foo_Bar", Version: "1.0.0"}, "PyPI", "Foo_Bar", "pkg:pypi/foo-bar"},
-		{model.Asset{ID: "pkg:go/example.com/mod@v1.2.0", Type: model.AssetPackage, Name: "example.com/mod", Version: "v1.2.0"}, "Go", "example.com/mod", "pkg:go/example.com/mod"},
+		{model.Asset{ID: "pkg:go/example.com/mod@v1.2.0", Type: model.AssetPackage, Name: "example.com/mod", Version: "v1.2.0"}, "Go", "example.com/mod", "pkg:golang/example.com/mod"},
 		{model.Asset{ID: "pkg:cargo/serde_core@1.0.0", Type: model.AssetPackage, Name: "serde_core", Version: "1.0.0"}, "crates.io", "serde_core", "pkg:cargo/serde_core"},
 	}
 	for _, tc := range cases {
@@ -23,6 +23,14 @@ func TestCoordinateMatchesCollectorAndOSVIdentities(t *testing.T) {
 		if !okAsset || !okOSV || gotAsset != tc.want || gotOSV != tc.want {
 			t.Fatalf("asset=%q osv=%q", gotAsset, gotOSV)
 		}
+	}
+}
+
+func TestCoordinateProjectsCollectorGoIdentityToCanonicalCoordinate(t *testing.T) {
+	asset := model.Asset{ID: "pkg:go/example.com/demo@v1.2.3", Type: model.AssetPackage, Name: "example.com/demo", Version: "v1.2.3"}
+	coordinate, ok := Coordinate(asset)
+	if !ok || coordinate != "pkg:golang/example.com/demo" {
+		t.Fatalf("coordinate=%q ok=%v", coordinate, ok)
 	}
 }
 

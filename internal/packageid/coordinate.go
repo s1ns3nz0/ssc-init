@@ -87,6 +87,7 @@ func coordinate(purlType, name string) (string, bool) {
 		}
 		name = normalizePyPI(name)
 	case "go":
+		purlType = "golang"
 	case "cargo":
 		if len(segments) != 1 {
 			return "", false
