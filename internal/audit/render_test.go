@@ -76,6 +76,49 @@ func TestWriteSectionFindingsExplainsConfidenceAndBasis(t *testing.T) {
 	}
 }
 
+func TestFindingRenderersExplainMatchedRulesWithoutExposingEvidenceIdentity(t *testing.T) {
+	record := graphRecord()
+	record.Findings[0].RuleIDs = []string{"ssc-init/mutable/provenance", "ssc-init/mutable/unpinned-package"}
+
+	var summary bytes.Buffer
+	if err := WritePretty(&summary, record, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary.String(), "why: package version is not pinned and provenance may change") {
+		t.Fatalf("priority finding does not explain its classification:\n%s", summary.String())
+	}
+
+	var details bytes.Buffer
+	if err := WriteSection(&details, record, SectionFindings); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"why       package version is not pinned and provenance may change",
+		"rules     mutable/provenance, mutable/unpinned-package",
+		"evidence  2 linked items",
+		"action    INSPECT",
+	} {
+		if !strings.Contains(details.String(), want) {
+			t.Fatalf("detailed finding does not contain %q:\n%s", want, details.String())
+		}
+	}
+	if strings.Contains(details.String(), "evidence:sha256:") || strings.Contains(details.String(), "asset:sha256:") {
+		t.Fatalf("detailed reason exposed opaque identities:\n%s", details.String())
+	}
+}
+
+func TestUnknownFindingRuleUsesNonSpeculativeFallbackReason(t *testing.T) {
+	record := graphRecord()
+	record.Findings[0].RuleIDs = []string{"organization/custom-review"}
+	var output bytes.Buffer
+	if err := WritePretty(&output, record, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "why: additional local review rule matched") || strings.Contains(output.String(), "custom-review") {
+		t.Fatalf("unknown rule was omitted or exposed/speculated about:\n%s", output.String())
+	}
+}
+
 func TestWriteListAndVerifyUseOnlySafeReferences(t *testing.T) {
 	record := validRecord()
 	report, err := ReportText(record)

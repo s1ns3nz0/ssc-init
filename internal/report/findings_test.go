@@ -54,3 +54,23 @@ func TestWriteFindingsPrettyRendersActionTableWhileJSONContractStaysJSON(t *test
 		t.Fatalf("JSON contract changed: %q", jsonOutput.String())
 	}
 }
+
+func TestWriteFindingsPrettyAddsHumanReasonWithoutChangingJSON(t *testing.T) {
+	assetID := "asset:sha256:" + strings.Repeat("b", 64)
+	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictSuspicious, Severity: model.SeverityHigh, Confidence: model.ConfidenceHigh, Level: 5, RuleIDs: []string{"ssc-init/api/credential-access"}, EvidenceIDs: []string{"evidence:sha256:" + strings.Repeat("c", 64)}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("a", 64), Assets: []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "review-me"}}, Findings: []model.Finding{finding}}
+	var output bytes.Buffer
+	if err := WriteFindingsPretty(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "why: credential access behavior was observed") || strings.Contains(output.String(), "evidence:sha256:") {
+		t.Fatalf("pretty findings reason is missing or leaks identity:\n%s", output.String())
+	}
+	var jsonOutput bytes.Buffer
+	if err := WriteFindingsJSON(&jsonOutput, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(jsonOutput.String(), `"reason"`) {
+		t.Fatalf("JSON contract gained a presentation-only reason: %s", jsonOutput.String())
+	}
+}

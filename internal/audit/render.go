@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/findingdisplay"
 	"github.com/s1ns3nz0/ssc-init/internal/inventory"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
@@ -289,6 +290,7 @@ func (p *auditPrinter) priorityFindings(record Record) {
 			action = "REVIEW NOW"
 		}
 		p.line(fmt.Sprintf("  %-11s %-20s %-23s %-11s %s", priority, assets[finding.AssetID], classification, strings.ToUpper(string(finding.Confidence)), action))
+		p.line("              why: " + findingdisplay.Reason(finding))
 	}
 }
 
@@ -380,6 +382,10 @@ func (p *auditPrinter) findingDetails(record Record) {
 			classification = p.styled(classification, ansiYellow)
 		}
 		p.line(fmt.Sprintf("  %-13s %-20s %-24s %-11s %-22s %s", strings.ToUpper(string(finding.Severity)), assets[finding.AssetID], classification, strings.ToUpper(string(finding.Confidence)), findingBasis(finding), finding.Action))
+		p.line("    why       " + findingdisplay.Reason(finding))
+		p.line("    rules     " + findingdisplay.Rules(finding))
+		p.line("    evidence  " + findingdisplay.Evidence(finding))
+		p.line("    action    " + findingdisplay.Action(finding))
 	}
 	if len(rows) == 0 {
 		p.line("  (none)")

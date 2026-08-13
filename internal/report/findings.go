@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/s1ns3nz0/ssc-init/internal/findingdisplay"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
@@ -113,6 +114,9 @@ func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
 			basis = "POLICY / LOCAL RULE"
 		}
 		if _, err := fmt.Fprintf(writer, "  %-11s %-20s %-23s %-11s %s\n", priority, name, paint(classification, code), strings.ToUpper(string(finding.Confidence)), basis); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(writer, "              why: "+findingdisplay.Reason(finding)); err != nil {
 			return err
 		}
 	}
