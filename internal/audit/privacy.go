@@ -19,7 +19,7 @@ import (
 
 var (
 	exportTokenPattern    = regexp.MustCompile(`\Aasset:export-sha256:[0-9a-f]{64}\z`)
-	canonicalPURLPattern  = regexp.MustCompile(`\Apkg:[a-z0-9.+-]+/[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*(?:@[A-Za-z0-9%._~+-]+)?(?:\?[A-Za-z0-9%._~=&+-]+)?(?:#[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*)?\z`)
+	canonicalPURLPattern  = regexp.MustCompile(`\Apkg:[a-z0-9.+-]+/[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*(?:@[A-Za-z0-9%._~:+-]+)?(?:\?[A-Za-z0-9%._~=&+-]+)?(?:#[A-Za-z0-9%._~+-]+(?:/[A-Za-z0-9%._~+-]+)*)?\z`)
 	ruleIDPattern         = regexp.MustCompile(`\A[A-Za-z0-9._~:+-]+(?:/[A-Za-z0-9._~:+-]+)+\z`)
 	unsafePathPattern     = regexp.MustCompile(`/(?:[A-Za-z0-9._~-]+)(?:/|$)`)
 	uriPattern            = regexp.MustCompile(`(?i)(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s]`)
@@ -314,7 +314,30 @@ func validAsset(profile Profile, asset model.Asset) bool {
 	if profile == ProfileRedacted {
 		return redactedAsset(asset) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
 	}
-	return validAssetName(asset) && (asset.Version == "" || safeText(asset.Version)) && (asset.SHA256 == "" || sha256Hex(asset.SHA256)) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+	return validAssetName(asset) && validAssetVersion(asset) && (asset.SHA256 == "" || sha256Hex(asset.SHA256)) && validSignature(asset.Signature) && validProvenance(asset.Provenance)
+}
+
+func validAssetVersion(asset model.Asset) bool {
+	if asset.Version == "" || safeText(asset.Version) {
+		return true
+	}
+	if asset.Type != model.AssetPackage || !sha256Integrity(asset.Version) {
+		return false
+	}
+	prefix := "pkg:docker/"
+	if !strings.HasPrefix(asset.ID, prefix) {
+		return false
+	}
+	coordinate := strings.TrimPrefix(asset.ID, prefix)
+	if boundary := strings.IndexAny(coordinate, "?#"); boundary >= 0 {
+		coordinate = coordinate[:boundary]
+	}
+	separator := strings.LastIndexByte(coordinate, '@')
+	if separator < 1 {
+		return false
+	}
+	version, err := url.PathUnescape(coordinate[separator+1:])
+	return err == nil && version == asset.Version
 }
 
 func validAssetName(asset model.Asset) bool {

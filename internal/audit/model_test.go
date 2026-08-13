@@ -168,6 +168,42 @@ func TestBuildAcceptsSlashBearingLivePackageNames(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsDockerDigestAsProducerVersion(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	asset := model.Asset{
+		ID:      "pkg:docker/alpine@" + digest,
+		Type:    model.AssetPackage,
+		Name:    "alpine",
+		Version: digest,
+		Source:  "docker",
+		Provenance: &model.Provenance{
+			Status:    model.ProvenanceUnknown,
+			Ecosystem: "docker",
+			Source:    "local-daemon",
+		},
+	}
+	if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, validRun()); err != nil {
+		t.Fatalf("Build rejected Docker digest version %q: %v", digest, err)
+	}
+}
+
+func TestBuildRejectsNonCanonicalDigestVersions(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	tests := []model.Asset{
+		{ID: "pkg:docker/alpine@sha256:abc", Type: model.AssetPackage, Name: "alpine", Version: "sha256:abc"},
+		{ID: "pkg:docker/alpine@" + digest, Type: model.AssetPackage, Name: "alpine", Version: "sha256:" + strings.Repeat("A", 64)},
+		{ID: "pkg:npm/alpine@" + digest, Type: model.AssetPackage, Name: "alpine", Version: digest},
+		{ID: "pkg:docker/alpine@latest", Type: model.AssetPackage, Name: "alpine", Version: digest},
+	}
+	for _, asset := range tests {
+		t.Run(asset.ID+"/"+asset.Version, func(t *testing.T) {
+			if _, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, nil, validRun()); err == nil {
+				t.Fatalf("Build accepted non-canonical digest version: %#v", asset)
+			}
+		})
+	}
+}
+
 func TestBuildAcceptsClosedProjectConfigAssetNames(t *testing.T) {
 	for index, name := range []string{".codex/config.toml", ".cursor/mcp.json", ".mcp.json", ".vscode/mcp.json"} {
 		asset := model.Asset{ID: "project-config:sha256:" + strings.Repeat(string(rune('a'+index)), 64), Type: model.AssetProject, Name: name, Source: "project-config"}
