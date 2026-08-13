@@ -98,6 +98,61 @@ func TestHookArchivesWithoutChangingAdvisoryOutput(t *testing.T) {
 	}
 }
 
+func TestScanFailureArchivesPrivacySafeReceiptAndKeepsExitCode(t *testing.T) {
+	manager, service := cliAuditService(t)
+	marker := "private /Users/alice/secret token=value"
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: service.Now, Random: strings.NewReader(strings.Repeat("f", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New(marker)
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty"}, &out, &errOut); code != 1 || out.Len() != 0 || errOut.String() != "baseline scan failed\n" {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].State != audit.StateFailed {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+	verified, err := manager.Open(context.Background(), listed[0].RunID)
+	if err != nil || verified.Record.Failure == nil || verified.Record.Failure.Stage != audit.StageCollect || verified.Record.Failure.Code != audit.CodeCollectorFailed {
+		t.Fatalf("Verified = %#v, %v", verified, err)
+	}
+	archivePath := filepath.Join(manager.Root, strings.TrimPrefix(listed[0].SafePath, "$SSC_INIT_DATA/audit/"))
+	raw, err := os.ReadFile(archivePath)
+	if err != nil || bytes.Contains(raw, []byte(marker)) || strings.Contains(errOut.String(), marker) {
+		t.Fatalf("failure marker persisted: read=%v stderr=%q", err, errOut.String())
+	}
+}
+
+func TestInitializationWithoutWritableAuditRootReportsUnavailableWithoutRawError(t *testing.T) {
+	home := t.TempDir()
+	marker := "private /Users/alice/root token=value"
+	manager := &audit.Manager{Root: filepath.Join(home, "wrong"), Home: home, Now: time.Now, Random: strings.NewReader(strings.Repeat("u", 64)), Render: audit.ReportText}
+	now := func() time.Time { return time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC) }
+	service := audit.Service{Manager: manager, Product: "ssc-init", Version: "dev", DeviceID: "device:sha256:" + strings.Repeat("b", 64), Now: now}
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: now, Random: strings.NewReader(strings.Repeat("q", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New(marker)
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &out, &errOut); code != 1 || out.Len() != 0 || errOut.String() != "baseline scan failed\naudit evidence unavailable\n" || strings.Contains(errOut.String(), marker) {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestHookFailureArchivesReceiptButKeepsAdvisoryExitZero(t *testing.T) {
+	manager, service := cliAuditService(t)
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: service.Now, Random: strings.NewReader(strings.Repeat("z", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("/private/hook-marker")
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 || out.Len() != 0 || errOut.String() != "ssc-init hook: baseline scan failed\n" {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].State != audit.StateFailed {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+}
+
 func cliAuditService(t *testing.T) (*audit.Manager, audit.Service) {
 	t.Helper()
 	home := t.TempDir()

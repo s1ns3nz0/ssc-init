@@ -78,7 +78,31 @@ copy or require explicit approval. Users who require a locally produced binary
 can install with `go install` or build from the tagged source. Do not instruct
 users to remove quarantine metadata or weaken Gatekeeper.
 
-## 7. External gaps
+## 7. Audit evidence smoke test
+
+Each scan attempts to publish a deterministic complete, partial, or failed ZIP
+under `$HOME/Library/Application Support/SSC Init/audit`. Before publishing a
+release, exercise the operator path:
+
+```sh
+ssc-init scan --baseline --pretty --label release-smoke
+ssc-init audit list --pretty
+ssc-init audit show <run-id> --section coverage
+ssc-init audit verify '/absolute/managed.zip' --pretty
+ssc-init audit export <run-id> --output /absolute/internal.zip
+ssc-init audit export <run-id> --output /absolute/redacted.zip --redacted
+```
+
+Confirm the screen order is `SUMMARY`, `FINDINGS`, `CHANGES`, `COVERAGE`,
+`ASSETS`, and `AUDIT EVIDENCE`. Retention is 30 days and 1 GiB with the newest
+valid archive always preserved. Internal exports retain privacy-safe names and
+versions; redacted exports remove them and use fresh unlinkable IDs. Verification
+is offline and checks integrity and privacy, but the archive is unsigned and
+does not authenticate an organization. Future organization signatures belong
+at that explicit boundary. GitHub remains the release channel; Apple signing
+and Mac App Store publication are unrelated.
+
+## 8. External gaps
 
 - Production bundle public keys and publication evidence remain external.
 - Hosted CI execution evidence remains external.

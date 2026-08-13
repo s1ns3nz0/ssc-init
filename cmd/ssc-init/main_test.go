@@ -376,7 +376,11 @@ func TestHookHostInitializationFailuresStayAdvisory(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			code := runWithIO(context.Background(), []string{"hook"}, &stdout, &stderr)
-			if code != 0 || stdout.String() != "" || stderr.String() != "ssc-init hook: baseline scan failed\n" {
+			wantStderr := "ssc-init hook: baseline scan failed\n"
+			if testCase.name == "host paths unavailable" {
+				wantStderr += "ssc-init hook: audit evidence unavailable\n"
+			}
+			if code != 0 || stdout.String() != "" || stderr.String() != wantStderr {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
 		})
@@ -546,7 +550,7 @@ func TestScanAutomaticDiscoveryCancellationDoesNotOpenStore(t *testing.T) {
 	cancel()
 	var stdout, stderr bytes.Buffer
 	code := runWithIO(ctx, []string{"ignored-by-injected-parser"}, &stdout, &stderr)
-	if code != 1 || stdout.String() != "" || stderr.String() != "failed to initialize SSC Init\n" {
+	if code != 1 || stdout.String() != "" || stderr.String() != "failed to initialize SSC Init\naudit evidence unavailable\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

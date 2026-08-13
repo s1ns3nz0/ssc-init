@@ -38,6 +38,7 @@ Baseline scan pipeline: `cmd/ssc-init` → `internal/cli` → `internal/scan` or
 - `internal/identity` — canonical ID finalization for observations and evidence (IDs are stable across content changes).
 - `internal/privacy` — sensitive-value detection used by validation across collectors, evidence, and persistence.
 - `internal/store` — migrations, atomic snapshot persistence, and validation that rejects raw paths, secrets, and runtime state. Rebuildable `bundle_index` and bounded `bundle_audit` tables have no `scan_id`; verified files remain the bundle activation source of truth.
+- `internal/audit` — privacy-validated complete/partial/failed records, deterministic ZIP encoding and verification, retention/export, and the progressive terminal renderer. Audit commands remain usable after the SQLite store is unavailable.
 - `internal/install` — the only default product path that executes a supplied binary, solely for a bounded doctor health check; it is never reachable from scanning. The current-version pointer is a regular file, never a symlink, and every read re-validates it.
 - `internal/policy` — pure evaluation over already-recorded inventory facts. It must not read the host, run processes, open sockets, or import `internal/report`.
 - `internal/bundle` — closed TI/organization schemas, family-scoped Ed25519 verification, monotonic sequence protection, atomic stage/activate/rollback, and freshness state. It never fetches a bundle; production trust roots are an explicit reviewed input.

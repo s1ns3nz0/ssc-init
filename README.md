@@ -38,6 +38,11 @@ ssc-init scan --baseline --json --project-root '$HOME/Projects' --project-root '
 ssc-init scan --baseline --pretty
 ssc-init status --json
 ssc-init status --pretty
+ssc-init audit list --pretty
+ssc-init audit show <run-id> --section assets
+ssc-init audit verify /absolute/audit.zip --pretty
+ssc-init audit export <run-id> --output /absolute/internal.zip
+ssc-init audit export <run-id> --output /absolute/redacted.zip --redacted
 ssc-init hook
 ssc-init policy init
 ssc-init policy pin
@@ -110,6 +115,20 @@ State is local-first and stored at:
 ```text
 $HOME/Library/Application Support/SSC Init/state.db
 ```
+
+Every completed, partial, or failed scan also attempts to save a deterministic
+audit ZIP under `$HOME/Library/Application Support/SSC Init/audit`. The pretty
+screen uses the fixed `SUMMARY`, `FINDINGS`, `CHANGES`, `COVERAGE`, `ASSETS`,
+and `AUDIT EVIDENCE` layout. Archives are kept for 30 days and within a 1-GiB
+budget; the newest valid archive is always preserved. `audit verify` and the
+other audit commands work offline, independently of `state.db`.
+
+An ordinary export retains the privacy-safe internal inventory names and
+versions. A `--redacted` export creates fresh unlinkable identifiers and omits
+those names and versions for external sharing. Both profiles are deterministic
+unsigned evidence, not an authenticity signature. Organization signing is a
+future boundary. GitHub remains the distribution channel, and Apple signing or
+Mac App Store publication is unrelated to these audit archives.
 
 ## Local policy
 

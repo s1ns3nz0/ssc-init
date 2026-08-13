@@ -213,12 +213,17 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			fmt.Fprintln(stderr, "audit evidence unavailable")
 			return 1
 		}
+		auditService := configureAuditService(home, paths)
 		environment, configuredCollectors, err := scanConfiguration(ctx, home, options)
 		if err != nil {
 			if len(options.ProjectRoots) == 0 {
 				fmt.Fprintln(stderr, "failed to initialize SSC Init")
+				if !saveMainFailure(ctx, auditService, options.ScanLabel, audit.StageDiscover, audit.CodeDiscoveryFailed) {
+					fmt.Fprintln(stderr, "audit evidence unavailable")
+				}
 				return 1
 			}
 			fmt.Fprintln(stderr, "invalid command arguments")
@@ -227,6 +232,9 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
 		if err != nil {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			if !saveMainFailure(ctx, auditService, options.ScanLabel, audit.StageInitialize, audit.CodeInitializeFailed) {
+				fmt.Fprintln(stderr, "audit evidence unavailable")
+			}
 			return 1
 		}
 		defer snapshots.Close()
@@ -237,10 +245,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
-		app.DeviceID, err = loadDeviceID(paths.DataDir)
-		if err == nil {
-			auditManager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: environment.Now, Random: rand.Reader, Render: audit.ReportText}
-			app.AuditService = audit.Service{Manager: auditManager, Product: "ssc-init", Version: version, DeviceID: app.DeviceID, Now: environment.Now, Random: rand.Reader}
+		if auditService != nil {
+			auditService.Now = environment.Now
+			auditService.Manager.Now = environment.Now
+			app.DeviceID, app.AuditService = auditService.DeviceID, auditService
 			app.Now, app.Random = environment.Now, rand.Reader
 		}
 		if tiManager, policyManager, managerErr := findingManagers(home); managerErr == nil {
@@ -342,16 +350,24 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			fmt.Fprintln(stderr, "ssc-init hook: audit evidence unavailable")
 			return 0
 		}
+		auditService := configureAuditService(home, paths)
 		environment, configuredCollectors, err := scanConfiguration(ctx, home, options)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			if !saveMainFailure(ctx, auditService, "", audit.StageDiscover, audit.CodeDiscoveryFailed) {
+				fmt.Fprintln(stderr, "ssc-init hook: audit evidence unavailable")
+			}
 			return 0
 		}
 		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			if !saveMainFailure(ctx, auditService, "", audit.StageInitialize, audit.CodeInitializeFailed) {
+				fmt.Fprintln(stderr, "ssc-init hook: audit evidence unavailable")
+			}
 			return 0
 		}
 		defer snapshots.Close()
@@ -367,10 +383,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		if managerErr == nil {
 			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
 		}
-		app.DeviceID, err = loadDeviceID(paths.DataDir)
-		if err == nil {
-			auditManager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: environment.Now, Random: rand.Reader, Render: audit.ReportText}
-			app.AuditService = audit.Service{Manager: auditManager, Product: "ssc-init", Version: version, DeviceID: app.DeviceID, Now: environment.Now, Random: rand.Reader}
+		if auditService != nil {
+			auditService.Now = environment.Now
+			auditService.Manager.Now = environment.Now
+			app.DeviceID, app.AuditService = auditService.DeviceID, auditService
 			app.Now, app.Random = environment.Now, rand.Reader
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
@@ -558,6 +574,32 @@ func loadDeviceID(dataDir string) (string, error) {
 		return "", closeErr
 	}
 	return "device:sha256:" + hex.EncodeToString(random[:]), nil
+}
+
+func configureAuditService(home string, paths platform.Paths) *audit.Service {
+	if err := os.MkdirAll(paths.DataDir, 0o700); err != nil {
+		return nil
+	}
+	deviceID, err := loadDeviceID(paths.DataDir)
+	if err != nil {
+		return nil
+	}
+	now := func() time.Time { return time.Now().UTC() }
+	manager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: now, Random: rand.Reader, Render: audit.ReportText}
+	return &audit.Service{Manager: manager, Product: "ssc-init", Version: version, DeviceID: deviceID, Now: now, Random: rand.Reader}
+}
+
+func saveMainFailure(ctx context.Context, service *audit.Service, label string, stage audit.Stage, code string) bool {
+	if service == nil {
+		return false
+	}
+	identifier := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, identifier); err != nil {
+		return false
+	}
+	run := audit.Run{ID: "run:hex:" + hex.EncodeToString(identifier), DeviceID: service.DeviceID, Label: label, Product: "ssc-init", Version: version, StartedAt: service.Now().UTC()}
+	outcome := service.Fail(ctx, run, stage, code)
+	return outcome.Stored != nil && outcome.ArchiveErrorCode == ""
 }
 
 func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {

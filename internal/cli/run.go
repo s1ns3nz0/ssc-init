@@ -207,6 +207,9 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		scan, inventory, delta, _, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "baseline scan failed")
+			if !a.archiveFailure(ctx, run, runErr, audit.StageCollect, audit.CodeCollectorFailed) {
+				fmt.Fprintln(stderr, "audit evidence unavailable")
+			}
 			return 1
 		}
 		var findings []model.Finding
@@ -595,6 +598,9 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		scanResult, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
+			if !a.archiveFailure(ctx, run, runErr, audit.StageCollect, audit.CodeCollectorFailed) {
+				fmt.Fprintln(stderr, "ssc-init hook: audit evidence unavailable")
+			}
 			return 0
 		}
 		var policyResult policy.Result
@@ -649,6 +655,17 @@ func (a App) newAuditRun(label string) (audit.Run, error) {
 		now = time.Now
 	}
 	return audit.Run{ID: "run:hex:" + hex.EncodeToString(identifier), DeviceID: a.DeviceID, Label: label, Product: "ssc-init", Version: a.Version, StartedAt: now().UTC()}, nil
+}
+
+func (a App) archiveFailure(ctx context.Context, run audit.Run, runErr error, stage audit.Stage, code string) bool {
+	if a.AuditService == nil {
+		return true
+	}
+	if runErr != nil {
+		return false
+	}
+	outcome := a.AuditService.Fail(ctx, run, stage, code)
+	return outcome.Stored != nil && outcome.ArchiveErrorCode == ""
 }
 
 func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Writer) int {
