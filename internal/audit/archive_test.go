@@ -72,7 +72,7 @@ func TestVerifyRoundTripsEncodedRecord(t *testing.T) {
 func TestVerifyRejectsChecksumMutation(t *testing.T) {
 	encoded := validArchive(t)
 	entries := unzipEntries(t, encoded)
-	entries["summary.json"] = []byte("{}\n")
+	entries["report.txt"] = []byte("tamper\n")
 	assertVerifyError(t, zipEntries(t, zipNames(encoded, t), entries))
 }
 
