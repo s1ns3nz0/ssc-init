@@ -253,6 +253,22 @@ func TestWriteStatusPrettyCoversInitializedLegacyAndEmptyStates(t *testing.T) {
 	}
 }
 
+func TestWriteStatusPrettyPreservesFourLineLegacyV3Notice(t *testing.T) {
+	var output bytes.Buffer
+	if err := report.WriteStatusPretty(&output, report.StatusData{
+		Initialized: true, LegacyInventory: true, InventorySchemaVersion: "ssc-init.scan.v3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := "SSC Init status\n" +
+		"  state     initialized\n" +
+		"  inventory ssc-init.scan.v3\n" +
+		"  note      legacy inventory: current-version coverage is not claimed\n"
+	if output.String() != want {
+		t.Fatalf("legacy status changed:\n%q\nwant:\n%q", output.String(), want)
+	}
+}
+
 // TestWritePrettyDeltaLadderIsNotCapped locks the design contract that the
 // interactive ladder is uncapped: `scan --pretty` is a command the operator
 // asked for, not a session interrupt, so it never truncates the diff nor

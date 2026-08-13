@@ -29,6 +29,7 @@ var auditProcessLocks sync.Map
 
 type Stored struct {
 	RunID     string
+	Label     string
 	SafePath  string
 	SHA256    string
 	State     State
@@ -259,7 +260,7 @@ func (m *Manager) Export(ctx context.Context, runID, absoluteOutput string, reda
 	if err := m.publishExport(absoluteOutput, outputBytes); err != nil {
 		return Stored{}, err
 	}
-	return Stored{RunID: outputVerified.Record.Run.ID, SHA256: outputVerified.ZIPSHA256, State: outputVerified.Record.State, Profile: outputVerified.Record.Profile, CreatedAt: m.Now().UTC(), Size: int64(len(outputBytes)), Valid: true}, nil
+	return Stored{RunID: outputVerified.Record.Run.ID, Label: outputVerified.Record.Run.Label, SHA256: outputVerified.ZIPSHA256, State: outputVerified.Record.State, Profile: outputVerified.Record.Profile, CreatedAt: m.Now().UTC(), Size: int64(len(outputBytes)), Valid: true}, nil
 }
 
 func (m *Manager) Prune(ctx context.Context) error {
@@ -535,7 +536,7 @@ func managedArchiveName(created time.Time, runID string) (string, error) {
 }
 
 func storedFromVerified(name string, created time.Time, size int64, verified Verified) Stored {
-	return Stored{RunID: verified.Record.Run.ID, SafePath: safeAuditPrefix + name, SHA256: verified.ZIPSHA256, State: verified.Record.State, Profile: verified.Record.Profile, CreatedAt: created.UTC(), Size: size, Valid: true}
+	return Stored{RunID: verified.Record.Run.ID, Label: verified.Record.Run.Label, SafePath: safeAuditPrefix + name, SHA256: verified.ZIPSHA256, State: verified.Record.State, Profile: verified.Record.Profile, CreatedAt: created.UTC(), Size: size, Valid: true}
 }
 
 func syncRoot(root *os.Root) error {
