@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +44,11 @@ type AuditManager interface {
 	List(context.Context) ([]audit.Stored, error)
 	Open(context.Context, string) (audit.Verified, error)
 	Export(context.Context, string, string, bool) (audit.Stored, error)
+}
+
+type AuditService interface {
+	Complete(context.Context, audit.Run, model.ScanResult, model.Inventory, model.Delta, []model.Finding) audit.Outcome
+	Fail(context.Context, audit.Run, audit.Stage, string) audit.Outcome
 }
 
 type PolicyStore interface {
@@ -155,6 +162,8 @@ type App struct {
 	QuarantineReader QuarantineReader
 	Schedule         ScheduleManager
 	AuditManager     AuditManager
+	AuditService     AuditService
+	Random           io.Reader
 }
 
 // Run executes the CLI with the development version.
@@ -190,12 +199,34 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "baseline scan is unavailable")
 			return 1
 		}
+		var run audit.Run
+		var runErr error
+		if a.AuditService != nil {
+			run, runErr = a.newAuditRun(options.ScanLabel)
+		}
 		scan, inventory, delta, _, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "baseline scan failed")
 			return 1
 		}
+		var findings []model.Finding
+		if a.FindingService != nil {
+			if evaluated, evaluationErr := a.FindingService.Evaluate(ctx, inventory); evaluationErr == nil {
+				findings = evaluated.Findings
+			}
+		}
+		var outcome audit.Outcome
+		if a.AuditService != nil && runErr == nil {
+			outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
+		}
 		if options.Pretty {
+			if outcome.Record.SchemaVersion != "" {
+				if err := audit.WritePretty(stdout, outcome.Record, outcome.Stored); err != nil {
+					fmt.Fprintln(stderr, "failed to write baseline output")
+					return 1
+				}
+				return 0
+			}
 			if err := report.WritePretty(stdout, scan, inventory, delta); err != nil {
 				fmt.Fprintln(stderr, "failed to write baseline output")
 				return 1
@@ -556,7 +587,12 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				}
 			}
 		}
-		_, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
+		var run audit.Run
+		var runErr error
+		if a.AuditService != nil {
+			run, runErr = a.newAuditRun("")
+		}
+		scanResult, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
 			return 0
@@ -572,8 +608,10 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			}
 		}
 		var newFindings []model.Finding
+		var allFindings []model.Finding
 		if a.FindingService != nil {
 			if evaluated, evaluationErr := a.FindingService.Evaluate(ctx, inventory); evaluationErr == nil {
+				allFindings = evaluated.Findings
 				for _, item := range evaluated.Findings {
 					if _, standing := previousIDs[item.ID]; !standing {
 						newFindings = append(newFindings, item)
@@ -582,6 +620,9 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			} else {
 				fmt.Fprintln(stderr, "ssc-init hook: finding evaluation failed")
 			}
+		}
+		if a.AuditService != nil && runErr == nil {
+			_ = a.AuditService.Complete(ctx, run, scanResult, inventory, delta, allFindings)
 		}
 		if err := report.WriteHookSummaryFindings(stdout, inventory, delta, firstRun, newFindings, policyResult); err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
@@ -592,6 +633,22 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func (a App) newAuditRun(label string) (audit.Run, error) {
+	random := a.Random
+	if random == nil {
+		random = cryptorand.Reader
+	}
+	identifier := make([]byte, 16)
+	if _, err := io.ReadFull(random, identifier); err != nil {
+		return audit.Run{}, errors.New("audit run identity unavailable")
+	}
+	now := a.Now
+	if now == nil {
+		now = time.Now
+	}
+	return audit.Run{ID: "run:hex:" + hex.EncodeToString(identifier), DeviceID: a.DeviceID, Label: label, Product: "ssc-init", Version: a.Version, StartedAt: now().UTC()}, nil
 }
 
 func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Writer) int {

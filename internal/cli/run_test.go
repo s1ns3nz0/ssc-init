@@ -20,9 +20,91 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
+	"github.com/s1ns3nz0/ssc-init/internal/report"
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 )
+
+func TestScanPrettyArchivesAndRendersTheSameCompleteRecord(t *testing.T) {
+	manager, service := cliAuditService(t)
+	scanResult := model.ScanResult{SchemaVersion: "ssc-init.scan.v7", ScanID: "scan:sha256:" + strings.Repeat("a", 64), Status: model.ScanComplete}
+	app := App{Version: "dev", DeviceID: "device:sha256:" + strings.Repeat("b", 64), Now: service.Now, Random: strings.NewReader(strings.Repeat("i", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scanResult, model.Inventory{}, model.Delta{}, true, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty", "--label", "audit mac"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "SSC Init audit") || !strings.Contains(out.String(), "state      saved") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].Label != "audit mac" {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+	verified, err := manager.Open(context.Background(), listed[0].RunID)
+	if err != nil || verified.Record.Run.ID != listed[0].RunID || verified.Record.State != audit.StateComplete {
+		t.Fatalf("Verified = %#v, %v", verified, err)
+	}
+}
+
+func TestScanJSONPreservesV7PayloadAndStillArchives(t *testing.T) {
+	manager, service := cliAuditService(t)
+	scanResult := model.ScanResult{SchemaVersion: "ssc-init.scan.v7", ScanID: "scan:sha256:" + strings.Repeat("a", 64), Status: model.ScanComplete}
+	inventory, delta := model.Inventory{}, model.Delta{}
+	var expected bytes.Buffer
+	if err := report.WriteJSON(&expected, scanResult, inventory, delta); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Version: "dev", DeviceID: "device:sha256:" + strings.Repeat("b", 64), Now: service.Now, Random: strings.NewReader(strings.Repeat("j", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scanResult, inventory, delta, true, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !bytes.Equal(out.Bytes(), expected.Bytes()) {
+		t.Fatalf("code=%d out=%q want=%q err=%q", code, out.Bytes(), expected.Bytes(), errOut.String())
+	}
+	if listed, err := manager.List(context.Background()); err != nil || len(listed) != 1 {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+}
+
+func TestScanArchiveFailureReturnsScanSuccessWithUnavailableEvidence(t *testing.T) {
+	home := t.TempDir()
+	manager := &audit.Manager{Root: filepath.Join(home, "wrong"), Home: home, Now: time.Now, Random: strings.NewReader(strings.Repeat("x", 64)), Render: audit.ReportText}
+	now := func() time.Time { return time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC) }
+	service := audit.Service{Manager: manager, Product: "ssc-init", Version: "dev", DeviceID: "device:sha256:" + strings.Repeat("b", 64), Now: now}
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: now, Random: strings.NewReader(strings.Repeat("k", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{ScanID: "scan:sha256:" + strings.Repeat("a", 64), Status: model.ScanPartial}, model.Inventory{}, model.Delta{}, false, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "state      PARTIAL") || !strings.Contains(out.String(), "state      unavailable") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestHookArchivesWithoutChangingAdvisoryOutput(t *testing.T) {
+	manager, service := cliAuditService(t)
+	scanResult := model.ScanResult{ScanID: "scan:sha256:" + strings.Repeat("a", 64), Status: model.ScanComplete}
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: service.Now, Random: strings.NewReader(strings.Repeat("h", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return scanResult, model.Inventory{}, model.Delta{}, true, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"hook"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 || !listed[0].Valid {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+	if strings.Contains(out.String(), listed[0].RunID) || strings.Contains(out.String(), listed[0].SHA256) {
+		t.Fatalf("hook advisory output changed to audit detail: %q", out.String())
+	}
+}
+
+func cliAuditService(t *testing.T) (*audit.Manager, audit.Service) {
+	t.Helper()
+	home := t.TempDir()
+	now := func() time.Time { return time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC) }
+	manager := &audit.Manager{Root: filepath.Join(home, "Library", "Application Support", "SSC Init", "audit"), Home: home, Now: now, Random: strings.NewReader(strings.Repeat("r", 4096)), Render: audit.ReportText}
+	return manager, audit.Service{Manager: manager, Product: "ssc-init", Version: "dev", DeviceID: "device:sha256:" + strings.Repeat("b", 64), Now: now}
+}
 
 type fakeAuditManager struct {
 	listed                []audit.Stored

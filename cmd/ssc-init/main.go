@@ -237,6 +237,15 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			Collectors:    configuredCollectors,
 		}
 		app.BaselineScanner = scan.NewService(orchestrator, snapshots, environment.Now, nil, environment)
+		app.DeviceID, err = loadDeviceID(paths.DataDir)
+		if err == nil {
+			auditManager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: environment.Now, Random: rand.Reader, Render: audit.ReportText}
+			app.AuditService = audit.Service{Manager: auditManager, Product: "ssc-init", Version: version, DeviceID: app.DeviceID, Now: environment.Now, Random: rand.Reader}
+			app.Now, app.Random = environment.Now, rand.Reader
+		}
+		if tiManager, policyManager, managerErr := findingManagers(home); managerErr == nil {
+			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+		}
 		policyContents, policyErr := os.ReadFile(paths.Install().PolicyFile)
 		if policyErr == nil {
 			app.PolicyDocument, app.PolicyLoadError = policy.Load(policyContents)
@@ -357,6 +366,12 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		tiManager, policyManager, managerErr := findingManagers(home)
 		if managerErr == nil {
 			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+		}
+		app.DeviceID, err = loadDeviceID(paths.DataDir)
+		if err == nil {
+			auditManager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: environment.Now, Random: rand.Reader, Render: audit.ReportText}
+			app.AuditService = audit.Service{Manager: auditManager, Product: "ssc-init", Version: version, DeviceID: app.DeviceID, Now: environment.Now, Random: rand.Reader}
+			app.Now, app.Random = environment.Now, rand.Reader
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	default:
