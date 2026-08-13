@@ -290,9 +290,11 @@ func normalizeRecord(record *Record) {
 
 func normalizeCollectorResult(result *model.CollectorResult) {
 	sort.Slice(result.Assets, func(left, right int) bool { return result.Assets[left].ID < result.Assets[right].ID })
+	result.Assets = dedupeSorted(result.Assets, func(asset model.Asset) string { return asset.ID })
 	sort.Slice(result.Relationships, func(left, right int) bool {
 		return relationshipKey(result.Relationships[left]) < relationshipKey(result.Relationships[right])
 	})
+	result.Relationships = dedupeSorted(result.Relationships, relationshipKey)
 	sort.Slice(result.Errors, func(left, right int) bool {
 		return coverageErrorKey(result.Errors[left]) < coverageErrorKey(result.Errors[right])
 	})
@@ -300,6 +302,7 @@ func normalizeCollectorResult(result *model.CollectorResult) {
 		return targetCoverageKey(result.Targets[left]) < targetCoverageKey(result.Targets[right])
 	})
 	sort.Slice(result.Observations, func(left, right int) bool { return result.Observations[left].ID < result.Observations[right].ID })
+	result.Observations = dedupeSorted(result.Observations, func(observation model.Observation) string { return observation.ID })
 	for index := range result.Assets {
 		normalizeAsset(&result.Assets[index])
 	}
@@ -319,6 +322,7 @@ func normalizeCollectorResult(result *model.CollectorResult) {
 	sort.Slice(result.Targets, func(left, right int) bool {
 		return targetCoverageKey(result.Targets[left]) < targetCoverageKey(result.Targets[right])
 	})
+	result.Targets = dedupeSorted(result.Targets, targetCoverageKey)
 }
 
 func targetInstanceToken(value string) string {
@@ -435,6 +439,20 @@ func normalizeEvidenceErrors(values []model.EvidenceError) []model.EvidenceError
 			continue
 		}
 		value.Message = ""
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func dedupeSorted[T any](values []T, key func(T) string) []T {
+	if len(values) < 2 {
+		return values
+	}
+	normalized := values[:1]
+	for _, value := range values[1:] {
+		if key(normalized[len(normalized)-1]) == key(value) {
+			continue
+		}
 		normalized = append(normalized, value)
 	}
 	return normalized

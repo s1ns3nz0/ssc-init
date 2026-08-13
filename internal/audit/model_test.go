@@ -109,6 +109,10 @@ func TestBuildNormalizesAllAuditTimestampsAndSlices(t *testing.T) {
 
 func TestBuildRetokenizesUnsafeProducerReferencesAndDeduplicatesErrors(t *testing.T) {
 	input := richInputRecord(time.UTC)
+	input.Scan.Coverage[0].Assets = append(input.Scan.Coverage[0].Assets, input.Scan.Coverage[0].Assets[0])
+	input.Scan.Coverage[0].Observations = append(input.Scan.Coverage[0].Observations, input.Scan.Coverage[0].Observations[0])
+	input.Scan.Coverage[0].Relationships = append(input.Scan.Coverage[0].Relationships, input.Inventory.Relationships[0], input.Inventory.Relationships[0])
+	input.Scan.Coverage[0].Targets = append(input.Scan.Coverage[0].Targets, input.Scan.Coverage[0].Targets[0])
 	unsafeID := "agent-skill:claude:Writing Hookify Rules"
 	replaceReference := func(value *string) {
 		if *value == "asset:one" {
@@ -129,9 +133,11 @@ func TestBuildRetokenizesUnsafeProducerReferencesAndDeduplicatesErrors(t *testin
 		replaceReference(&input.Inventory.Evidence[index].AssetID)
 	}
 	input.Inventory.Evidence[0].Errors = []model.EvidenceError{{Code: "symlink_rejected", Message: "first private path"}, {Code: "symlink_rejected", Message: "second private path"}}
-	for index := range input.Inventory.Relationships {
-		replaceReference(&input.Inventory.Relationships[index].From)
-		replaceReference(&input.Inventory.Relationships[index].To)
+	for _, relationships := range [][]model.Relationship{input.Inventory.Relationships, input.Scan.Coverage[0].Relationships} {
+		for index := range relationships {
+			replaceReference(&relationships[index].From)
+			replaceReference(&relationships[index].To)
+		}
 	}
 	for _, findings := range [][]model.Finding{input.Inventory.Findings, input.Findings} {
 		for index := range findings {
@@ -177,6 +183,9 @@ func TestBuildRetokenizesUnsafeProducerReferencesAndDeduplicatesErrors(t *testin
 	}
 	if len(got) != 1 || got[0].Code != "symlink_rejected" || got[0].Message != "" {
 		t.Fatalf("evidence errors were not normalized: %+v", got)
+	}
+	if result := record.Coverage[0]; len(result.Assets) != 2 || len(result.Observations) != 2 || len(result.Relationships) != 1 || len(result.Targets) != 1 {
+		t.Fatalf("collector graph duplicates remain: assets=%d observations=%d relationships=%d targets=%d", len(result.Assets), len(result.Observations), len(result.Relationships), len(result.Targets))
 	}
 }
 
