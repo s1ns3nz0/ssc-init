@@ -14,7 +14,7 @@ func TestCoordinateMatchesCollectorAndOSVIdentities(t *testing.T) {
 	}{
 		{model.Asset{ID: "pkg:npm/%40scope/tool@2.0.0", Type: model.AssetPackage, Name: "@scope/tool", Version: "2.0.0"}, "npm", "@scope/tool", "pkg:npm/%40scope/tool"},
 		{model.Asset{ID: "pkg:pypi/Foo_Bar@1.0.0", Type: model.AssetPackage, Name: "Foo_Bar", Version: "1.0.0"}, "PyPI", "Foo_Bar", "pkg:pypi/foo-bar"},
-		{model.Asset{ID: "pkg:golang/example.com/mod@v1.2.0", Type: model.AssetPackage, Name: "example.com/mod", Version: "v1.2.0"}, "Go", "example.com/mod", "pkg:golang/example.com/mod"},
+		{model.Asset{ID: "pkg:go/example.com/mod@v1.2.0", Type: model.AssetPackage, Name: "example.com/mod", Version: "v1.2.0"}, "Go", "example.com/mod", "pkg:go/example.com/mod"},
 		{model.Asset{ID: "pkg:cargo/serde_core@1.0.0", Type: model.AssetPackage, Name: "serde_core", Version: "1.0.0"}, "crates.io", "serde_core", "pkg:cargo/serde_core"},
 	}
 	for _, tc := range cases {
@@ -22,6 +22,26 @@ func TestCoordinateMatchesCollectorAndOSVIdentities(t *testing.T) {
 		gotOSV, okOSV := FromOSV(tc.ecosystem, tc.name)
 		if !okAsset || !okOSV || gotAsset != tc.want || gotOSV != tc.want {
 			t.Fatalf("asset=%q osv=%q", gotAsset, gotOSV)
+		}
+	}
+}
+
+func TestCoordinateRejectsPortableAbsoluteGoModulePaths(t *testing.T) {
+	cases := []struct {
+		name, assetID string
+	}{
+		{"C:/private/module", "pkg:go/C:/private/module@v1.0.0"},
+		{"C:\\private\\module", "pkg:go/C%3A%5Cprivate%5Cmodule@v1.0.0"},
+		{"//server/share", "pkg:go///server/share@v1.0.0"},
+		{"/private/module", "pkg:go//private/module@v1.0.0"},
+	}
+	for _, tc := range cases {
+		if coordinate, ok := FromOSV("Go", tc.name); ok || coordinate != "" {
+			t.Fatalf("accepted OSV name=%q coordinate=%q", tc.name, coordinate)
+		}
+		asset := model.Asset{ID: tc.assetID, Type: model.AssetPackage, Name: tc.name, Version: "v1.0.0"}
+		if coordinate, ok := Coordinate(asset); ok || coordinate != "" {
+			t.Fatalf("accepted asset=%+v coordinate=%q", asset, coordinate)
 		}
 	}
 }

@@ -60,6 +60,15 @@ func TestCorrelateMatchesVersionIndependentCoordinate(t *testing.T) {
 	}
 }
 
+func TestCorrelateMatchesProjectCollectorGoCoordinate(t *testing.T) {
+	asset := model.Asset{ID: "pkg:go/example.com/demo@v1.2.3", Type: model.AssetPackage, Name: "example.com/demo", Version: "v1.2.3"}
+	active := activeTI([]bundle.TIRecord{{ID: "go-range", AssetID: "pkg:go/example.com/demo", VersionRange: ">=1.0.0 <2.0.0", Verdict: "needs-review", Confidence: "medium"}})
+	got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC())
+	if len(got) != 1 || len(got[0].IntelligenceIDs) != 1 || got[0].IntelligenceIDs[0] != "go-range" {
+		t.Fatalf("findings=%+v", got)
+	}
+}
+
 func TestCorrelateMergesCoordinateRecordsDeterministicallyByStrongestVerdict(t *testing.T) {
 	asset := model.Asset{ID: "pkg:npm/example@1.0.0", Type: model.AssetPackage, Name: "example", Version: "1.0.0", SHA256: strings.Repeat("a", 64)}
 	records := []bundle.TIRecord{

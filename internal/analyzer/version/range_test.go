@@ -10,6 +10,7 @@ func TestMatchSupportsClosedPackageEcosystemsAndCommonRanges(t *testing.T) {
 		{"pkg:npm/example@1.5.0", "1.5.0", ">=1.2.0 <2.0.0", true},
 		{"pkg:cargo/example@2.1.0", "2.1.0", "^2.0.0", true},
 		{"pkg:golang/example@v1.9.1", "v1.9.1", "~1.9.0", true},
+		{"pkg:go/example.com/demo@v1.2.3", "v1.2.3", ">=1.0.0 <2.0.0", true},
 		{"pkg:pypi/example@3.11.2", "3.11.2", ">=3.10,<3.11", false},
 		{"pkg:brew/example@1.4.0", "1.4.0", "1.4.x", true},
 		{"pkg:npm/example@2.0.0", "2.0.0", "<2.0.0 || >=3.0.0", false},

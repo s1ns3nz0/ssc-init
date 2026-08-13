@@ -41,7 +41,7 @@ func FromOSV(ecosystem, name string) (string, bool) {
 	case "PyPI":
 		return coordinate("pypi", name)
 	case "Go":
-		return coordinate("golang", name)
+		return coordinate("go", name)
 	case "crates.io":
 		return coordinate("cargo", name)
 	default:
@@ -86,7 +86,7 @@ func coordinate(purlType, name string) (string, bool) {
 			return "", false
 		}
 		name = normalizePyPI(name)
-	case "golang":
+	case "go":
 	case "cargo":
 		if len(segments) != 1 {
 			return "", false
@@ -115,7 +115,7 @@ func decodeName(value string) (string, bool) {
 
 func supportedPURLType(value string) bool {
 	switch value {
-	case "npm", "pypi", "golang", "cargo":
+	case "npm", "pypi", "go", "cargo":
 		return true
 	default:
 		return false
@@ -127,7 +127,11 @@ func unsafeIdentity(value string) bool {
 }
 
 func unsafeName(value string) bool {
-	return value == "" || strings.HasPrefix(value, "/") || strings.ContainsAny(value, "\\?#") || containsControl(value)
+	return value == "" || strings.HasPrefix(value, "/") || driveQualifiedPath(value) || strings.ContainsAny(value, "\\?#") || containsControl(value)
+}
+
+func driveQualifiedPath(value string) bool {
+	return len(value) >= 3 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':' && value[2] == '/'
 }
 
 func containsControl(value string) bool {
