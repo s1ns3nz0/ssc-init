@@ -32,7 +32,7 @@ func TestScanPrettyArchivesAndRendersTheSameCompleteRecord(t *testing.T) {
 		return scanResult, model.Inventory{}, model.Delta{}, true, nil
 	})}
 	var out, errOut bytes.Buffer
-	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty", "--label", "audit mac"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "SSC Init audit") || !strings.Contains(out.String(), "state      saved") {
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty", "--label", "audit mac"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "SSC Init security review") || !strings.Contains(out.String(), "state      saved") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	listed, err := manager.List(context.Background())
@@ -217,7 +217,7 @@ func TestAuditListShowVerifyAndExportUseInjectedManager(t *testing.T) {
 	t.Run("show", func(t *testing.T) {
 		manager := &fakeAuditManager{verified: verified}
 		var out, errOut bytes.Buffer
-		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "show", record.Run.ID, "--pretty"}, &out, &errOut); code != 0 || manager.openCalls != 1 || manager.listCalls != 0 || manager.exportCalls != 0 || !strings.Contains(out.String(), "SSC Init audit") {
+		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "show", record.Run.ID, "--pretty"}, &out, &errOut); code != 0 || manager.openCalls != 1 || manager.listCalls != 0 || manager.exportCalls != 0 || !strings.Contains(out.String(), "SSC Init security review") {
 			t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
 		}
 	})
@@ -260,7 +260,7 @@ func TestStatusPrettyPrefersLatestValidAuditButKeepsLegacyFallback(t *testing.T)
 	stored := audit.Stored{RunID: record.Run.ID, Label: record.Run.Label, SafePath: "$SSC_INIT_DATA/audit/run.zip", SHA256: verified.ZIPSHA256, State: record.State, Profile: record.Profile, CreatedAt: record.Run.FinishedAt, Valid: true}
 	manager := &fakeAuditManager{listed: []audit.Stored{stored}, verified: verified}
 	var out, errOut bytes.Buffer
-	if code := (App{AuditManager: manager}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 || manager.listCalls != 1 || manager.openCalls != 1 || !strings.Contains(out.String(), "SSC Init audit") {
+	if code := (App{AuditManager: manager}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 || manager.listCalls != 1 || manager.openCalls != 1 || !strings.Contains(out.String(), "SSC Init security review") {
 		t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
 	}
 	legacy := &cliMemorySnapshots{latest: model.Snapshot{Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}}, hasLatest: true}
@@ -350,6 +350,15 @@ func TestRunFindingsUsesLatestSnapshotAndClosedExitCodes(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"findings", "--json"}, &out, &errOut); code != 4 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.findings.v1"`) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	app.Color = true
+	if code := app.Run(context.Background(), []string{"findings", "--pretty"}, &out, &errOut); code != 4 || !strings.Contains(out.String(), "ACTION REQUIRED") || !strings.Contains(out.String(), "bad") || !strings.Contains(out.String(), "\x1b[31m") || strings.HasPrefix(strings.TrimSpace(out.String()), "{") {
+		t.Fatalf("pretty code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := app.Run(context.Background(), []string{"findings", "--json"}, &out, &errOut); code != 4 || strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("json code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 }
 

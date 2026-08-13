@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
@@ -54,6 +55,7 @@ var (
 	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
 	bundleKeysForRun             = bundle.KeyRegistry{}
 	adapterInputForRun io.Reader = os.Stdin
+	terminalForColor             = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
 )
 
 func main() {
@@ -74,7 +76,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, "unsupported operating system")
 		return 2
 	}
-	app := cli.App{Version: version}
+	app := cli.App{Version: version, Color: colorEnabled(stdout)}
 	switch options.Command {
 	case "version":
 		return app.RunOptions(ctx, options, stdout, stderr)
@@ -394,6 +396,17 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func colorEnabled(writer io.Writer) bool {
+	if _, disabled := os.LookupEnv("NO_COLOR"); disabled {
+		return false
+	}
+	file, ok := writer.(*os.File)
+	if !ok {
+		return false
+	}
+	return terminalForColor(file)
 }
 
 const (

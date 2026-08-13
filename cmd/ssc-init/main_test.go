@@ -27,6 +27,38 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
+func TestColorEnabledRequiresTerminalAndHonorsNoColor(t *testing.T) {
+	oldTerminal := terminalForColor
+	oldNoColor, hadNoColor := os.LookupEnv("NO_COLOR")
+	t.Cleanup(func() {
+		terminalForColor = oldTerminal
+		if hadNoColor {
+			_ = os.Setenv("NO_COLOR", oldNoColor)
+		} else {
+			_ = os.Unsetenv("NO_COLOR")
+		}
+	})
+	if err := os.Unsetenv("NO_COLOR"); err != nil {
+		t.Fatal(err)
+	}
+	terminalForColor = func(*os.File) bool { return true }
+	file, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if !colorEnabled(file) {
+		t.Fatal("terminal output did not enable color")
+	}
+	t.Setenv("NO_COLOR", "1")
+	if colorEnabled(file) {
+		t.Fatal("NO_COLOR did not disable terminal color")
+	}
+	if colorEnabled(&bytes.Buffer{}) {
+		t.Fatal("redirected output enabled color")
+	}
+}
+
 func TestAuditVerifyIsOfflineAndStatusAuditAvoidsStore(t *testing.T) {
 	oldGOOS, oldHost, oldOpen := runtimeGOOS, hostPathsForRun, openStoreForRun
 	t.Cleanup(func() {
@@ -69,7 +101,7 @@ func TestAuditVerifyIsOfflineAndStatusAuditAvoidsStore(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runWithIO(context.Background(), []string{"status", "--pretty"}, &stdout, &stderr); code != 0 || hostCalls != 1 || storeCalls != 0 || !strings.Contains(stdout.String(), "SSC Init audit") {
+	if code := runWithIO(context.Background(), []string{"status", "--pretty"}, &stdout, &stderr); code != 0 || hostCalls != 1 || storeCalls != 0 || !strings.Contains(stdout.String(), "SSC Init security review") {
 		t.Fatalf("status code=%d hosts=%d stores=%d out=%q err=%q", code, hostCalls, storeCalls, stdout.String(), stderr.String())
 	}
 }

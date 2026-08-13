@@ -143,6 +143,7 @@ const (
 // App holds CLI configuration.
 type App struct {
 	Version          string
+	Color            bool
 	BaselineScanner  BaselineScanner
 	StatusReader     StatusReader
 	Doctor           Doctor
@@ -226,7 +227,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		}
 		if options.Pretty {
 			if outcome.Record.SchemaVersion != "" {
-				if err := audit.WritePretty(stdout, outcome.Record, outcome.Stored); err != nil {
+				if err := audit.WritePrettyStyled(stdout, outcome.Record, outcome.Stored, audit.Style{Color: a.Color}); err != nil {
 					fmt.Fprintln(stderr, "failed to write baseline output")
 					return 1
 				}
@@ -258,7 +259,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 						fmt.Fprintln(stderr, "audit archive is invalid")
 						return 1
 					}
-					if err := audit.WritePretty(stdout, verified.Record, &stored); err != nil {
+					if err := audit.WritePrettyStyled(stdout, verified.Record, &stored, audit.Style{Color: a.Color}); err != nil {
 						fmt.Fprintln(stderr, "failed to write status output")
 						return 1
 					}
@@ -330,7 +331,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "failed to evaluate findings")
 			return 1
 		}
-		data := report.FindingData{DeviceID: a.DeviceID, Intelligence: result.Intelligence, Policy: result.Policy, Findings: result.Findings}
+		data := report.FindingData{DeviceID: a.DeviceID, Intelligence: result.Intelligence, Policy: result.Policy, Findings: result.Findings, Assets: snapshot.Inventory.Assets}
 		if options.WebhookURL != "" {
 			if a.Webhook == nil {
 				fmt.Fprintln(stderr, "webhook delivery is unavailable")
@@ -342,7 +343,12 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				return 1
 			}
 		}
-		writeErr := report.WriteFindingsJSON(stdout, data, options.Pretty)
+		var writeErr error
+		if options.Pretty {
+			writeErr = report.WriteFindingsPretty(stdout, data, a.Color)
+		} else {
+			writeErr = report.WriteFindingsJSON(stdout, data, false)
+		}
 		if writeErr != nil {
 			fmt.Fprintln(stderr, "failed to write findings output")
 			return 1
@@ -724,7 +730,7 @@ func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Wr
 			return 0
 		}
 		if options.AuditSection != "" {
-			if err := audit.WriteSection(stdout, verified.Record, audit.Section(options.AuditSection)); err != nil {
+			if err := audit.WriteSectionStyled(stdout, verified.Record, audit.Section(options.AuditSection), audit.Style{Color: a.Color}); err != nil {
 				fmt.Fprintln(stderr, "failed to write audit output")
 				return 1
 			}
@@ -734,7 +740,7 @@ func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Wr
 		if verified.SafePath != "" {
 			stored = &audit.Stored{SafePath: verified.SafePath, SHA256: verified.ZIPSHA256, Valid: true}
 		}
-		if err := audit.WritePretty(stdout, verified.Record, stored); err != nil {
+		if err := audit.WritePrettyStyled(stdout, verified.Record, stored, audit.Style{Color: a.Color}); err != nil {
 			fmt.Fprintln(stderr, "failed to write audit output")
 			return 1
 		}

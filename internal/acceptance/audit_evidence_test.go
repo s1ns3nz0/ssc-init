@@ -119,12 +119,12 @@ func TestAuditEvidenceLifecycle(t *testing.T) {
 func assertOrderedAuditSections(t *testing.T, output string) {
 	t.Helper()
 	position := -1
-	for _, section := range []string{"SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE"} {
-		next := strings.Index(output, section)
-		if next <= position {
+	for _, section := range []string{"ASSESSMENT", "PRIORITY FINDINGS", "NEXT STEPS", "SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE"} {
+		next := strings.Index(output[position+1:], section)
+		if next < 0 {
 			t.Fatalf("section %q is missing or out of order: %q", section, output)
 		}
-		position = next
+		position += next + 1
 	}
 }
 

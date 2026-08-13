@@ -64,7 +64,7 @@ ssc-init schedule install --json
 ssc-init schedule remove --json
 ```
 
-`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. Automatic project discovery reads only the fixed, size- and count-bounded local metadata sources above, never follows metadata symlinks, and records neither raw paths, workspace URIs, workspace IDs, product names, nor Git worktree IDs. Supplying one or more `--project-root` values is an exact override: automatic metadata is not read and only those roots are scanned. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline` and `status` accept `--pretty` in place of `--json` to render deterministic human-readable summary tables (names, statuses, counts, and error codes only — never digests, paths, or contents); JSON remains the machine contract. The `scan --baseline --pretty` `DELTA` section uses the same `NEW`/`CHANGED`/`UNVERIFIED`/`UPGRADED`/`REMOVED` ladder as `hook` and always prints, stating `(no changes)` when the snapshot is unchanged.
+`doctor` reports runtime and optional-tool availability without reading asset contents. A default `scan --baseline` performs passive filesystem discovery plus bounded local content evidence and persists one baseline; it executes no discovered content, runs no external command, and performs no network access. Automatic project discovery reads only the fixed, size- and count-bounded local metadata sources above, never follows metadata symlinks, and records neither raw paths, workspace URIs, workspace IDs, product names, nor Git worktree IDs. Supplying one or more `--project-root` values is an exact override: automatic metadata is not read and only those roots are scanned. Package/Docker and point-in-time process/listener command probes are disabled unless `--external-probes` is supplied. `status` reads the latest persisted inventory snapshot; snapshots from earlier schema versions stay readable but are reported as `legacyInventory` without any evidence claim. `scan --baseline`, `status`, and `findings` accept `--pretty` in place of `--json`. The human view leads with an assessment, up to five priority findings, concrete next commands, and then detailed counts; JSON remains the machine contract. On a terminal, known-malicious/action-required states are red, review or partial states are yellow, and successfully saved evidence or complete coverage is green. Color is automatically disabled for pipes, redirected output, JSON, audit archives, and whenever `NO_COLOR` is set. Green describes completed collection or verified storage only; it never claims the laptop or an asset is safe.
 
 `hook` is an advisory session hook: it runs one default baseline scan and
 prints one line per changed asset (asset types, names, hosts, versions, and
@@ -118,8 +118,9 @@ $HOME/Library/Application Support/SSC Init/state.db
 
 Every completed, partial, or failed scan also attempts to save a deterministic
 audit ZIP under `$HOME/Library/Application Support/SSC Init/audit`. The pretty
-screen uses the fixed `SUMMARY`, `FINDINGS`, `CHANGES`, `COVERAGE`, `ASSETS`,
-and `AUDIT EVIDENCE` layout. Archives are kept for 30 days and within a 1-GiB
+screen uses the fixed action-first `ASSESSMENT`, `PRIORITY FINDINGS`, `NEXT
+STEPS`, `SUMMARY`, `FINDINGS`, `CHANGES`, `COVERAGE`, `ASSETS`, and `AUDIT
+EVIDENCE` layout. Archives are kept for 30 days and within a 1-GiB
 budget; the newest valid archive is always preserved. `audit verify` and the
 other audit commands work offline, independently of `state.db`.
 

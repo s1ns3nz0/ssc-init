@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ type FindingData struct {
 	Intelligence string
 	Policy       string
 	Findings     []model.Finding
+	Assets       []model.Asset
 }
 
 type findingPayload struct {
@@ -43,4 +45,76 @@ func WriteFindingsJSON(writer io.Writer, data FindingData, pretty bool) error {
 		encoder.SetIndent("", "  ")
 	}
 	return encoder.Encode(findingPayload{SchemaVersion: "ssc-init.findings.v1", DeviceID: data.DeviceID, Intelligence: data.Intelligence, Policy: data.Policy, Findings: findings})
+}
+
+func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
+	if writer == nil {
+		return errors.New("invalid findings output")
+	}
+	var validation strings.Builder
+	if err := WriteFindingsJSON(&validation, data, false); err != nil {
+		return err
+	}
+	assets := make(map[string]string, len(data.Assets))
+	for _, asset := range data.Assets {
+		if asset.ID == "" || asset.Name == "" || privacy.ContainsSensitiveValue(asset.Name) {
+			return errors.New("invalid finding asset")
+		}
+		assets[asset.ID] = asset.Name
+	}
+	rows := append([]model.Finding(nil), data.Findings...)
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Level != rows[j].Level {
+			return rows[i].Level > rows[j].Level
+		}
+		return rows[i].ID < rows[j].ID
+	})
+	status := "NO ACTION IDENTIFIED"
+	statusColor := "\x1b[32m"
+	for _, finding := range rows {
+		if finding.Verdict == model.VerdictKnownMalicious || finding.Verdict == model.VerdictBehaviorMalicious {
+			status, statusColor = "ACTION REQUIRED", "\x1b[31m"
+			break
+		}
+		if finding.Verdict == model.VerdictSuspicious {
+			status, statusColor = "INVESTIGATION RECOMMENDED", "\x1b[33m"
+		} else if finding.Verdict == model.VerdictNeedsReview && status == "NO ACTION IDENTIFIED" {
+			status, statusColor = "REVIEW RECOMMENDED", "\x1b[33m"
+		}
+	}
+	paint := func(value, code string) string {
+		if !color {
+			return value
+		}
+		return code + value + "\x1b[0m"
+	}
+	if _, err := fmt.Fprintln(writer, "SSC Init findings\n\nASSESSMENT\n  status      "+paint(status, statusColor)+"\n\nPRIORITY FINDINGS\n  PRIORITY    ASSET                CLASSIFICATION          CONFIDENCE  BASIS"); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		_, err := fmt.Fprintln(writer, "  (none)")
+		return err
+	}
+	for _, finding := range rows {
+		priority := "REVIEW"
+		code := "\x1b[33m"
+		if finding.Verdict == model.VerdictKnownMalicious || finding.Verdict == model.VerdictBehaviorMalicious {
+			priority, code = "IMMEDIATE", "\x1b[31m"
+		}
+		name := assets[finding.AssetID]
+		if name == "" {
+			name = "(redacted)"
+		}
+		classification := strings.ToUpper(strings.ReplaceAll(string(finding.Verdict), "-", " "))
+		basis := "LOCAL ANALYSIS"
+		if len(finding.IntelligenceIDs) > 0 {
+			basis = "VERIFIED INTELLIGENCE"
+		} else if len(finding.RuleIDs) > 0 {
+			basis = "POLICY / LOCAL RULE"
+		}
+		if _, err := fmt.Fprintf(writer, "  %-11s %-20s %-23s %-11s %s\n", priority, name, paint(classification, code), strings.ToUpper(string(finding.Confidence)), basis); err != nil {
+			return err
+		}
+	}
+	return nil
 }
