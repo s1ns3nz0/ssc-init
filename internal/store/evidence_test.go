@@ -29,6 +29,22 @@ func finalizeTestEvidence(t *testing.T, value model.ContentEvidence) model.Conte
 	return finalized
 }
 
+func TestValidEvidenceKindSubjectAcceptsSurfaceProducerPairs(t *testing.T) {
+	for _, testCase := range []struct {
+		kind    model.EvidenceKind
+		subject string
+	}{
+		{model.EvidenceFileSHA256, model.EvidenceSubjectShellStartup},
+		{model.EvidenceFileSHA256, model.EvidenceSubjectGitHook},
+		{model.EvidenceFileSHA256, model.EvidenceSubjectLaunchConfig},
+		{model.EvidenceSemanticSHA256, model.EvidenceSubjectCredentialConfig},
+	} {
+		if !validEvidenceKindSubject(testCase.kind, testCase.subject) {
+			t.Errorf("producer pair kind=%q subject=%q rejected", testCase.kind, testCase.subject)
+		}
+	}
+}
+
 // validV3Snapshot builds a v3-shaped snapshot containing complete, partial,
 // unsupported, and skipped evidence with nil-error, populated-error,
 // empty-error, nil-metadata, populated-metadata, and empty-metadata shapes.

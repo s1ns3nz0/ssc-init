@@ -375,11 +375,13 @@ func validEvidenceKindSubject(kind model.EvidenceKind, subject string) bool {
 	case model.EvidenceFileSHA256:
 		return subject == model.EvidenceSubjectManifest || subject == model.EvidenceSubjectSkillDocument ||
 			subject == model.EvidenceSubjectEntrypointMain || subject == model.EvidenceSubjectEntrypointBrowser ||
+			subject == model.EvidenceSubjectShellStartup || subject == model.EvidenceSubjectGitHook ||
+			subject == model.EvidenceSubjectLaunchConfig ||
 			model.ProjectEvidenceSubject(subject)
 	case model.EvidenceTreeSHA256:
 		return subject == model.EvidenceSubjectPayloadTree
 	case model.EvidenceSemanticSHA256:
-		return subject == model.EvidenceSubjectMCPDeclaration
+		return subject == model.EvidenceSubjectMCPDeclaration || subject == model.EvidenceSubjectCredentialConfig
 	case model.EvidencePackageContent:
 		return subject == model.EvidenceSubjectPackageContent
 	case model.EvidenceContainerIdentity:
