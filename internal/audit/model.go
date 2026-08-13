@@ -222,6 +222,7 @@ func normalizeRun(run Run) Run {
 
 func normalizeRecord(record *Record) {
 	record.Run = normalizeRun(record.Run)
+	normalizeInternalReferences(record)
 	sort.Slice(record.Inventory.Assets, func(left, right int) bool {
 		return record.Inventory.Assets[left].ID < record.Inventory.Assets[right].ID
 	})
@@ -341,11 +342,102 @@ func normalizeObservation(observation *model.Observation) {
 
 func normalizeEvidence(evidence *model.ContentEvidence) {
 	evidence.Metadata = nil
-	sort.Slice(evidence.Errors, func(left, right int) bool { return evidence.Errors[left].Code < evidence.Errors[right].Code })
+	evidence.Errors = normalizeEvidenceErrors(evidence.Errors)
 }
 
 func normalizeEvidenceTarget(target *model.EvidenceTargetResult) {
-	sort.Slice(target.Errors, func(left, right int) bool { return target.Errors[left].Code < target.Errors[right].Code })
+	target.Errors = normalizeEvidenceErrors(target.Errors)
+}
+
+func normalizeInternalReferences(record *Record) {
+	token := func(value string) string {
+		if value == "" || safeIdentifier(value) {
+			return value
+		}
+		digest := sha256.Sum256([]byte(value))
+		return "asset:sha256:" + hex.EncodeToString(digest[:])
+	}
+	normalizeAssets := func(assets []model.Asset) {
+		for index := range assets {
+			assets[index].ID = token(assets[index].ID)
+		}
+	}
+	normalizeObservations := func(observations []model.Observation) {
+		for index := range observations {
+			observations[index].ID = token(observations[index].ID)
+			observations[index].AssetID = token(observations[index].AssetID)
+			observations[index].ProjectID = token(observations[index].ProjectID)
+		}
+	}
+	normalizeRelationships := func(relationships []model.Relationship) {
+		for index := range relationships {
+			relationships[index].From = token(relationships[index].From)
+			relationships[index].To = token(relationships[index].To)
+		}
+	}
+	normalizeFindings := func(findings []model.Finding) {
+		for index := range findings {
+			findings[index].ID = token(findings[index].ID)
+			findings[index].AssetID = token(findings[index].AssetID)
+			for evidenceIndex := range findings[index].EvidenceIDs {
+				findings[index].EvidenceIDs[evidenceIndex] = token(findings[index].EvidenceIDs[evidenceIndex])
+			}
+		}
+	}
+	normalizeAssets(record.Inventory.Assets)
+	normalizeObservations(record.Inventory.Observations)
+	for index := range record.Inventory.Evidence {
+		record.Inventory.Evidence[index].ID = token(record.Inventory.Evidence[index].ID)
+		record.Inventory.Evidence[index].AssetID = token(record.Inventory.Evidence[index].AssetID)
+		record.Inventory.Evidence[index].ObservationID = token(record.Inventory.Evidence[index].ObservationID)
+	}
+	normalizeRelationships(record.Inventory.Relationships)
+	normalizeFindings(record.Inventory.Findings)
+	for index := range record.Inventory.AnalyzerFacts {
+		record.Inventory.AnalyzerFacts[index].ID = token(record.Inventory.AnalyzerFacts[index].ID)
+		record.Inventory.AnalyzerFacts[index].AssetID = token(record.Inventory.AnalyzerFacts[index].AssetID)
+		record.Inventory.AnalyzerFacts[index].EvidenceID = token(record.Inventory.AnalyzerFacts[index].EvidenceID)
+	}
+	normalizeFindings(record.Findings)
+	for resultIndex := range record.Coverage {
+		result := &record.Coverage[resultIndex]
+		normalizeAssets(result.Assets)
+		normalizeObservations(result.Observations)
+		normalizeRelationships(result.Relationships)
+		for targetIndex := range result.Targets {
+			result.Targets[targetIndex].TargetID = token(result.Targets[targetIndex].TargetID)
+		}
+	}
+	for index := range record.Changes.Changes {
+		record.Changes.Changes[index].EntityID = token(record.Changes.Changes[index].EntityID)
+	}
+	if record.EvidenceCoverage != nil {
+		for index := range record.EvidenceCoverage.Targets {
+			target := &record.EvidenceCoverage.Targets[index]
+			target.TargetID = token(target.TargetID)
+			target.AssetID = token(target.AssetID)
+			target.ObservationID = token(target.ObservationID)
+			target.EvidenceID = token(target.EvidenceID)
+		}
+	}
+}
+
+func normalizeEvidenceErrors(values []model.EvidenceError) []model.EvidenceError {
+	if len(values) == 0 {
+		return values
+	}
+	sort.Slice(values, func(left, right int) bool {
+		return values[left].Code+"\x00"+values[left].Message < values[right].Code+"\x00"+values[right].Message
+	})
+	normalized := values[:0]
+	for _, value := range values {
+		if len(normalized) != 0 && normalized[len(normalized)-1].Code == value.Code {
+			continue
+		}
+		value.Message = ""
+		normalized = append(normalized, value)
+	}
+	return normalized
 }
 
 func normalizeFinding(finding *model.Finding) {

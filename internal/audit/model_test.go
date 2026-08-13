@@ -107,6 +107,79 @@ func TestBuildNormalizesAllAuditTimestampsAndSlices(t *testing.T) {
 	}
 }
 
+func TestBuildRetokenizesUnsafeProducerReferencesAndDeduplicatesErrors(t *testing.T) {
+	input := richInputRecord(time.UTC)
+	unsafeID := "agent-skill:claude:Writing Hookify Rules"
+	replaceReference := func(value *string) {
+		if *value == "asset:one" {
+			*value = unsafeID
+		}
+	}
+	for _, assets := range [][]model.Asset{input.Inventory.Assets, input.Scan.Coverage[0].Assets} {
+		for index := range assets {
+			replaceReference(&assets[index].ID)
+		}
+	}
+	for _, observations := range [][]model.Observation{input.Inventory.Observations, input.Scan.Coverage[0].Observations} {
+		for index := range observations {
+			replaceReference(&observations[index].AssetID)
+		}
+	}
+	for index := range input.Inventory.Evidence {
+		replaceReference(&input.Inventory.Evidence[index].AssetID)
+	}
+	input.Inventory.Evidence[0].Errors = []model.EvidenceError{{Code: "symlink_rejected", Message: "first private path"}, {Code: "symlink_rejected", Message: "second private path"}}
+	for index := range input.Inventory.Relationships {
+		replaceReference(&input.Inventory.Relationships[index].From)
+		replaceReference(&input.Inventory.Relationships[index].To)
+	}
+	for _, findings := range [][]model.Finding{input.Inventory.Findings, input.Findings} {
+		for index := range findings {
+			replaceReference(&findings[index].AssetID)
+		}
+	}
+	for index := range input.Scan.EvidenceCoverage.Targets {
+		replaceReference(&input.Scan.EvidenceCoverage.Targets[index].AssetID)
+	}
+	for index := range input.Delta.Changes {
+		replaceReference(&input.Delta.Changes[index].EntityID)
+	}
+
+	record, err := Build(input.Scan, input.Inventory, input.Delta, input.Findings, validRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := ""
+	for _, asset := range record.Inventory.Assets {
+		if asset.Name == "package" {
+			token = asset.ID
+		}
+	}
+	if token == unsafeID || !strings.HasPrefix(token, "asset:sha256:") {
+		t.Fatalf("unsafe producer ID was not retokenized: %q", token)
+	}
+	coverageToken := ""
+	for _, asset := range record.Coverage[0].Assets {
+		if asset.Name == "package" {
+			coverageToken = asset.ID
+		}
+	}
+	for _, value := range []string{record.Inventory.Observations[0].AssetID, record.Inventory.Evidence[0].AssetID, record.Inventory.Relationships[0].From, record.Findings[0].AssetID, coverageToken, record.EvidenceCoverage.Targets[0].AssetID, record.Changes.Changes[0].EntityID} {
+		if value != token {
+			t.Fatalf("graph reference %q does not match token %q", value, token)
+		}
+	}
+	var got []model.EvidenceError
+	for _, evidence := range record.Inventory.Evidence {
+		if evidence.ID == "evidence:two" {
+			got = evidence.Errors
+		}
+	}
+	if len(got) != 1 || got[0].Code != "symlink_rejected" || got[0].Message != "" {
+		t.Fatalf("evidence errors were not normalized: %+v", got)
+	}
+}
+
 func TestBuildSummaryCountsInventoryEntities(t *testing.T) {
 	input := richInputRecord(time.UTC)
 	record, err := Build(input.Scan, input.Inventory, input.Delta, input.Findings, validRun())
