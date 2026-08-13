@@ -43,3 +43,43 @@ func TestMatchOrdersPrereleasesBelowRelease(t *testing.T) {
 		t.Fatalf("matched=%v supported=%v", matched, supported)
 	}
 }
+
+func TestMatchOSVExpressionsUseClosedEcosystemOrdering(t *testing.T) {
+	tests := []struct {
+		name, asset, version, expression string
+		want                             bool
+	}{
+		{"npm numeric prerelease", "pkg:npm/example", "1.0.0-beta.2", "osv:ecosystem:>=1.0.0-beta.10", false},
+		{"npm boundary", "pkg:npm/example", "1.0.0-beta.10", "osv:ecosystem:>=1.0.0-beta.10", true},
+		{"PyPI implicit post release", "pkg:pypi/example", "1.0", "osv:ecosystem:>=1.0-1", false},
+		{"PyPI normalized boundary", "pkg:pypi/example", "1.0.post1", "osv:ecosystem:>=1.0-1", true},
+		{"Go pseudo version", "pkg:golang/example.com/mod", "v1.2.3-0.20260101000000-aaaaaaaaaaaa", "osv:semver:>=1.2.3", false},
+		{"Go release boundary", "pkg:golang/example.com/mod", "v1.2.3", "osv:semver:>=1.2.3", true},
+		{"crates numeric prerelease", "pkg:cargo/example", "1.0.0-alpha.2", "osv:semver:>=1.0.0-alpha.10", false},
+		{"crates boundary", "pkg:cargo/example", "1.0.0-alpha.10", "osv:semver:>=1.0.0-alpha.10", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			matched, supported := Match(test.asset, test.version, test.expression)
+			if !supported || matched != test.want {
+				t.Fatalf("Match(%q,%q,%q)=(%v,%v), want (%v,true)", test.asset, test.version, test.expression, matched, supported, test.want)
+			}
+		})
+	}
+}
+
+func TestOSVExpressionRejectsNonCanonicalSemVerAndWrongEcosystemSyntax(t *testing.T) {
+	for _, test := range []struct {
+		asset, rangeType, expression string
+	}{
+		{"pkg:npm/example", "SEMVER", ">=1.0"},
+		{"pkg:npm/example", "SEMVER", ">=v1.0.0"},
+		{"pkg:npm/example", "SEMVER", ">=1.0.0-01"},
+		{"pkg:pypi/example", "ECOSYSTEM", ">=not-a-version"},
+		{"pkg:maven/example", "ECOSYSTEM", ">=1.0.0"},
+	} {
+		if got, ok := OSVExpression(test.asset, test.rangeType, test.expression); ok || got != "" {
+			t.Fatalf("OSVExpression(%q,%q,%q)=(%q,%v)", test.asset, test.rangeType, test.expression, got, ok)
+		}
+	}
+}

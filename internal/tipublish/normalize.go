@@ -1,6 +1,7 @@
 package tipublish
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -32,62 +33,101 @@ type normalizedRecord struct {
 	attribution Attribution
 }
 
-func normalizeRecord(record osvRecord, source Source, category sourceCategory, input Input) (normalizedRecord, error) {
+type normalizedDocument struct {
+	records          []normalizedRecord
+	rejectedAffected int
+}
+
+var errAffectedUnrepresentable = errors.New("affected entry cannot be represented exactly")
+
+func normalizeRecord(record osvRecord, source Source, category sourceCategory, input Input) (normalizedDocument, error) {
 	if record.ID == "" || len(record.ID) > maxRecordIDBytes || strings.ContainsAny(record.ID, "/\\?#\x00") {
-		return normalizedRecord{}, fmt.Errorf("source record: invalid id")
+		return normalizedDocument{}, fmt.Errorf("source record: invalid id")
 	}
 	modified, err := time.Parse(time.RFC3339, record.Modified)
 	if err != nil || modified.Location() != time.UTC {
-		return normalizedRecord{}, fmt.Errorf("source record %s: invalid modified time", record.ID)
+		return normalizedDocument{}, fmt.Errorf("source record %s: invalid modified time", record.ID)
 	}
 	withdrawn := false
 	if record.Withdrawn != "" {
 		withdrawnAt, err := time.Parse(time.RFC3339, record.Withdrawn)
 		if err != nil || withdrawnAt.Location() != time.UTC {
-			return normalizedRecord{}, fmt.Errorf("source record %s: invalid withdrawn time", record.ID)
+			return normalizedDocument{}, fmt.Errorf("source record %s: invalid withdrawn time", record.ID)
 		}
 		withdrawn = true
 	}
 	if err := validateCommonMetadata(record); err != nil {
-		return normalizedRecord{}, fmt.Errorf("source record %s: %w", record.ID, err)
+		return normalizedDocument{}, fmt.Errorf("source record %s: %w", record.ID, err)
 	}
-	if len(record.Affected) != 1 || len(record.Severity) > 64 || len(record.References) > 64 {
-		return normalizedRecord{}, fmt.Errorf("source record %s: affected data is outside the closed subset", record.ID)
+	if len(record.Affected) == 0 || len(record.Affected) > maxListItems || len(record.Severity) > 64 || len(record.References) > 64 {
+		return normalizedDocument{}, fmt.Errorf("source record %s: affected data is outside bounds", record.ID)
 	}
-	affected := record.Affected[0]
+	for _, reference := range record.References {
+		if reference.Type == "" || len(reference.Type) > 64 || !referenceHTTPS(reference.URL) {
+			return normalizedDocument{}, fmt.Errorf("source record %s: invalid public reference", record.ID)
+		}
+	}
+	publicURL := source.PublicURLBase + url.PathEscape(record.ID)
+	if !publicHTTPS(publicURL) {
+		return normalizedDocument{}, fmt.Errorf("public source configuration is invalid")
+	}
+	document := normalizedDocument{records: []normalizedRecord{}}
+	var lastRejected error
+	for _, affected := range record.Affected {
+		records, err := normalizeAffectedRecord(record, affected, source, category, input, publicURL, modified, withdrawn)
+		if errors.Is(err, errAffectedUnrepresentable) {
+			document.rejectedAffected++
+			lastRejected = err
+			continue
+		}
+		if err != nil {
+			return normalizedDocument{}, fmt.Errorf("source record %s: %w", record.ID, err)
+		}
+		document.records = append(document.records, records...)
+	}
+	if len(document.records) == 0 {
+		return normalizedDocument{}, fmt.Errorf("source record %s: all affected entries are unrepresentable: %w", record.ID, lastRejected)
+	}
+	sort.Slice(document.records, func(left, right int) bool {
+		return semanticKey(document.records[left].record) < semanticKey(document.records[right].record)
+	})
+	document.records, err = dedupeDocumentRecords(document.records)
+	if err != nil {
+		return normalizedDocument{}, fmt.Errorf("source record %s: %w", record.ID, err)
+	}
+	for index := range document.records {
+		childID := record.ID
+		if len(document.records) > 1 {
+			childID = fmt.Sprintf("%s#%03d", record.ID, index+1)
+		}
+		document.records[index].record.ID = childID
+		document.records[index].attribution.ID = childID
+	}
+	return document, nil
+}
+
+func normalizeAffectedRecord(record osvRecord, affected osvAffected, source Source, category sourceCategory, input Input, publicURL string, modified time.Time, withdrawn bool) ([]normalizedRecord, error) {
 	if len(affected.Package.PURL) > maxStringBytes || len(affected.Severity) > 64 || len(affected.EcosystemSpecific) > maxIgnoredBytes || len(affected.DatabaseSpecific) > maxIgnoredBytes {
-		return normalizedRecord{}, fmt.Errorf("source record %s: affected metadata is outside bounds", record.ID)
+		return nil, fmt.Errorf("affected metadata is outside bounds")
 	}
 	coordinate, ok := packageid.FromOSV(affected.Package.Ecosystem, affected.Package.Name)
 	if !ok {
-		return normalizedRecord{}, fmt.Errorf("unsupported ecosystem or package identity in %s", record.ID)
+		return nil, fmt.Errorf("%w: unsupported ecosystem or package identity", errAffectedUnrepresentable)
 	}
-	versionRange, err := normalizeAffected(coordinate, affected)
+	selectors, err := normalizeAffected(coordinate, affected)
 	if err != nil {
-		return normalizedRecord{}, fmt.Errorf("source record %s: %w", record.ID, err)
-	}
-	if versionRange == "" {
-		return normalizedRecord{}, fmt.Errorf("source record %s: affected versions are empty", record.ID)
+		return nil, err
 	}
 	severityInput := record.Severity
 	if len(affected.Severity) > 0 {
 		if len(record.Severity) > 0 {
-			return normalizedRecord{}, fmt.Errorf("source record %s: top-level and affected severity conflict", record.ID)
+			return nil, fmt.Errorf("top-level and affected severity conflict")
 		}
 		severityInput = affected.Severity
 	}
 	severities, highCVSS, err := normalizeSeverities(severityInput)
 	if err != nil {
-		return normalizedRecord{}, fmt.Errorf("source record %s: %w", record.ID, err)
-	}
-	for _, reference := range record.References {
-		if reference.Type == "" || len(reference.Type) > 64 || !referenceHTTPS(reference.URL) {
-			return normalizedRecord{}, fmt.Errorf("source record %s: invalid public reference", record.ID)
-		}
-	}
-	publicURL := source.PublicURLBase + url.PathEscape(record.ID)
-	if !publicHTTPS(publicURL) {
-		return normalizedRecord{}, fmt.Errorf("public source configuration is invalid")
+		return nil, err
 	}
 	verdict, confidence := "needs-review", "medium"
 	if category == categoryMalicious {
@@ -95,60 +135,47 @@ func normalizeRecord(record osvRecord, source Source, category sourceCategory, i
 	} else if highCVSS {
 		verdict, confidence = "suspicious", "high"
 	}
-	normalized := bundle.TIRecord{
-		ID:              record.ID,
-		AssetID:         coordinate,
-		VersionRange:    versionRange,
-		Verdict:         verdict,
-		Confidence:      confidence,
-		SourceURLs:      []string{publicURL},
-		RetrievedAt:     input.GeneratedAt.Format(time.RFC3339),
-		ValidUntil:      input.ValidUntil.Format(time.RFC3339),
-		Withdrawn:       withdrawn,
-		License:         source.License,
-		Redistributable: true,
+	result := make([]normalizedRecord, 0, len(selectors))
+	for _, selector := range selectors {
+		result = append(result, normalizedRecord{
+			record: bundle.TIRecord{
+				AssetID: coordinate, VersionRange: selector, Verdict: verdict, Confidence: confidence,
+				SourceURLs: []string{publicURL}, RetrievedAt: input.GeneratedAt.Format(time.RFC3339), ValidUntil: input.ValidUntil.Format(time.RFC3339),
+				Withdrawn: withdrawn, License: source.License, Redistributable: true,
+			},
+			attribution: Attribution{
+				SourceID: record.ID, Category: string(category), License: source.License, PublicURL: publicURL,
+				ModifiedAt: modified.Format(time.RFC3339Nano), Withdrawn: withdrawn, Severities: severities,
+			},
+		})
 	}
-	return normalizedRecord{
-		record: normalized,
-		attribution: Attribution{
-			ID:         record.ID,
-			Category:   string(category),
-			License:    source.License,
-			PublicURL:  publicURL,
-			ModifiedAt: modified.Format(time.RFC3339),
-			Withdrawn:  withdrawn,
-			Severities: severities,
-		},
-	}, nil
+	return result, nil
 }
 
-func normalizeAffected(coordinate string, affected osvAffected) (string, error) {
+func normalizeAffected(coordinate string, affected osvAffected) ([]string, error) {
 	if len(affected.Ranges) > 64 || len(affected.Versions) > maxListItems {
-		return "", fmt.Errorf("affected lists are outside bounds")
+		return nil, fmt.Errorf("affected lists are outside bounds")
 	}
 	alternatives := make([]string, 0, len(affected.Ranges)+len(affected.Versions))
 	for _, candidate := range affected.Versions {
-		if !representableVersion(coordinate, candidate) {
-			return "", fmt.Errorf("version %q cannot be represented exactly", candidate)
+		expression, ok := versionmatch.OSVExpression(coordinate, "ECOSYSTEM", "="+candidate)
+		if !ok {
+			return nil, fmt.Errorf("%w: version %q", errAffectedUnrepresentable, candidate)
 		}
-		alternatives = append(alternatives, "="+candidate)
+		alternatives = append(alternatives, expression)
 	}
 	for _, affectedRange := range affected.Ranges {
 		converted, err := normalizeRange(coordinate, affectedRange)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		alternatives = append(alternatives, converted...)
 	}
 	alternatives = sortedUnique(alternatives)
-	if len(alternatives) > 4 {
-		return "", fmt.Errorf("affected ranges exceed supported alternatives")
+	if len(alternatives) == 0 {
+		return nil, fmt.Errorf("affected versions are empty")
 	}
-	result := strings.Join(alternatives, " || ")
-	if len(result) > 256 {
-		return "", fmt.Errorf("affected range exceeds supported length")
-	}
-	return result, nil
+	return alternatives, nil
 }
 
 func normalizeRange(coordinate string, affectedRange osvRange) ([]string, error) {
@@ -156,7 +183,7 @@ func normalizeRange(coordinate string, affectedRange osvRange) ([]string, error)
 		return nil, fmt.Errorf("range metadata is outside bounds")
 	}
 	if affectedRange.Type != "SEMVER" && affectedRange.Type != "ECOSYSTEM" {
-		return nil, fmt.Errorf("range type %q cannot be represented exactly", affectedRange.Type)
+		return nil, fmt.Errorf("%w: range type %q", errAffectedUnrepresentable, affectedRange.Type)
 	}
 	if len(affectedRange.Events) == 0 || len(affectedRange.Events) > 32 {
 		return nil, fmt.Errorf("range events are outside bounds")
@@ -174,7 +201,7 @@ func normalizeRange(coordinate string, affectedRange osvRange) ([]string, error)
 			return nil, fmt.Errorf("range event must contain exactly one boundary")
 		}
 		if event.Introduced != "" {
-			if introduced != "" || !representableVersion(coordinate, event.Introduced) {
+			if introduced != "" || event.Introduced != "0" && !representableVersion(coordinate, affectedRange.Type, event.Introduced) {
 				return nil, fmt.Errorf("introduced boundary cannot be represented exactly")
 			}
 			introduced = event.Introduced
@@ -192,20 +219,47 @@ func normalizeRange(coordinate string, affectedRange osvRange) ([]string, error)
 		} else if event.Limit != "" {
 			boundary = event.Limit
 		}
-		if !representableVersion(coordinate, boundary) {
+		if !representableVersion(coordinate, affectedRange.Type, boundary) {
 			return nil, fmt.Errorf("closing boundary cannot be represented exactly")
 		}
-		alternatives = append(alternatives, intervalExpression(introduced, operator, boundary))
+		expression, ok := versionmatch.OSVExpression(coordinate, affectedRange.Type, intervalExpression(introduced, operator, boundary))
+		if !ok {
+			return nil, fmt.Errorf("range cannot be represented exactly")
+		}
+		alternatives = append(alternatives, expression)
 		introduced = ""
 	}
 	if introduced != "" {
+		raw := ">=" + introduced
 		if introduced == "0" {
-			alternatives = append(alternatives, ">=0")
-		} else {
-			alternatives = append(alternatives, ">="+introduced)
+			raw = ">=0.0.0"
 		}
+		expression, ok := versionmatch.OSVExpression(coordinate, affectedRange.Type, raw)
+		if !ok {
+			return nil, fmt.Errorf("open range cannot be represented exactly")
+		}
+		alternatives = append(alternatives, expression)
 	}
 	return alternatives, nil
+}
+
+func dedupeDocumentRecords(records []normalizedRecord) ([]normalizedRecord, error) {
+	result := records[:0]
+	for _, record := range records {
+		if len(result) == 0 || semanticKey(result[len(result)-1].record) != semanticKey(record.record) {
+			result = append(result, record)
+			continue
+		}
+		prior := result[len(result)-1]
+		if prior.record.Verdict != record.record.Verdict || prior.record.Confidence != record.record.Confidence || prior.record.Withdrawn != record.record.Withdrawn {
+			return nil, fmt.Errorf("conflicting duplicate affected selector")
+		}
+	}
+	return result, nil
+}
+
+func semanticKey(record bundle.TIRecord) string {
+	return record.AssetID + "\x00" + record.VersionRange + "\x00" + fmt.Sprint(record.Withdrawn)
 }
 
 func intervalExpression(introduced, closingOperator, closing string) string {
@@ -215,11 +269,11 @@ func intervalExpression(introduced, closingOperator, closing string) string {
 	return ">=" + introduced + " " + closingOperator + closing
 }
 
-func representableVersion(coordinate, candidate string) bool {
+func representableVersion(coordinate, rangeType, candidate string) bool {
 	if candidate == "" || len(candidate) > 128 || strings.TrimSpace(candidate) != candidate {
 		return false
 	}
-	_, supported := versionmatch.Match(coordinate, candidate, "="+candidate)
+	_, supported := versionmatch.OSVExpression(coordinate, rangeType, "="+candidate)
 	return supported
 }
 

@@ -17,6 +17,9 @@ func Match(assetID, value, expression string) (bool, bool) {
 	if !supportedAsset(assetID) || value == "" || expression == "" || len(value) > 128 || len(expression) > maxRangeBytes || strings.ContainsRune(expression, 0) {
 		return false, false
 	}
+	if strings.HasPrefix(expression, osvExpressionPrefix) {
+		return matchOSVExpression(assetID, value, expression)
+	}
 	version, ok := parseVersion(value)
 	if !ok {
 		return false, false

@@ -69,6 +69,19 @@ func TestCorrelateMatchesProjectCollectorGoCoordinate(t *testing.T) {
 	}
 }
 
+func TestCorrelateUsesPublishedOSVEcosystemOrdering(t *testing.T) {
+	asset := model.Asset{ID: "pkg:pypi/post-boundary@1.0", Type: model.AssetPackage, Name: "post-boundary", Version: "1.0"}
+	active := activeTI([]bundle.TIRecord{{ID: "PYPI-POST", AssetID: "pkg:pypi/post-boundary", VersionRange: "osv:ecosystem:>=1.0-1", Verdict: "known-malicious", Confidence: "high"}})
+	if got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC()); len(got) != 0 {
+		t.Fatalf("unaffected pre-introduction version matched: %+v", got)
+	}
+	asset.ID, asset.Version = "pkg:pypi/post-boundary@1.0.post1", "1.0.post1"
+	got := Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC())
+	if len(got) != 1 || got[0].Verdict != model.VerdictKnownMalicious {
+		t.Fatalf("affected post release did not match: %+v", got)
+	}
+}
+
 func TestCorrelateMergesCoordinateRecordsDeterministicallyByStrongestVerdict(t *testing.T) {
 	asset := model.Asset{ID: "pkg:npm/example@1.0.0", Type: model.AssetPackage, Name: "example", Version: "1.0.0", SHA256: strings.Repeat("a", 64)}
 	records := []bundle.TIRecord{

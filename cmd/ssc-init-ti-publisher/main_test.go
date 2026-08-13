@@ -37,7 +37,7 @@ func TestRunWritesUnsignedBundleAndPublicAttributionReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelope, err := bundle.Load(raw, time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC))
-	if err != nil || envelope.Sequence != 42 || len(envelope.TI.Records) != 3 {
+	if err != nil || envelope.Sequence != 42 || len(envelope.TI.Records) != 4 {
 		t.Fatalf("envelope=%+v err=%v", envelope, err)
 	}
 	report, err := os.ReadFile(filepath.Join(output, "attribution-report.json"))
@@ -46,7 +46,7 @@ func TestRunWritesUnsignedBundleAndPublicAttributionReport(t *testing.T) {
 		Vulnerable int `json:"vulnerable"`
 	}
 	decodeErr := json.Unmarshal(report, &summary)
-	if err != nil || decodeErr != nil || summary.Malicious != 1 || summary.Vulnerable != 2 || report[len(report)-1] != '\n' {
+	if err != nil || decodeErr != nil || summary.Malicious != 2 || summary.Vulnerable != 2 || report[len(report)-1] != '\n' {
 		t.Fatalf("report=%s err=%v", report, err)
 	}
 	if _, err := os.Stat(filepath.Join(output, "ti-bundle.sig")); !os.IsNotExist(err) {
