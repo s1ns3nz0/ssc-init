@@ -21,6 +21,33 @@ import (
 
 const schemaVersion = "ssc-init.scan.v7"
 
+type FailureStage string
+
+const (
+	FailureInitialize FailureStage = "initialize"
+	FailureCollect    FailureStage = "collect"
+	FailureAnalyze    FailureStage = "analyze"
+	FailurePersist    FailureStage = "persist"
+)
+
+type FailureError struct {
+	Stage FailureStage
+	err   error
+}
+
+func (e *FailureError) Error() string { return "baseline scan failed" }
+func (e *FailureError) Unwrap() error { return e.err }
+
+func NewFailure(stage FailureStage, err error) error { return &FailureError{Stage: stage, err: err} }
+
+func FailureStageOf(err error) (FailureStage, bool) {
+	var failure *FailureError
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+	return failure.Stage, true
+}
+
 // DefaultBudget bounds one baseline scan. Design §12 allows the initial
 // baseline at most 10 minutes; exceeding a time budget must produce a partial
 // result naming the unscanned targets rather than a silently truncated
@@ -135,7 +162,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 
 	previousSnapshot, exists, err := s.snapshots.LatestSnapshot(ctx)
 	if err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("load previous inventory")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, NewFailure(FailurePersist, errors.New("load previous inventory"))
 	}
 	previous := previousSnapshot.Inventory
 	if !exists {
@@ -166,7 +193,7 @@ func (s *Service) Baseline(ctx context.Context) (model.ScanResult, model.Invento
 		AnalyzerCoverage: collection.AnalyzerCoverage,
 	}
 	if err := s.snapshots.SaveScan(ctx, result, current); err != nil {
-		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, errors.New("save baseline snapshot")
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, NewFailure(FailurePersist, errors.New("save baseline snapshot"))
 	}
 	if writer, ok := s.snapshots.(evidence.CacheWriter); ok && len(collection.CacheWrites) > 0 {
 		_ = writer.StoreContentCache(ctx, collection.CacheWrites)

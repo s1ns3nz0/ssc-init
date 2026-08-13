@@ -25,6 +25,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/policy"
 	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
+	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 	"golang.org/x/sys/unix"
 )
@@ -207,7 +208,8 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		scan, inventory, delta, _, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "baseline scan failed")
-			if !a.archiveFailure(ctx, run, runErr, audit.StageCollect, audit.CodeCollectorFailed) {
+			stage, code := auditFailureForScanError(err)
+			if !a.archiveFailure(ctx, run, runErr, stage, code) {
 				fmt.Fprintln(stderr, "audit evidence unavailable")
 			}
 			return 1
@@ -598,7 +600,8 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		scanResult, inventory, delta, firstRun, err := a.BaselineScanner.Baseline(ctx)
 		if err != nil {
 			fmt.Fprintln(stderr, "ssc-init hook: baseline scan failed")
-			if !a.archiveFailure(ctx, run, runErr, audit.StageCollect, audit.CodeCollectorFailed) {
+			stage, code := auditFailureForScanError(err)
+			if !a.archiveFailure(ctx, run, runErr, stage, code) {
 				fmt.Fprintln(stderr, "ssc-init hook: audit evidence unavailable")
 			}
 			return 0
@@ -666,6 +669,20 @@ func (a App) archiveFailure(ctx context.Context, run audit.Run, runErr error, st
 	}
 	outcome := a.AuditService.Fail(ctx, run, stage, code)
 	return outcome.Stored != nil && outcome.ArchiveErrorCode == ""
+}
+
+func auditFailureForScanError(err error) (audit.Stage, string) {
+	if stage, ok := scan.FailureStageOf(err); ok {
+		switch stage {
+		case scan.FailureInitialize:
+			return audit.StageInitialize, audit.CodeInitializeFailed
+		case scan.FailureAnalyze:
+			return audit.StageAnalyze, audit.CodeAnalyzerFailed
+		case scan.FailurePersist:
+			return audit.StagePersist, audit.CodePersistenceFailed
+		}
+	}
+	return audit.StageCollect, audit.CodeCollectorFailed
 }
 
 func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Writer) int {

@@ -123,6 +123,25 @@ func TestScanFailureArchivesPrivacySafeReceiptAndKeepsExitCode(t *testing.T) {
 	}
 }
 
+func TestScanPersistenceFailureArchivesTypedReceipt(t *testing.T) {
+	manager, service := cliAuditService(t)
+	app := App{Version: "dev", DeviceID: service.DeviceID, Now: service.Now, Random: strings.NewReader(strings.Repeat("p", 64)), AuditService: service, BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, scan.NewFailure(scan.FailurePersist, errors.New("private /Users/alice/state.db"))
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty"}, &out, &errOut); code != 1 || out.Len() != 0 || errOut.String() != "baseline scan failed\n" {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("List = %#v, %v", listed, err)
+	}
+	verified, err := manager.Open(context.Background(), listed[0].RunID)
+	if err != nil || verified.Record.Failure == nil || verified.Record.Failure.Stage != audit.StagePersist || verified.Record.Failure.Code != audit.CodePersistenceFailed {
+		t.Fatalf("Verified = %#v, %v", verified, err)
+	}
+}
+
 func TestInitializationWithoutWritableAuditRootReportsUnavailableWithoutRawError(t *testing.T) {
 	home := t.TempDir()
 	marker := "private /Users/alice/root token=value"
