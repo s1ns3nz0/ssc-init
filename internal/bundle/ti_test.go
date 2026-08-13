@@ -7,7 +7,7 @@ import (
 
 func TestThreatIntelligenceRecordValidationAcceptsCompleteRedistributableFact(t *testing.T) {
 	payload := TIPayload{Records: []TIRecord{{
-		ID: "osv:GHSA-abcd-1234", AssetID: "pkg:npm/example@1.0.0", VersionRange: ">=1.0.0 <1.0.2",
+		ID: "osv:GHSA-abcd-1234", AssetID: "pkg:npm/example", VersionRange: ">=1.0.0 <1.0.2",
 		SHA256: strings.Repeat("a", 64), Verdict: "known-malicious", Confidence: "high",
 		SourceURLs: []string{"https://osv.dev/vulnerability/GHSA-abcd-1234"}, RetrievedAt: "2026-08-10T00:00:00Z",
 		ValidUntil: "2026-08-20T00:00:00Z", License: "CC-BY-4.0", Redistributable: true,
@@ -21,7 +21,7 @@ func TestThreatIntelligenceRecordValidationAcceptsCompleteRedistributableFact(t 
 func TestThreatIntelligenceValidationRejectsUnsafeOrIncompleteFactsWithoutEcho(t *testing.T) {
 	secret := "GITHUB_TOKEN=raw-secret"
 	base := TIRecord{
-		ID: "record", AssetID: "pkg:npm/example@1.0.0", Verdict: "suspicious", Confidence: "medium",
+		ID: "record", AssetID: "pkg:npm/example", Verdict: "suspicious", Confidence: "medium",
 		SourceURLs: []string{"https://example.invalid/advisory"}, RetrievedAt: "2026-08-10T00:00:00Z",
 		ValidUntil: "2026-08-20T00:00:00Z", License: "CC0-1.0", Redistributable: true,
 	}

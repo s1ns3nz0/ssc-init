@@ -10,6 +10,7 @@ import (
 	versionanalyzer "github.com/s1ns3nz0/ssc-init/internal/analyzer/version"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/packageid"
 )
 
 // Correlate produces level-one findings from exact, verified intelligence
@@ -35,13 +36,17 @@ func Correlate(inventory model.Inventory, active bundle.ActiveBundle, now time.T
 
 	var findings []model.Finding
 	for _, asset := range inventory.Assets {
-		var matches []bundle.TIRecord
-		for _, record := range records[asset.ID] {
-			matchesRecord := record.SHA256 == "" || strings.EqualFold(record.SHA256, asset.SHA256)
-			if matchesRecord && record.SHA256 == "" && record.VersionRange != "" {
-				matchesRecord, _ = versionanalyzer.Match(asset.ID, asset.Version, record.VersionRange)
+		lookupID := asset.ID
+		if asset.Type == model.AssetPackage {
+			coordinate, ok := packageid.Coordinate(asset)
+			if !ok {
+				continue
 			}
-			if matchesRecord {
+			lookupID = coordinate
+		}
+		var matches []bundle.TIRecord
+		for _, record := range records[lookupID] {
+			if exactSelectorMatch(asset, record) {
 				matches = append(matches, record)
 			}
 		}
@@ -55,6 +60,20 @@ func Correlate(inventory model.Inventory, active bundle.ActiveBundle, now time.T
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].ID < findings[j].ID })
 	return findings
+}
+
+func exactSelectorMatch(asset model.Asset, record bundle.TIRecord) bool {
+	if record.SHA256 != "" {
+		return asset.SHA256 != "" && strings.EqualFold(record.SHA256, asset.SHA256)
+	}
+	if record.VersionRange == "" {
+		return asset.Type != model.AssetPackage
+	}
+	if asset.Version == "" || record.VersionRange == "" {
+		return false
+	}
+	matched, supported := versionanalyzer.Match(asset.ID, asset.Version, record.VersionRange)
+	return supported && matched
 }
 
 func mergedFinding(asset model.Asset, records []bundle.TIRecord, evidenceIDs []string, active bundle.ActiveBundle, detectedAt time.Time) model.Finding {
