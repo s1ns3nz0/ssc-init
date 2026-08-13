@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
@@ -95,10 +96,21 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		})
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "status":
-		_, paths, ok := hostPathsForRun()
+		home, paths, ok := hostPathsForRun()
 		if !ok {
 			fmt.Fprintln(stderr, "failed to initialize SSC Init")
 			return 1
+		}
+		auditManager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: func() time.Time { return time.Now().UTC() }, Random: rand.Reader, Render: audit.ReportText}
+		if options.Pretty {
+			if listed, listErr := auditManager.List(ctx); listErr == nil {
+				for _, stored := range listed {
+					if stored.Valid {
+						app.AuditManager = auditManager
+						return app.RunOptions(ctx, options, stdout, stderr)
+					}
+				}
+			}
 		}
 		snapshots, err := openStoreForRun(filepath.Join(paths.DataDir, "state.db"))
 		if err != nil {
@@ -107,6 +119,17 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		defer snapshots.Close()
 		app.StatusReader = snapshots
+		return app.RunOptions(ctx, options, stdout, stderr)
+	case "audit":
+		if options.AuditCommand == "verify" {
+			return app.RunOptions(ctx, options, stdout, stderr)
+		}
+		home, paths, ok := hostPathsForRun()
+		if !ok {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
+		}
+		app.AuditManager = &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: func() time.Time { return time.Now().UTC() }, Random: rand.Reader, Render: audit.ReportText}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "findings", "adapter":
 		home, paths, ok := hostPathsForRun()
@@ -473,7 +496,7 @@ func coreHealthCheck(ctx context.Context, executablePath string) error {
 
 func operationalCommand(command string) bool {
 	switch command {
-	case "adapter", "bundle", "doctor", "findings", "hook", "install", "policy", "quarantine", "rollback", "scan", "schedule", "status":
+	case "adapter", "audit", "bundle", "doctor", "findings", "hook", "install", "policy", "quarantine", "rollback", "scan", "schedule", "status":
 		return true
 	default:
 		return false

@@ -28,15 +28,15 @@ var managedArchivePattern = regexp.MustCompile(`\A([0-9]{8}T[0-9]{6}\.[0-9]{9}Z)
 var auditProcessLocks sync.Map
 
 type Stored struct {
-	RunID     string
-	Label     string
-	SafePath  string
-	SHA256    string
-	State     State
-	Profile   Profile
-	CreatedAt time.Time
-	Size      int64
-	Valid     bool
+	RunID     string    `json:"runId"`
+	Label     string    `json:"label,omitempty"`
+	SafePath  string    `json:"safePath"`
+	SHA256    string    `json:"sha256,omitempty"`
+	State     State     `json:"state,omitempty"`
+	Profile   Profile   `json:"profile,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	Size      int64     `json:"size"`
+	Valid     bool      `json:"valid"`
 }
 
 type Manager struct {
@@ -187,7 +187,11 @@ func (m *Manager) Open(ctx context.Context, runID string) (Verified, error) {
 	for _, stored := range listed {
 		if stored.RunID == runID && stored.Valid {
 			name := strings.TrimPrefix(stored.SafePath, safeAuditPrefix)
-			return verifyRootFile(root, name)
+			verified, err := verifyRootFile(root, name)
+			if err == nil {
+				verified.SafePath = stored.SafePath
+			}
+			return verified, err
 		}
 	}
 	return Verified{}, errors.New("audit archive not found")

@@ -96,6 +96,8 @@ var (
 	deviceIDPattern = regexp.MustCompile(`\Adevice:sha256:[0-9a-f]{64}\z`)
 )
 
+func ValidRunID(value string) bool { return runIDPattern.MatchString(value) }
+
 // Build constructs a normalized record from a complete or partial scan.
 func Build(scan model.ScanResult, inventory model.Inventory, delta model.Delta, findings []model.Finding, run Run) (Record, error) {
 	state, ok := scanState(scan.Status)

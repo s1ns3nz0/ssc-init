@@ -16,7 +16,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
@@ -24,6 +26,53 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
+
+func TestAuditVerifyIsOfflineAndStatusAuditAvoidsStore(t *testing.T) {
+	oldGOOS, oldHost, oldOpen := runtimeGOOS, hostPathsForRun, openStoreForRun
+	t.Cleanup(func() {
+		runtimeGOOS, hostPathsForRun, openStoreForRun = oldGOOS, oldHost, oldOpen
+	})
+	runtimeGOOS = "darwin"
+	home := t.TempDir()
+	paths := platform.PathsForHome(home)
+	finished := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
+	record, err := audit.Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, audit.Run{
+		ID: "run:hex:0123456789abcdef0123456789abcdef", ScanID: "scan:sha256:" + strings.Repeat("a", 64), DeviceID: "device:sha256:" + strings.Repeat("b", 64), Label: "audit mac", Product: "ssc-init", Version: "dev", StartedAt: finished.Add(-time.Second), FinishedAt: finished,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := audit.Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "audit.zip")
+	if err := os.WriteFile(external, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostCalls, storeCalls := 0, 0
+	hostPathsForRun = func() (string, platform.Paths, bool) {
+		hostCalls++
+		return home, paths, true
+	}
+	openStoreForRun = func(string) (applicationStore, error) {
+		storeCalls++
+		return nil, errors.New("store must remain closed")
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runWithIO(context.Background(), []string{"audit", "verify", external, "--pretty"}, &stdout, &stderr); code != 0 || hostCalls != 0 || storeCalls != 0 || strings.Contains(stdout.String(), external) {
+		t.Fatalf("verify code=%d hosts=%d stores=%d out=%q err=%q", code, hostCalls, storeCalls, stdout.String(), stderr.String())
+	}
+	manager := &audit.Manager{Root: paths.Install().AuditDir, Home: home, Now: func() time.Time { return finished }, Random: strings.NewReader(strings.Repeat("r", 512)), Render: func(audit.Record) ([]byte, error) { return []byte("report\n"), nil }}
+	if _, err := manager.Save(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithIO(context.Background(), []string{"status", "--pretty"}, &stdout, &stderr); code != 0 || hostCalls != 1 || storeCalls != 0 || !strings.Contains(stdout.String(), "SSC Init audit") {
+		t.Fatalf("status code=%d hosts=%d stores=%d out=%q err=%q", code, hostCalls, storeCalls, stdout.String(), stderr.String())
+	}
+}
 
 func TestNonDarwinOperationalCommandsCreateNoState(t *testing.T) {
 	oldGOOS, oldHost, oldOpen, oldResolve := runtimeGOOS, hostPathsForRun, openStoreForRun, resolveRootsForRun

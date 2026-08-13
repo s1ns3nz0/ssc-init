@@ -7,6 +7,57 @@ import (
 	"testing"
 )
 
+func TestParseOptionsAcceptsClosedAuditForms(t *testing.T) {
+	runID := "run:hex:0123456789abcdef0123456789abcdef"
+	forms := [][]string{
+		{"audit", "list", "--pretty"},
+		{"audit", "list", "--json"},
+		{"audit", "show", runID, "--pretty"},
+		{"audit", "show", runID, "--json"},
+		{"audit", "show", runID, "--section", "findings"},
+		{"audit", "show", runID, "--section", "changes"},
+		{"audit", "show", runID, "--section", "coverage"},
+		{"audit", "show", runID, "--section", "assets"},
+		{"audit", "show", runID, "--section", "evidence"},
+		{"audit", "export", runID, "--output", "/tmp/audit.zip"},
+		{"audit", "export", runID, "--output", "/tmp/redacted.zip", "--redacted"},
+		{"audit", "verify", "/tmp/audit.zip", "--pretty"},
+		{"audit", "verify", "/tmp/audit.zip", "--json"},
+	}
+	for _, args := range forms {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("rejected %q: %v", args, err)
+		}
+	}
+}
+
+func TestParseOptionsRejectsAmbiguousAuditFormsAndInvalidLabels(t *testing.T) {
+	runID := "run:hex:0123456789abcdef0123456789abcdef"
+	forms := [][]string{
+		{"audit"}, {"audit", "list"}, {"audit", "list", "--pretty", "--json"},
+		{"audit", "show", "bad", "--pretty"}, {"audit", "show", runID}, {"audit", "show", runID, "--section", "unknown"},
+		{"audit", "show", runID, "--json", "--section", "assets"}, {"audit", "export", runID, "--output", "relative.zip"},
+		{"audit", "export", runID, "--output", "/tmp/a.zip", "--pretty"}, {"audit", "verify", "relative.zip", "--pretty"},
+		{"audit", "verify", "/tmp/a.zip"}, {"audit", "verify", "/tmp/a.zip", "--redacted"},
+		{"scan", "--baseline", "--pretty", "--label", "/private/label"}, {"status", "--pretty", "--label", "audit"},
+	}
+	for _, args := range forms {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid form %q", args)
+		}
+	}
+}
+
+func TestParseOptionsAcceptsScanLabelOnlyOnBaselineScan(t *testing.T) {
+	options, err := ParseOptions([]string{"scan", "--baseline", "--pretty", "--label", "audit-mac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ScanLabel != "audit-mac" {
+		t.Fatalf("ScanLabel = %q", options.ScanLabel)
+	}
+}
+
 func TestParseOptions(t *testing.T) {
 	got, err := ParseOptions([]string{
 		"scan", "--baseline", "--json",

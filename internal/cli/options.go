@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/platform"
 )
 
@@ -21,6 +22,13 @@ type Options struct {
 	Baseline       bool
 	ExternalProbes bool
 	ProjectRoots   []string
+	ScanLabel      string
+
+	AuditCommand  string
+	AuditRunID    string
+	AuditSection  string
+	AuditOutput   string
+	AuditRedacted bool
 
 	// Install inputs. The source is an absolute host path an adapter already
 	// obtained; it is handed to the installer and never reported back.
@@ -69,6 +77,10 @@ func ParseOptions(args []string) (Options, error) {
 			options.Pretty = true
 		default:
 			return Options{}, ErrInvalidOptions
+		}
+	case "audit":
+		if err := parseAuditOptions(args[1:], &options); err != nil {
+			return Options{}, err
 		}
 	case "findings":
 		for index := 1; index < len(args); index++ {
@@ -140,6 +152,109 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, ErrInvalidOptions
 	}
 	return options, nil
+}
+
+func parseAuditOptions(args []string, options *Options) error {
+	if len(args) == 0 {
+		return ErrInvalidOptions
+	}
+	options.AuditCommand = args[0]
+	switch options.AuditCommand {
+	case "list":
+		if len(args) != 2 {
+			return ErrInvalidOptions
+		}
+		return parseAuditFormat(args[1], options)
+	case "show":
+		if len(args) < 3 || !audit.ValidRunID(args[1]) {
+			return ErrInvalidOptions
+		}
+		options.AuditRunID = args[1]
+		for index := 2; index < len(args); index++ {
+			switch args[index] {
+			case "--pretty", "--json":
+				if parseAuditFormat(args[index], options) != nil {
+					return ErrInvalidOptions
+				}
+			case "--section":
+				index++
+				if index == len(args) || options.AuditSection != "" || !validAuditSection(args[index]) {
+					return ErrInvalidOptions
+				}
+				options.AuditSection = args[index]
+			default:
+				return ErrInvalidOptions
+			}
+		}
+		if options.AuditSection != "" {
+			if options.JSON {
+				return ErrInvalidOptions
+			}
+			options.Pretty = true
+		}
+		if options.JSON == options.Pretty {
+			return ErrInvalidOptions
+		}
+		return nil
+	case "export":
+		if len(args) < 4 || !audit.ValidRunID(args[1]) {
+			return ErrInvalidOptions
+		}
+		options.AuditRunID = args[1]
+		for index := 2; index < len(args); index++ {
+			switch args[index] {
+			case "--output":
+				index++
+				if index == len(args) || options.AuditOutput != "" || !validInstallSource(args[index]) {
+					return ErrInvalidOptions
+				}
+				options.AuditOutput = args[index]
+			case "--redacted":
+				if options.AuditRedacted {
+					return ErrInvalidOptions
+				}
+				options.AuditRedacted = true
+			default:
+				return ErrInvalidOptions
+			}
+		}
+		if options.AuditOutput == "" {
+			return ErrInvalidOptions
+		}
+		return nil
+	case "verify":
+		if len(args) != 3 || !validInstallSource(args[1]) {
+			return ErrInvalidOptions
+		}
+		options.AuditOutput = args[1]
+		return parseAuditFormat(args[2], options)
+	default:
+		return ErrInvalidOptions
+	}
+}
+
+func parseAuditFormat(flag string, options *Options) error {
+	if options.JSON || options.Pretty {
+		return ErrInvalidOptions
+	}
+	switch flag {
+	case "--json":
+		options.JSON = true
+	case "--pretty":
+		options.Pretty = true
+	default:
+		return ErrInvalidOptions
+	}
+	return nil
+}
+
+func validAuditSection(value string) bool {
+	switch value {
+	case "findings", "changes", "coverage", "assets", "evidence":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseQuarantineOptions(args []string, options *Options) error {
@@ -374,6 +489,12 @@ func parseScanOptions(args []string, options *Options) error {
 			if addProjectRoot(options, seenRoots, strings.TrimPrefix(argument, "--project-root=")) != nil {
 				return ErrInvalidOptions
 			}
+		case argument == "--label":
+			index++
+			if index == len(args) || options.ScanLabel != "" || !audit.ValidLabel(args[index]) {
+				return ErrInvalidOptions
+			}
+			options.ScanLabel = args[index]
 		default:
 			return ErrInvalidOptions
 		}

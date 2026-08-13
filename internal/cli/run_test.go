@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/adapter"
+	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
@@ -22,6 +23,117 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/scan"
 	"github.com/s1ns3nz0/ssc-init/internal/schedule"
 )
+
+type fakeAuditManager struct {
+	listed                []audit.Stored
+	verified              audit.Verified
+	err                   error
+	listCalls, openCalls  int
+	exportCalls           int
+	exportRun, exportPath string
+	exportRedacted        bool
+}
+
+func (m *fakeAuditManager) List(context.Context) ([]audit.Stored, error) {
+	m.listCalls++
+	return m.listed, m.err
+}
+func (m *fakeAuditManager) Open(context.Context, string) (audit.Verified, error) {
+	m.openCalls++
+	return m.verified, m.err
+}
+func (m *fakeAuditManager) Export(_ context.Context, runID, output string, redacted bool) (audit.Stored, error) {
+	m.exportCalls++
+	m.exportRun, m.exportPath, m.exportRedacted = runID, output, redacted
+	return audit.Stored{RunID: runID, SHA256: strings.Repeat("a", 64), State: audit.StateComplete, Profile: audit.ProfileInternal, Valid: true}, m.err
+}
+
+func TestAuditListShowVerifyAndExportUseInjectedManager(t *testing.T) {
+	record, verified := cliAuditFixture(t)
+	stored := audit.Stored{RunID: record.Run.ID, Label: record.Run.Label, SafePath: "$SSC_INIT_DATA/audit/run.zip", SHA256: verified.ZIPSHA256, State: record.State, Profile: record.Profile, CreatedAt: record.Run.FinishedAt, Valid: true}
+	t.Run("list", func(t *testing.T) {
+		manager := &fakeAuditManager{listed: []audit.Stored{stored}}
+		var out, errOut bytes.Buffer
+		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "list", "--pretty"}, &out, &errOut); code != 0 || manager.listCalls != 1 || manager.openCalls != 0 || manager.exportCalls != 0 || errOut.Len() != 0 {
+			t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
+		}
+	})
+	t.Run("show", func(t *testing.T) {
+		manager := &fakeAuditManager{verified: verified}
+		var out, errOut bytes.Buffer
+		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "show", record.Run.ID, "--pretty"}, &out, &errOut); code != 0 || manager.openCalls != 1 || manager.listCalls != 0 || manager.exportCalls != 0 || !strings.Contains(out.String(), "SSC Init audit") {
+			t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
+		}
+	})
+	t.Run("export", func(t *testing.T) {
+		manager := &fakeAuditManager{}
+		output := filepath.Join(t.TempDir(), "export.zip")
+		var out, errOut bytes.Buffer
+		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "export", record.Run.ID, "--output", output, "--redacted"}, &out, &errOut); code != 0 || manager.exportCalls != 1 || manager.openCalls != 0 || manager.listCalls != 0 || !manager.exportRedacted || manager.exportPath != output || strings.Contains(out.String(), output) {
+			t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
+		}
+	})
+	t.Run("verify", func(t *testing.T) {
+		archive, err := audit.Encode(record, []byte("report\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "archive.zip")
+		if err := os.WriteFile(path, archive, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		manager := &fakeAuditManager{err: errors.New("must not call manager")}
+		var out, errOut bytes.Buffer
+		if code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "verify", path, "--pretty"}, &out, &errOut); code != 0 || manager.listCalls+manager.openCalls+manager.exportCalls != 0 || strings.Contains(out.String(), path) || !strings.Contains(out.String(), "$INPUT/audit.zip") {
+			t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
+		}
+	})
+}
+
+func TestAuditShowRejectsInvalidArchiveWithoutRendering(t *testing.T) {
+	manager := &fakeAuditManager{err: errors.New("private /Users/alice/archive.zip")}
+	var out, errOut bytes.Buffer
+	code := (App{AuditManager: manager}).Run(context.Background(), []string{"audit", "show", "run:hex:0123456789abcdef0123456789abcdef", "--pretty"}, &out, &errOut)
+	if code != 1 || out.Len() != 0 || errOut.String() != "audit archive is invalid\n" || strings.Contains(errOut.String(), "/Users/") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestStatusPrettyPrefersLatestValidAuditButKeepsLegacyFallback(t *testing.T) {
+	record, verified := cliAuditFixture(t)
+	stored := audit.Stored{RunID: record.Run.ID, Label: record.Run.Label, SafePath: "$SSC_INIT_DATA/audit/run.zip", SHA256: verified.ZIPSHA256, State: record.State, Profile: record.Profile, CreatedAt: record.Run.FinishedAt, Valid: true}
+	manager := &fakeAuditManager{listed: []audit.Stored{stored}, verified: verified}
+	var out, errOut bytes.Buffer
+	if code := (App{AuditManager: manager}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 || manager.listCalls != 1 || manager.openCalls != 1 || !strings.Contains(out.String(), "SSC Init audit") {
+		t.Fatalf("code=%d manager=%+v out=%q err=%q", code, manager, out.String(), errOut.String())
+	}
+	legacy := &cliMemorySnapshots{latest: model.Snapshot{Scan: model.ScanResult{SchemaVersion: "ssc-init.scan.v3"}}, hasLatest: true}
+	out.Reset()
+	errOut.Reset()
+	if code := (App{AuditManager: &fakeAuditManager{}, StatusReader: legacy}).Run(context.Background(), []string{"status", "--pretty"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "legacy inventory") {
+		t.Fatalf("fallback code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func cliAuditFixture(t *testing.T) (audit.Record, audit.Verified) {
+	t.Helper()
+	finished := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
+	record, err := audit.Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, audit.Run{
+		ID: "run:hex:0123456789abcdef0123456789abcdef", ScanID: "scan:sha256:" + strings.Repeat("a", 64), DeviceID: "device:sha256:" + strings.Repeat("b", 64), Label: "audit mac", Product: "ssc-init", Version: "dev", StartedAt: finished.Add(-time.Second), FinishedAt: finished,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := audit.Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := audit.Verify(bytes.NewReader(encoded), int64(len(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record, verified
+}
 
 type failingWriter struct {
 	err error

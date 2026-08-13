@@ -43,6 +43,7 @@ type Verified struct {
 	Manifest  Manifest
 	Record    Record
 	ZIPSHA256 string
+	SafePath  string `json:"-"`
 }
 
 type coveragePayload struct {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/adapter"
+	"github.com/s1ns3nz0/ssc-init/internal/audit"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/doctor"
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
@@ -23,6 +24,7 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/quarantine"
 	"github.com/s1ns3nz0/ssc-init/internal/report"
 	"github.com/s1ns3nz0/ssc-init/internal/schedule"
+	"golang.org/x/sys/unix"
 )
 
 // BaselineScanner performs and persists one baseline scan. The reported bool
@@ -34,6 +36,12 @@ type BaselineScanner interface {
 // StatusReader loads the latest persisted scan and inventory, if one exists.
 type StatusReader interface {
 	LatestSnapshot(context.Context) (model.Snapshot, bool, error)
+}
+
+type AuditManager interface {
+	List(context.Context) ([]audit.Stored, error)
+	Open(context.Context, string) (audit.Verified, error)
+	Export(context.Context, string, string, bool) (audit.Stored, error)
 }
 
 type PolicyStore interface {
@@ -146,6 +154,7 @@ type App struct {
 	Quarantine       QuarantineManager
 	QuarantineReader QuarantineReader
 	Schedule         ScheduleManager
+	AuditManager     AuditManager
 }
 
 // Run executes the CLI with the development version.
@@ -198,7 +207,29 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		return 0
+	case "audit":
+		return a.runAudit(ctx, options, stdout, stderr)
 	case "status":
+		if options.Pretty && a.AuditManager != nil {
+			listed, listErr := a.AuditManager.List(ctx)
+			if listErr == nil {
+				for _, stored := range listed {
+					if !stored.Valid {
+						continue
+					}
+					verified, err := a.AuditManager.Open(ctx, stored.RunID)
+					if err != nil {
+						fmt.Fprintln(stderr, "audit archive is invalid")
+						return 1
+					}
+					if err := audit.WritePretty(stdout, verified.Record, &stored); err != nil {
+						fmt.Fprintln(stderr, "failed to write status output")
+						return 1
+					}
+					return 0
+				}
+			}
+		}
 		if a.StatusReader == nil {
 			fmt.Fprintln(stderr, "status is unavailable")
 			return 1
@@ -561,6 +592,104 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
+}
+
+func (a App) runAudit(ctx context.Context, options Options, stdout, stderr io.Writer) int {
+	if options.AuditCommand == "verify" {
+		return runAuditVerify(options, stdout, stderr)
+	}
+	if a.AuditManager == nil {
+		fmt.Fprintln(stderr, "audit evidence is unavailable")
+		return 1
+	}
+	switch options.AuditCommand {
+	case "list":
+		records, err := a.AuditManager.List(ctx)
+		if err != nil {
+			fmt.Fprintln(stderr, "audit evidence is unavailable")
+			return 1
+		}
+		if options.Pretty {
+			if err := audit.WriteList(stdout, records); err != nil {
+				fmt.Fprintln(stderr, "failed to write audit output")
+				return 1
+			}
+		} else if err := writeJSON(stdout, records); err != nil {
+			fmt.Fprintln(stderr, "failed to write audit output")
+			return 1
+		}
+		return 0
+	case "show":
+		verified, err := a.AuditManager.Open(ctx, options.AuditRunID)
+		if err != nil {
+			fmt.Fprintln(stderr, "audit archive is invalid")
+			return 1
+		}
+		if options.JSON {
+			if err := writeJSON(stdout, verified.Record); err != nil {
+				fmt.Fprintln(stderr, "failed to write audit output")
+				return 1
+			}
+			return 0
+		}
+		if options.AuditSection != "" {
+			if err := audit.WriteSection(stdout, verified.Record, audit.Section(options.AuditSection)); err != nil {
+				fmt.Fprintln(stderr, "failed to write audit output")
+				return 1
+			}
+			return 0
+		}
+		var stored *audit.Stored
+		if verified.SafePath != "" {
+			stored = &audit.Stored{SafePath: verified.SafePath, SHA256: verified.ZIPSHA256, Valid: true}
+		}
+		if err := audit.WritePretty(stdout, verified.Record, stored); err != nil {
+			fmt.Fprintln(stderr, "failed to write audit output")
+			return 1
+		}
+		return 0
+	case "export":
+		stored, err := a.AuditManager.Export(ctx, options.AuditRunID, options.AuditOutput, options.AuditRedacted)
+		if err != nil {
+			fmt.Fprintln(stderr, "audit export failed")
+			return 1
+		}
+		fmt.Fprintln(stdout, "SSC Init audit export")
+		fmt.Fprintf(stdout, "  state      exported\n  profile    %s\n  sha256     %s\n", stored.Profile, stored.SHA256)
+		return 0
+	default:
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
+	}
+}
+
+func runAuditVerify(options Options, stdout, stderr io.Writer) int {
+	file, err := os.OpenFile(options.AuditOutput, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		fmt.Fprintln(stderr, "audit archive is invalid")
+		return 1
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		fmt.Fprintln(stderr, "audit archive is invalid")
+		return 1
+	}
+	verified, err := audit.Verify(file, info.Size())
+	if err != nil {
+		fmt.Fprintln(stderr, "audit archive is invalid")
+		return 1
+	}
+	if options.Pretty {
+		if err := audit.WriteVerify(stdout, verified, "$INPUT/audit.zip"); err != nil {
+			fmt.Fprintln(stderr, "failed to write audit output")
+			return 1
+		}
+	} else if err := writeJSON(stdout, map[string]any{"valid": true, "manifest": verified.Manifest, "record": verified.Record, "zipSha256": verified.ZIPSHA256}); err != nil {
+		fmt.Fprintln(stderr, "failed to write audit output")
+		return 1
+	}
+	return 0
 }
 
 func decodeAdapterInvocation(input io.Reader) (adapter.Invocation, error) {
