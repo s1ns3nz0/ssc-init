@@ -53,7 +53,7 @@ var (
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
 	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
-	bundleKeysForRun             = bundle.KeyRegistry{}
+	bundleKeysForRun             = bundle.ProductionKeys()
 	adapterInputForRun io.Reader = os.Stdin
 	terminalForColor             = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
 )
