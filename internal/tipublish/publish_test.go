@@ -26,8 +26,8 @@ func TestBuildSeparatesMaliciousFromVulnerableClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRecord(t, envelope.TI.Records, "MAL-2026-1#001", "pkg:npm/evil", "osv:ecosystem:=1.0.0", "known-malicious", "high")
-	assertRecord(t, envelope.TI.Records, "MAL-2026-1#002", "pkg:npm/evil", "osv:ecosystem:=1.0.1", "known-malicious", "high")
+	assertRecord(t, envelope.TI.Records, "MAL-2026-1#001", "pkg:npm/evil", "osv:exact:1.0.0", "known-malicious", "high")
+	assertRecord(t, envelope.TI.Records, "MAL-2026-1#002", "pkg:npm/evil", "osv:exact:1.0.1", "known-malicious", "high")
 	assertRecord(t, envelope.TI.Records, "GHSA-2026-1", "pkg:pypi/requests", "osv:ecosystem:>=2.0.0 <2.5.0", "needs-review", "medium")
 	assertRecord(t, envelope.TI.Records, "GO-2026-1", "pkg:golang/example.com/mod", "osv:semver:<1.2.3", "suspicious", "high")
 	if report.Malicious != 2 || report.Vulnerable != 2 || report.Records != 4 {
@@ -52,8 +52,8 @@ func TestBuildUsesExactCVSSNineThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRecord(t, envelope.TI.Records, "CVSS-8.9", "pkg:npm/lower", "osv:ecosystem:=1.0.0", "needs-review", "medium")
-	assertRecord(t, envelope.TI.Records, "CVSS-9.0", "pkg:npm/threshold", "osv:ecosystem:=1.0.0", "suspicious", "high")
+	assertRecord(t, envelope.TI.Records, "CVSS-8.9", "pkg:npm/lower", "osv:exact:1.0.0", "needs-review", "medium")
+	assertRecord(t, envelope.TI.Records, "CVSS-9.0", "pkg:npm/threshold", "osv:exact:1.0.0", "suspicious", "high")
 }
 
 func TestBuildUsesAffectedLevelCVSSWhenTopLevelSeverityIsAbsent(t *testing.T) {
@@ -67,7 +67,7 @@ func TestBuildUsesAffectedLevelCVSSWhenTopLevelSeverityIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRecord(t, envelope.TI.Records, "AFFECTED-CVSS", "pkg:cargo/threshold", "osv:ecosystem:=1.0.0", "suspicious", "high")
+	assertRecord(t, envelope.TI.Records, "AFFECTED-CVSS", "pkg:cargo/threshold", "osv:exact:1.0.0", "suspicious", "high")
 }
 
 func TestBuildAcceptsOneOSVRecordPerPinnedSourceFile(t *testing.T) {
@@ -136,6 +136,27 @@ func TestBuildPreservesPyPIEcosystemOrderingAtMatchTime(t *testing.T) {
 	}
 }
 
+func TestBuildPublishesTrueOSVOpenStartAndLiteralEnumeratedMembership(t *testing.T) {
+	document := `[
+{"id":"OPEN-NPM","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"open-npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}]}]}]},
+{"id":"OPEN-PYPI","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"PyPI","name":"open-pypi"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"limit":"*"}]}]}]},
+{"id":"EXACT-BUILD","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"exact-build"},"versions":["1.0.0+bad"]}]}
+]`
+	input := inputForDocument(t, document, true, "Apache-2.0")
+	raw, _, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := bundle.Load(raw, input.GeneratedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSelectorMatch(t, envelope.TI.Records, "OPEN-NPM", "0.0.0-alpha.1", true)
+	assertSelectorMatch(t, envelope.TI.Records, "OPEN-PYPI", "0.dev1", true)
+	assertSelectorMatch(t, envelope.TI.Records, "EXACT-BUILD", "1.0.0+bad", true)
+	assertSelectorMatch(t, envelope.TI.Records, "EXACT-BUILD", "1.0.0+clean", false)
+}
+
 func TestBuildRetainsWithdrawnRecordsWithoutChangingTheirClassification(t *testing.T) {
 	document := `[{
 "id":"MAL-WITHDRAWN","modified":"2026-08-13T00:00:00Z","withdrawn":"2026-08-13T12:00:00Z",
@@ -171,8 +192,8 @@ func TestBuildKeepsMaliciousFalsePositiveVersionsOutOfRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRecord(t, envelope.TI.Records, "MAL-EXACT#001", "pkg:pypi/bad-package", "osv:ecosystem:=1.0.0", "known-malicious", "high")
-	assertRecord(t, envelope.TI.Records, "MAL-EXACT#002", "pkg:pypi/bad-package", "osv:ecosystem:=1.2.0", "known-malicious", "high")
+	assertRecord(t, envelope.TI.Records, "MAL-EXACT#001", "pkg:pypi/bad-package", "osv:exact:1.0.0", "known-malicious", "high")
+	assertRecord(t, envelope.TI.Records, "MAL-EXACT#002", "pkg:pypi/bad-package", "osv:exact:1.2.0", "known-malicious", "high")
 	for _, record := range envelope.TI.Records {
 		if strings.Contains(record.VersionRange, ">=") {
 			t.Fatalf("malicious explicit versions were broadened: %q", record.VersionRange)
@@ -293,6 +314,138 @@ func TestBuildMergesOSVAggregateAndAuthoritativeOpenSSFOverlap(t *testing.T) {
 	if envelope.TI.Records[0].Verdict != "needs-review" {
 		t.Fatalf("OSV-only MAL record self-promoted: %+v", envelope.TI.Records[0])
 	}
+}
+
+func TestBuildAttributionReportIsStableForShuffledCompatibleRevisions(t *testing.T) {
+	older := `[{"id":"REVISIONED","modified":"2026-05-01T00:00:00.100Z","affected":[{"package":{"ecosystem":"npm","name":"revisioned"},"versions":["1.0.0"]}]}]`
+	newer := `[{"id":"REVISIONED","modified":"2026-05-02T00:00:00.200Z","affected":[{"package":{"ecosystem":"npm","name":"revisioned"},"versions":["1.0.0"]}]}]`
+	input := fixtureInput(t)
+	input.OpenSSF = nil
+	input.OSV = []Source{
+		{Path: writeDocument(t, older), License: "CC-BY-4.0", PublicURLBase: "https://osv.dev/vulnerability/"},
+		{Path: writeDocument(t, newer), License: "CC-BY-4.0", PublicURLBase: "https://osv.dev/vulnerability/"},
+	}
+	firstBundle, firstReport, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.OSV[0], input.OSV[1] = input.OSV[1], input.OSV[0]
+	secondBundle, secondReport, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReportBytes, _ := EncodeReport(firstReport)
+	secondReportBytes, _ := EncodeReport(secondReport)
+	if string(firstBundle) != string(secondBundle) || string(firstReportBytes) != string(secondReportBytes) {
+		t.Fatalf("shuffled revisions differ\nfirst=%s\nsecond=%s", firstReportBytes, secondReportBytes)
+	}
+	if len(firstReport.Attributions) != 2 || firstReport.Attributions[0].ModifiedAt != "2026-05-01T00:00:00.1Z" || firstReport.Attributions[1].ModifiedAt != "2026-05-02T00:00:00.2Z" {
+		t.Fatalf("attributions=%+v", firstReport.Attributions)
+	}
+}
+
+func TestBuildRejectsCumulativeSemanticRecordAmplificationBeforeEncoding(t *testing.T) {
+	var affected strings.Builder
+	versions := make([]string, 1001)
+	for index := range versions {
+		versions[index] = fmt.Sprintf("1.0.%d", index)
+	}
+	encodedVersions, err := json.Marshal(versions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 100; index++ {
+		if index > 0 {
+			affected.WriteByte(',')
+		}
+		fmt.Fprintf(&affected, `{"package":{"ecosystem":"npm","name":"amplify-%03d"},"versions":%s}`, index, encodedVersions)
+	}
+	document := `[{"id":"AMPLIFICATION","modified":"2026-08-13T00:00:00Z","affected":[` + affected.String() + `]}]`
+	if len(document) >= 16<<20 {
+		t.Fatalf("fixture no longer compact: %d", len(document))
+	}
+	assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "record budget")
+}
+
+func TestBuildRejectsAggregateDecodedElementBudget(t *testing.T) {
+	aliases := strings.Repeat(`"",`, maxDecodedElements)
+	document := `[{"id":"DECODED-BUDGET","modified":"2026-08-13T00:00:00Z","aliases":[` + aliases + `"last"],"affected":[{"package":{"ecosystem":"npm","name":"decoded-budget"},"versions":["1.0.0"]}]}]`
+	if len(document) >= maxSourceBytes {
+		t.Fatalf("fixture no longer compact: %d", len(document))
+	}
+	assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "decoded element budget")
+}
+
+func TestBuildRejectsAggregateDecodedStringBudget(t *testing.T) {
+	ignored := strings.Repeat("x", maxIgnoredBytes)
+	var records strings.Builder
+	for index := 0; index < 13; index++ {
+		if index > 0 {
+			records.WriteByte(',')
+		}
+		fmt.Fprintf(&records, `{"id":"STRING-BUDGET-%02d","modified":"2026-08-13T00:00:00Z","details":%q,"affected":[{"package":{"ecosystem":"npm","name":"string-budget-%02d"},"versions":["1.0.0"]}]}`, index, ignored, index)
+	}
+	document := `[` + records.String() + `]`
+	if len(document) >= maxSourceBytes {
+		t.Fatalf("fixture no longer compact: %d", len(document))
+	}
+	assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "decoded string budget")
+}
+
+func TestBuildRejectsCumulativeDecodedBudgetAcrossSources(t *testing.T) {
+	makeDocument := func(prefix string) string {
+		aliases := strings.Repeat(`"A",`, 999) + `"last"`
+		var records strings.Builder
+		for index := 0; index < 251; index++ {
+			if index > 0 {
+				records.WriteByte(',')
+			}
+			fmt.Fprintf(&records, `{"id":"%s-%03d","modified":"2026-08-13T00:00:00Z","aliases":[%s],"affected":[{"package":{"ecosystem":"npm","name":"%s-%03d"},"versions":["1.0.0"]}]}`, prefix, index, aliases, prefix, index)
+		}
+		return `[` + records.String() + `]`
+	}
+	input := fixtureInput(t)
+	input.OpenSSF = nil
+	input.OSV = []Source{
+		{Path: writeDocument(t, makeDocument("FIRST")), License: "CC-BY-4.0", PublicURLBase: "https://example.test/first/"},
+		{Path: writeDocument(t, makeDocument("SECOND")), License: "CC-BY-4.0", PublicURLBase: "https://example.test/second/"},
+	}
+	assertBuildError(t, input, "cumulative decoded element budget")
+}
+
+func TestBuildRejectsExpandedChildIDPastBundleLimit(t *testing.T) {
+	maximumID := strings.Repeat("a", 252)
+	maximumDocument := `[{"id":"` + maximumID + `","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"maximum-id"},"versions":["1.0.0","2.0.0"]}]}]`
+	maximumInput := inputForDocument(t, maximumDocument, false, "CC-BY-4.0")
+	raw, _, err := Build(maximumInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := bundle.Load(raw, maximumInput.GeneratedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range envelope.TI.Records {
+		if len(record.ID) != maxRecordIDBytes {
+			t.Fatalf("expanded id length=%d, want %d", len(record.ID), maxRecordIDBytes)
+		}
+	}
+
+	id := strings.Repeat("a", 253)
+	document := `[{"id":"` + id + `","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"long-id"},"versions":["1.0.0","2.0.0"]}]}]`
+	assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "expanded record id")
+}
+
+func TestBuildRejectsSensitivePublicAttributionValues(t *testing.T) {
+	sensitiveID := `[{"id":"ghp_123456789012345678901234567890123456","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"sensitive-id"},"versions":["1.0.0"]}]}]`
+	assertBuildError(t, inputForDocument(t, sensitiveID, false, "CC-BY-4.0"), "invalid id")
+
+	sensitiveSeverity := `[{"id":"SENSITIVE-SEVERITY","modified":"2026-08-13T00:00:00Z","severity":[{"type":"OTHER","score":"reviewed","source":"npm_123456789012345678901234567890"}],"affected":[{"package":{"ecosystem":"npm","name":"sensitive-severity"},"versions":["1.0.0"]}]}]`
+	assertBuildError(t, inputForDocument(t, sensitiveSeverity, false, "CC-BY-4.0"), "severity is outside bounds")
+
+	input := inputForDocument(t, `[{"id":"SENSITIVE-BASE","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"sensitive-base"},"versions":["1.0.0"]}]}]`, false, "CC-BY-4.0")
+	input.OSV[0].PublicURLBase = "https://example.test/npm_123456789012345678901234567890/"
+	assertBuildError(t, input, "public source")
 }
 
 func TestBuildRejectsIncompatibleOSVOpenSSFOverlapSelectors(t *testing.T) {
@@ -436,6 +589,21 @@ func assertRecord(t *testing.T, records []bundle.TIRecord, id, assetID, versionR
 		}
 		if record.AssetID != assetID || record.VersionRange != versionRange || record.Verdict != verdict || record.Confidence != confidence || record.License != "CC-BY-4.0" || !record.Redistributable || len(record.SourceURLs) != 1 {
 			t.Fatalf("record=%+v", record)
+		}
+		return
+	}
+	t.Fatalf("missing record %q in %+v", id, records)
+}
+
+func assertSelectorMatch(t *testing.T, records []bundle.TIRecord, id, version string, want bool) {
+	t.Helper()
+	for _, record := range records {
+		if record.ID != id {
+			continue
+		}
+		matched, supported := versionmatch.Match(record.AssetID, version, record.VersionRange)
+		if !supported || matched != want {
+			t.Fatalf("Match(%q,%q,%q)=(%v,%v), want (%v,true)", record.AssetID, version, record.VersionRange, matched, supported, want)
 		}
 		return
 	}

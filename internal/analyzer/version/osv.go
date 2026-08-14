@@ -9,6 +9,7 @@ import (
 )
 
 const osvExpressionPrefix = "osv:"
+const osvOpenStartSentinel = "@start"
 
 var pep440Pattern = regexp.MustCompile(`(?i)\Av?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:[-_.]?(a|b|c|rc|alpha|beta|pre|preview)(?:[-_.]?(\d+))?)?(?:(?:-(\d+))|(?:[-_.]?(post|rev|r)(?:[-_.]?(\d+))?))?(?:[-_.]?(dev)(?:[-_.]?(\d+))?)?(?:\+([a-z0-9]+(?:[-_.][a-z0-9]+)*))?\z`)
 
@@ -26,10 +27,46 @@ func OSVExpression(assetID, rangeType, expression string) (string, bool) {
 	return encoded, true
 }
 
+// OSVOpenStart represents OSV's introduced:"0" sentinel as negative
+// infinity while still requiring a valid collected ecosystem version.
+func OSVOpenStart(assetID, rangeType string) (string, bool) {
+	kind := strings.ToLower(rangeType)
+	if kind != "semver" && kind != "ecosystem" || !supportedOSVEcosystem(assetID) {
+		return "", false
+	}
+	return osvExpressionPrefix + kind + ":" + osvOpenStartSentinel, true
+}
+
+// OSVExact represents literal membership in affected[].versions. It does not
+// use precedence equality, so identity-significant spellings stay distinct.
+func OSVExact(assetID, version string) (string, bool) {
+	if !validExactVersion(assetID, version) {
+		return "", false
+	}
+	expression := osvExpressionPrefix + "exact:" + version
+	if len(expression) > maxRangeBytes {
+		return "", false
+	}
+	return expression, true
+}
+
 func matchOSVExpression(assetID, value, encoded string) (bool, bool) {
 	rest := strings.TrimPrefix(encoded, osvExpressionPrefix)
 	kind, expression, ok := strings.Cut(rest, ":")
-	if !ok || kind != "semver" && kind != "ecosystem" || !validOSVComparators(assetID, kind, expression) {
+	if !ok {
+		return false, false
+	}
+	if kind == "exact" {
+		return matchOSVExact(assetID, value, expression)
+	}
+	if kind != "semver" && kind != "ecosystem" {
+		return false, false
+	}
+	if expression == osvOpenStartSentinel {
+		_, valid := compareOSVVersion(assetID, kind, value, value)
+		return valid, valid
+	}
+	if !validOSVComparators(assetID, kind, expression) {
 		return false, false
 	}
 	fields := strings.Fields(expression)
@@ -46,7 +83,35 @@ func matchOSVExpression(assetID, value, encoded string) (bool, bool) {
 	return true, true
 }
 
+func matchOSVExact(assetID, candidate, listed string) (bool, bool) {
+	if !validExactVersion(assetID, listed) || !validExactVersion(assetID, candidate) {
+		return false, false
+	}
+	return candidate == listed, true
+}
+
+func validExactVersion(assetID, value string) bool {
+	if value == "" || len(value) > 128 || strings.TrimSpace(value) != value || strings.ContainsAny(value, " /\\") {
+		return false
+	}
+	switch ecosystemOf(assetID) {
+	case "npm", "cargo":
+		_, ok := parseStrictSemver(value)
+		return ok
+	case "go":
+		return semver.IsValid(goSemver(value))
+	case "pypi":
+		_, ok := parsePEP440(value)
+		return ok
+	default:
+		return false
+	}
+}
+
 func validOSVComparators(assetID, kind, expression string) bool {
+	if strings.Contains(expression, osvOpenStartSentinel) {
+		return false
+	}
 	fields := strings.Fields(expression)
 	if len(fields) == 0 || len(fields) > 2 || strings.Contains(expression, ",") || strings.Contains(expression, "||") {
 		return false

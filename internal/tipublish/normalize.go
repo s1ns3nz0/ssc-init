@@ -12,6 +12,7 @@ import (
 	versionmatch "github.com/s1ns3nz0/ssc-init/internal/analyzer/version"
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/packageid"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
 const (
@@ -38,10 +39,16 @@ type normalizedDocument struct {
 	rejectedAffected int
 }
 
-var errAffectedUnrepresentable = errors.New("affected entry cannot be represented exactly")
+var (
+	errAffectedUnrepresentable = errors.New("affected entry cannot be represented exactly")
+	errNormalizedRecordBudget  = errors.New("normalized record budget exceeds 100000")
+)
 
-func normalizeRecord(record osvRecord, source Source, category sourceCategory, input Input) (normalizedDocument, error) {
-	if record.ID == "" || len(record.ID) > maxRecordIDBytes || strings.ContainsAny(record.ID, "/\\?#\x00") {
+func normalizeRecord(record osvRecord, source Source, category sourceCategory, input Input, recordBudget int) (normalizedDocument, error) {
+	if recordBudget <= 0 {
+		return normalizedDocument{}, errNormalizedRecordBudget
+	}
+	if record.ID == "" || len(record.ID) > maxRecordIDBytes || strings.ContainsAny(record.ID, "/\\?#\x00") || privacy.ContainsSensitiveValue(record.ID) {
 		return normalizedDocument{}, fmt.Errorf("source record: invalid id")
 	}
 	modified, err := time.Parse(time.RFC3339, record.Modified)
@@ -72,9 +79,10 @@ func normalizeRecord(record osvRecord, source Source, category sourceCategory, i
 		return normalizedDocument{}, fmt.Errorf("public source configuration is invalid")
 	}
 	document := normalizedDocument{records: []normalizedRecord{}}
+	seenSelectors := make(map[string]struct{})
 	var lastRejected error
 	for _, affected := range record.Affected {
-		records, err := normalizeAffectedRecord(record, affected, source, category, input, publicURL, modified, withdrawn)
+		records, err := normalizeAffectedRecord(record, affected, source, category, input, publicURL, modified, withdrawn, seenSelectors, recordBudget-len(document.records))
 		if errors.Is(err, errAffectedUnrepresentable) {
 			document.rejectedAffected++
 			lastRejected = err
@@ -83,7 +91,14 @@ func normalizeRecord(record osvRecord, source Source, category sourceCategory, i
 		if err != nil {
 			return normalizedDocument{}, fmt.Errorf("source record %s: %w", record.ID, err)
 		}
-		document.records = append(document.records, records...)
+		for _, normalized := range records {
+			key := semanticKey(normalized.record)
+			if _, duplicate := seenSelectors[key]; duplicate {
+				continue
+			}
+			seenSelectors[key] = struct{}{}
+			document.records = append(document.records, normalized)
+		}
 	}
 	if len(document.records) == 0 {
 		return normalizedDocument{}, fmt.Errorf("source record %s: all affected entries are unrepresentable: %w", record.ID, lastRejected)
@@ -100,14 +115,17 @@ func normalizeRecord(record osvRecord, source Source, category sourceCategory, i
 		if len(document.records) > 1 {
 			childID = fmt.Sprintf("%s#%03d", record.ID, index+1)
 		}
+		if len(childID) > maxRecordIDBytes {
+			return normalizedDocument{}, fmt.Errorf("source record %s: expanded record id exceeds bundle limit", record.ID)
+		}
 		document.records[index].record.ID = childID
 		document.records[index].attribution.ID = childID
 	}
 	return document, nil
 }
 
-func normalizeAffectedRecord(record osvRecord, affected osvAffected, source Source, category sourceCategory, input Input, publicURL string, modified time.Time, withdrawn bool) ([]normalizedRecord, error) {
-	if len(affected.Package.PURL) > maxStringBytes || len(affected.Severity) > 64 || len(affected.EcosystemSpecific) > maxIgnoredBytes || len(affected.DatabaseSpecific) > maxIgnoredBytes {
+func normalizeAffectedRecord(record osvRecord, affected osvAffected, source Source, category sourceCategory, input Input, publicURL string, modified time.Time, withdrawn bool, seenSelectors map[string]struct{}, recordBudget int) ([]normalizedRecord, error) {
+	if affected.Package.Ecosystem == "" || len(affected.Package.Ecosystem) > 64 || affected.Package.Name == "" || len(affected.Package.Name) > maxStringBytes || len(affected.Package.PURL) > maxStringBytes || len(affected.Severity) > 64 || len(affected.EcosystemSpecific) > maxIgnoredBytes || len(affected.DatabaseSpecific) > maxIgnoredBytes {
 		return nil, fmt.Errorf("affected metadata is outside bounds")
 	}
 	coordinate, ok := packageid.FromOSV(affected.Package.Ecosystem, affected.Package.Name)
@@ -135,9 +153,13 @@ func normalizeAffectedRecord(record osvRecord, affected osvAffected, source Sour
 	} else if highCVSS {
 		verdict, confidence = "suspicious", "high"
 	}
-	result := make([]normalizedRecord, 0, len(selectors))
+	capacity := len(selectors)
+	if capacity > recordBudget {
+		capacity = recordBudget
+	}
+	result := make([]normalizedRecord, 0, capacity)
 	for _, selector := range selectors {
-		result = append(result, normalizedRecord{
+		normalized := normalizedRecord{
 			record: bundle.TIRecord{
 				AssetID: coordinate, VersionRange: selector, Verdict: verdict, Confidence: confidence,
 				SourceURLs: []string{publicURL}, RetrievedAt: input.GeneratedAt.Format(time.RFC3339), ValidUntil: input.ValidUntil.Format(time.RFC3339),
@@ -147,7 +169,14 @@ func normalizeAffectedRecord(record osvRecord, affected osvAffected, source Sour
 				SourceID: record.ID, Category: string(category), License: source.License, PublicURL: publicURL,
 				ModifiedAt: modified.Format(time.RFC3339Nano), Withdrawn: withdrawn, Severities: severities,
 			},
-		})
+		}
+		if _, duplicate := seenSelectors[semanticKey(normalized.record)]; duplicate {
+			continue
+		}
+		if len(result) >= recordBudget {
+			return nil, errNormalizedRecordBudget
+		}
+		result = append(result, normalized)
 	}
 	return result, nil
 }
@@ -158,7 +187,7 @@ func normalizeAffected(coordinate string, affected osvAffected) ([]string, error
 	}
 	alternatives := make([]string, 0, len(affected.Ranges)+len(affected.Versions))
 	for _, candidate := range affected.Versions {
-		expression, ok := versionmatch.OSVExpression(coordinate, "ECOSYSTEM", "="+candidate)
+		expression, ok := versionmatch.OSVExact(coordinate, candidate)
 		if !ok {
 			return nil, fmt.Errorf("%w: version %q", errAffectedUnrepresentable, candidate)
 		}
@@ -230,10 +259,15 @@ func normalizeRange(coordinate string, affectedRange osvRange) ([]string, error)
 		introduced = ""
 	}
 	if introduced != "" {
-		raw := ">=" + introduced
 		if introduced == "0" {
-			raw = ">=0.0.0"
+			expression, ok := versionmatch.OSVOpenStart(coordinate, affectedRange.Type)
+			if !ok {
+				return nil, fmt.Errorf("open range cannot be represented exactly")
+			}
+			alternatives = append(alternatives, expression)
+			return alternatives, nil
 		}
+		raw := ">=" + introduced
 		expression, ok := versionmatch.OSVExpression(coordinate, affectedRange.Type, raw)
 		if !ok {
 			return nil, fmt.Errorf("open range cannot be represented exactly")
@@ -291,7 +325,7 @@ func normalizeSeverities(values []Severity) ([]Severity, bool, error) {
 	result = dedupeSeverities(result)
 	high := false
 	for _, severity := range result {
-		if severity.Type == "" || severity.Score == "" || len(severity.Type) > 64 || len(severity.Score) > 256 || len(severity.Source) > maxStringBytes {
+		if severity.Type == "" || severity.Score == "" || len(severity.Type) > 64 || len(severity.Score) > 256 || len(severity.Source) > maxStringBytes || privacy.ContainsSensitiveValue(severity.Type) || privacy.ContainsSensitiveValue(severity.Score) || severity.Source != "" && privacy.ContainsSensitiveValue(severity.Source) {
 			return nil, false, fmt.Errorf("severity is outside bounds")
 		}
 		if severity.Type != "CVSS_V3" {

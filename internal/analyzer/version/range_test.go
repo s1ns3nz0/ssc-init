@@ -83,3 +83,49 @@ func TestOSVExpressionRejectsNonCanonicalSemVerAndWrongEcosystemSyntax(t *testin
 		}
 	}
 }
+
+func TestOSVOpenStartMatchesEveryValidVersionAndRejectsSentinelElsewhere(t *testing.T) {
+	for _, test := range []struct{ asset, version, rangeType string }{
+		{"pkg:npm/example", "0.0.0-alpha.1", "SEMVER"},
+		{"pkg:cargo/example", "0.0.0-alpha.1", "SEMVER"},
+		{"pkg:golang/example.com/mod", "v0.0.0-20260101000000-aaaaaaaaaaaa", "SEMVER"},
+		{"pkg:pypi/example", "0.dev1", "ECOSYSTEM"},
+	} {
+		expression, ok := OSVOpenStart(test.asset, test.rangeType)
+		if !ok {
+			t.Fatalf("OSVOpenStart(%q,%q) unsupported", test.asset, test.rangeType)
+		}
+		if matched, supported := Match(test.asset, test.version, expression); !supported || !matched {
+			t.Fatalf("Match(%q,%q,%q)=(%v,%v)", test.asset, test.version, expression, matched, supported)
+		}
+	}
+	for _, expression := range []string{"osv:semver:>=@start", "osv:semver:<=@start", "osv:ecosystem:=@start", "osv:exact:@start"} {
+		if matched, supported := Match("pkg:npm/example", "1.0.0", expression); matched || supported {
+			t.Fatalf("sentinel accepted outside open-start selector: %q", expression)
+		}
+	}
+}
+
+func TestOSVExactUsesLiteralEnumeratedIdentity(t *testing.T) {
+	tests := []struct {
+		asset, listed, candidate string
+		want                     bool
+	}{
+		{"pkg:npm/example", "1.0.0+bad", "1.0.0+bad", true},
+		{"pkg:npm/example", "1.0.0+bad", "1.0.0+clean", false},
+		{"pkg:cargo/example", "1.0.0+bad", "1.0.0+clean", false},
+		{"pkg:golang/example.com/mod", "v1.2.3", "1.2.3", false},
+		{"pkg:pypi/example", "1.0-1", "1.0.post1", false},
+		{"pkg:pypi/example", "1.0-1", "1.0-1", true},
+	}
+	for _, test := range tests {
+		expression, ok := OSVExact(test.asset, test.listed)
+		if !ok {
+			t.Fatalf("OSVExact(%q,%q) unsupported", test.asset, test.listed)
+		}
+		matched, supported := Match(test.asset, test.candidate, expression)
+		if !supported || matched != test.want {
+			t.Fatalf("Match(%q,%q,%q)=(%v,%v), want (%v,true)", test.asset, test.candidate, expression, matched, supported, test.want)
+		}
+	}
+}

@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
+	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
+
+const maxNormalizedRecords = 100_000
 
 // Source identifies one pinned local OSV-format snapshot and the reviewed
 // redistribution metadata applied to every record in that snapshot.
@@ -96,6 +99,9 @@ func Build(input Input) ([]byte, Report, error) {
 	}
 	bySourceID := make(map[string]map[string]aggregateRecord)
 	semanticSets := make(map[string][]string)
+	totalSemanticRecords := 0
+	totalAttributions := 0
+	totalDecoded := decodedBudget{}
 	for _, group := range []struct {
 		sources  []Source
 		category sourceCategory
@@ -105,8 +111,21 @@ func Build(input Input) ([]byte, Report, error) {
 			if err != nil {
 				return nil, Report{}, err
 			}
+			usage := measureDecodedBudget(sourceRecords)
+			totalDecoded.elements += usage.elements
+			totalDecoded.stringBytes += usage.stringBytes
+			if totalDecoded.elements > maxDecodedElements {
+				return nil, Report{}, fmt.Errorf("cumulative decoded element budget exceeded")
+			}
+			if totalDecoded.stringBytes > maxDecodedStringBytes {
+				return nil, Report{}, fmt.Errorf("cumulative decoded string budget exceeded")
+			}
 			for _, sourceRecord := range sourceRecords {
-				document, err := normalizeRecord(sourceRecord, source, group.category, input)
+				recordBudget := maxNormalizedRecords - totalSemanticRecords
+				if _, duplicate := semanticSets[sourceRecord.ID]; duplicate {
+					recordBudget = maxNormalizedRecords
+				}
+				document, err := normalizeRecord(sourceRecord, source, group.category, input, recordBudget)
 				if err != nil {
 					return nil, Report{}, err
 				}
@@ -119,6 +138,11 @@ func Build(input Input) ([]byte, Report, error) {
 					return nil, Report{}, fmt.Errorf("conflicting duplicate record id %s", sourceRecord.ID)
 				}
 				if _, exists := semanticSets[sourceRecord.ID]; !exists {
+					if len(keys) > maxNormalizedRecords-totalSemanticRecords {
+						return nil, Report{}, fmt.Errorf("normalized record budget exceeds 100000")
+					}
+					totalSemanticRecords += len(keys)
+					totalAttributions += len(keys)
 					semanticSets[sourceRecord.ID] = keys
 					bySourceID[sourceRecord.ID] = make(map[string]aggregateRecord, len(keys))
 					for _, normalized := range document.records {
@@ -138,7 +162,11 @@ func Build(input Input) ([]byte, Report, error) {
 						aggregate.record.Verdict, aggregate.record.Confidence = "known-malicious", "high"
 					}
 					if !containsAttribution(aggregate.attributions, normalized.attribution) {
+						if totalAttributions >= maxNormalizedRecords {
+							return nil, Report{}, fmt.Errorf("attribution record budget exceeds 100000")
+						}
 						aggregate.attributions = append(aggregate.attributions, normalized.attribution)
+						totalAttributions++
 					}
 					bySourceID[sourceRecord.ID][key] = aggregate
 				}
@@ -163,18 +191,9 @@ func Build(input Input) ([]byte, Report, error) {
 	}
 	sort.Slice(records, func(left, right int) bool { return records[left].ID < records[right].ID })
 	sort.Slice(report.Attributions, func(left, right int) bool {
-		leftValue, rightValue := report.Attributions[left], report.Attributions[right]
-		if leftValue.ID != rightValue.ID {
-			return leftValue.ID < rightValue.ID
-		}
-		if leftValue.Category != rightValue.Category {
-			return leftValue.Category < rightValue.Category
-		}
-		if leftValue.PublicURL != rightValue.PublicURL {
-			return leftValue.PublicURL < rightValue.PublicURL
-		}
-		return leftValue.License < rightValue.License
+		return attributionKey(report.Attributions[left]) < attributionKey(report.Attributions[right])
 	})
+	report.Attributions = dedupeAttributions(report.Attributions)
 	report.Records = len(records)
 	raw, err := encodeJSON(outputEnvelope{
 		SchemaVersion: bundle.SchemaVersion,
@@ -213,7 +232,7 @@ func validateInput(input Input) error {
 		if !approvedLicense(source.License) {
 			return fmt.Errorf("redistributable license is absent or not approved")
 		}
-		if !publicHTTPS(source.PublicURLBase) || source.PublicURLBase[len(source.PublicURLBase)-1] != '/' {
+		if !publicHTTPS(source.PublicURLBase) || source.PublicURLBase[len(source.PublicURLBase)-1] != '/' || privacy.ContainsSensitiveValue(source.PublicURLBase) {
 			return fmt.Errorf("public source configuration is invalid")
 		}
 	}
@@ -250,6 +269,21 @@ func containsAttribution(values []Attribution, candidate Attribution) bool {
 		}
 	}
 	return false
+}
+
+func attributionKey(value Attribution) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
+func dedupeAttributions(values []Attribution) []Attribution {
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || attributionKey(result[len(result)-1]) != attributionKey(value) {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func encodeJSON(value any) ([]byte, error) {

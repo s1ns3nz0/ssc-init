@@ -8,7 +8,11 @@ import (
 	"os"
 )
 
-const maxSourceBytes = 16 << 20
+const (
+	maxSourceBytes        = 16 << 20
+	maxDecodedElements    = 500_000
+	maxDecodedStringBytes = 12 << 20
+)
 
 type osvRecord struct {
 	SchemaVersion    string          `json:"schema_version,omitempty"`
@@ -105,5 +109,65 @@ func readOSV(path string) ([]osvRecord, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("source record: malformed OSV document")
 	}
+	if err := validateDecodedBudget(records); err != nil {
+		return nil, err
+	}
 	return records, nil
+}
+
+func validateDecodedBudget(records []osvRecord) error {
+	usage := measureDecodedBudget(records)
+	if usage.elements > maxDecodedElements {
+		return fmt.Errorf("source record: decoded element budget exceeded")
+	}
+	if usage.stringBytes > maxDecodedStringBytes {
+		return fmt.Errorf("source record: decoded string budget exceeded")
+	}
+	return nil
+}
+
+type decodedBudget struct {
+	elements    int
+	stringBytes int
+}
+
+func measureDecodedBudget(records []osvRecord) decodedBudget {
+	usage := decodedBudget{elements: len(records)}
+	addStrings := func(values ...string) {
+		for _, value := range values {
+			usage.stringBytes += len(value)
+		}
+	}
+	for _, record := range records {
+		usage.elements += len(record.Aliases) + len(record.Upstream) + len(record.Related) + len(record.Affected) + len(record.Severity) + len(record.References)
+		addStrings(record.SchemaVersion, record.ID, record.Modified, record.Published, record.Withdrawn, record.Summary, record.Details)
+		addStrings(record.Aliases...)
+		addStrings(record.Upstream...)
+		addStrings(record.Related...)
+		usage.stringBytes += len(record.Credits) + len(record.DatabaseSpecific)
+		for _, severity := range record.Severity {
+			addStrings(severity.Type, severity.Score, severity.Source)
+		}
+		for _, reference := range record.References {
+			addStrings(reference.Type, reference.URL)
+		}
+		for _, affected := range record.Affected {
+			usage.elements += len(affected.Severity) + len(affected.Ranges) + len(affected.Versions)
+			addStrings(affected.Package.Ecosystem, affected.Package.Name, affected.Package.PURL)
+			addStrings(affected.Versions...)
+			usage.stringBytes += len(affected.EcosystemSpecific) + len(affected.DatabaseSpecific)
+			for _, severity := range affected.Severity {
+				addStrings(severity.Type, severity.Score, severity.Source)
+			}
+			for _, affectedRange := range affected.Ranges {
+				usage.elements += len(affectedRange.Events)
+				addStrings(affectedRange.Type, affectedRange.Repo)
+				usage.stringBytes += len(affectedRange.DatabaseSpecific)
+				for _, event := range affectedRange.Events {
+					addStrings(event.Introduced, event.Fixed, event.LastAffected, event.Limit)
+				}
+			}
+		}
+	}
+	return usage
 }
