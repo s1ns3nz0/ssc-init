@@ -410,7 +410,7 @@ func TestBuildRejectsCumulativeDecodedBudgetAcrossSources(t *testing.T) {
 		{Path: writeDocument(t, makeDocument("FIRST")), License: "CC-BY-4.0", PublicURLBase: "https://example.test/first/"},
 		{Path: writeDocument(t, makeDocument("SECOND")), License: "CC-BY-4.0", PublicURLBase: "https://example.test/second/"},
 	}
-	assertBuildError(t, input, "cumulative decoded element budget")
+	assertBuildError(t, input, "decoded element budget")
 }
 
 func TestBuildRejectsExpandedChildIDPastBundleLimit(t *testing.T) {
@@ -483,6 +483,11 @@ func TestBuildRejectsMalformedOrLossyRanges(t *testing.T) {
 			assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "source record")
 		})
 	}
+}
+
+func TestBuildRejectsDuplicateJSONFieldsBeforeNormalization(t *testing.T) {
+	document := `[{"id":"DUPLICATE-FIELD","id":"OVERRIDE","modified":"2026-08-13T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"duplicate-field"},"versions":["1.0.0"]}]}]`
+	assertBuildError(t, inputForDocument(t, document, false, "CC-BY-4.0"), "duplicate JSON field")
 }
 
 func TestBuildDeduplicatesRecordsAndIsByteIdenticalWhenSourcesAreShuffled(t *testing.T) {
@@ -634,5 +639,76 @@ func TestReportJSONIsClosedAndStable(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Version != "2026.08.14" || decoded.Sequence != 42 || decoded.Records != 4 || decoded.Sources != 2 || len(decoded.Attributions) != 4 || decoded.Attributions[0].ID != "GHSA-2026-1" || decoded.Attributions[0].Severities[0].Type != "CVSS_V3" {
 		t.Fatalf("raw=%s err=%v", raw, err)
+	}
+}
+
+func TestCanonicalEncodingStopsAtHardBundleAndReportLimits(t *testing.T) {
+	value := struct {
+		Payload string `json:"payload"`
+	}{Payload: strings.Repeat("x", 4096)}
+	written := 0
+	_, err := encodeJSONLimited(value, 64, "bundle", func(count int) { written += count })
+	if err == nil || !strings.Contains(err.Error(), "bundle exceeds 64-byte limit") || written > 64 {
+		t.Fatalf("bundle error=%v written=%d", err, written)
+	}
+
+	written = 0
+	report := Report{Attributions: []Attribution{{PublicURL: "https://example.test/" + strings.Repeat("x", 4096)}}}
+	_, err = encodeReportLimited(report, 64, func(count int) { written += count })
+	if err == nil || !strings.Contains(err.Error(), "attribution report exceeds 64-byte limit") || written > 64 {
+		t.Fatalf("report error=%v written=%d", err, written)
+	}
+}
+
+func TestStreamingCanonicalEncodersMatchStandardJSONBytes(t *testing.T) {
+	raw, report, err := Build(fixtureInput(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope outputEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	standardBundle, err := encodeJSONLimited(envelope, maxBundleBytes, "bundle", nil)
+	if err != nil || string(raw) != string(standardBundle) {
+		t.Fatalf("streamed bundle differs from standard JSON: err=%v\nstreamed=%s\nstandard=%s", err, raw, standardBundle)
+	}
+	streamedReport, err := EncodeReport(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standardReport, err := encodeJSONLimited(report, maxReportBytes, "attribution report", nil)
+	if err != nil || string(streamedReport) != string(standardReport) {
+		t.Fatalf("streamed report differs from standard JSON: err=%v", err)
+	}
+}
+
+func TestBuildStopsEncodingHundredThousandLongURLRecordsAtLimit(t *testing.T) {
+	versions := make([]string, maxListItems)
+	for index := range versions {
+		versions[index] = fmt.Sprintf("1.%d.0", index)
+	}
+	encodedVersions, err := json.Marshal(versions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var affected strings.Builder
+	for index := 0; index < maxNormalizedRecords/maxListItems; index++ {
+		if index > 0 {
+			affected.WriteByte(',')
+		}
+		fmt.Fprintf(&affected, `{"package":{"ecosystem":"npm","name":"long-output-%d"},"versions":%s}`, index, encodedVersions)
+	}
+	document := `[{"id":"LONG-URL-OUTPUT","modified":"2026-08-13T00:00:00Z","affected":[` + affected.String() + `]}]`
+	input := inputForDocument(t, document, false, "CC-BY-4.0")
+	input.OSV[0].PublicURLBase = "https://example.test/" + strings.Repeat("p", 1800) + "/"
+	const testLimit = 4096
+	written := 0
+	_, _, err = buildLimited(input, testLimit, func(count int) { written += count })
+	if err == nil || !strings.Contains(err.Error(), "bundle exceeds 4096-byte limit") {
+		t.Fatalf("error=%v, want bundle byte limit", err)
+	}
+	if written > testLimit {
+		t.Fatalf("wrote %d bytes past %d-byte limit", written, testLimit)
 	}
 }

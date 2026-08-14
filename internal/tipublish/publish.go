@@ -16,7 +16,11 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/privacy"
 )
 
-const maxNormalizedRecords = 100_000
+const (
+	maxNormalizedRecords = 100_000
+	maxBundleBytes       = 16 << 20
+	maxReportBytes       = 16 << 20
+)
 
 // Source identifies one pinned local OSV-format snapshot and the reviewed
 // redistribution metadata applied to every record in that snapshot.
@@ -87,6 +91,10 @@ type aggregateRecord struct {
 // Build validates, normalizes, sorts, deduplicates, and encodes an unsigned TI
 // bundle. It performs no network access and does not load signing material.
 func Build(input Input) ([]byte, Report, error) {
+	return buildLimited(input, maxBundleBytes, nil)
+}
+
+func buildLimited(input Input, bundleLimit int, onBundleWrite func(int)) ([]byte, Report, error) {
 	if err := validateInput(input); err != nil {
 		return nil, Report{}, err
 	}
@@ -107,11 +115,11 @@ func Build(input Input) ([]byte, Report, error) {
 		category sourceCategory
 	}{{input.OSV, categoryVulnerable}, {input.OpenSSF, categoryMalicious}} {
 		for _, source := range group.sources {
-			sourceRecords, err := readOSV(source.Path)
+			remainingDecoded := decodedBudget{elements: maxDecodedElements - totalDecoded.elements, stringBytes: maxDecodedStringBytes - totalDecoded.stringBytes}
+			sourceRecords, usage, err := readOSV(source.Path, remainingDecoded)
 			if err != nil {
 				return nil, Report{}, err
 			}
-			usage := measureDecodedBudget(sourceRecords)
 			totalDecoded.elements += usage.elements
 			totalDecoded.stringBytes += usage.stringBytes
 			if totalDecoded.elements > maxDecodedElements {
@@ -195,7 +203,7 @@ func Build(input Input) ([]byte, Report, error) {
 	})
 	report.Attributions = dedupeAttributions(report.Attributions)
 	report.Records = len(records)
-	raw, err := encodeJSON(outputEnvelope{
+	raw, err := encodeBundleLimited(outputEnvelope{
 		SchemaVersion: bundle.SchemaVersion,
 		Family:        bundle.FamilyTI,
 		Version:       input.Version,
@@ -205,7 +213,7 @@ func Build(input Input) ([]byte, Report, error) {
 		ValidFrom:     input.ValidFrom,
 		ValidUntil:    input.ValidUntil,
 		Payload:       bundle.TIPayload{Records: records},
-	})
+	}, bundleLimit, onBundleWrite)
 	if err != nil {
 		return nil, Report{}, fmt.Errorf("encode bundle: %w", err)
 	}
@@ -218,7 +226,7 @@ func Build(input Input) ([]byte, Report, error) {
 // EncodeReport emits the canonical public attribution report encoding used by
 // the publisher command.
 func EncodeReport(report Report) ([]byte, error) {
-	return encodeJSON(report)
+	return encodeReportLimited(report, maxReportBytes, nil)
 }
 
 func validateInput(input Input) error {
@@ -286,12 +294,141 @@ func dedupeAttributions(values []Attribution) []Attribution {
 	return result
 }
 
-func encodeJSON(value any) ([]byte, error) {
-	var output bytes.Buffer
-	encoder := json.NewEncoder(&output)
+type limitedBuffer struct {
+	buffer  bytes.Buffer
+	limit   int
+	name    string
+	onWrite func(int)
+}
+
+func (writer *limitedBuffer) Write(value []byte) (int, error) {
+	remaining := writer.limit - writer.buffer.Len()
+	if remaining <= 0 {
+		return 0, fmt.Errorf("%s exceeds %d-byte limit", writer.name, writer.limit)
+	}
+	writeValue := value
+	if len(writeValue) > remaining {
+		writeValue = writeValue[:remaining]
+	}
+	written, err := writer.buffer.Write(writeValue)
+	if writer.onWrite != nil {
+		writer.onWrite(written)
+	}
+	if err != nil {
+		return written, err
+	}
+	if written != len(value) {
+		return written, fmt.Errorf("%s exceeds %d-byte limit", writer.name, writer.limit)
+	}
+	return written, nil
+}
+
+func encodeJSONLimited(value any, limit int, name string, onWrite func(int)) ([]byte, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("%s exceeds %d-byte limit", name, limit)
+	}
+	output := &limitedBuffer{limit: limit, name: name, onWrite: onWrite}
+	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return output.Bytes(), nil
+	return output.buffer.Bytes(), nil
+}
+
+func encodeBundleLimited(envelope outputEnvelope, limit int, onWrite func(int)) ([]byte, error) {
+	output := &limitedBuffer{limit: limit, name: "bundle", onWrite: onWrite}
+	if err := writeJSONFields(output, []jsonField{
+		{"schemaVersion", envelope.SchemaVersion}, {"family", envelope.Family}, {"version", envelope.Version},
+		{"sequence", envelope.Sequence}, {"keyId", envelope.KeyID}, {"generatedAt", envelope.GeneratedAt},
+		{"validFrom", envelope.ValidFrom}, {"validUntil", envelope.ValidUntil},
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := output.Write([]byte(`,"payload":{"records":[`)); err != nil {
+		return nil, err
+	}
+	for index, record := range envelope.Payload.Records {
+		if index > 0 {
+			if _, err := output.Write([]byte(",")); err != nil {
+				return nil, err
+			}
+		}
+		if err := writeJSONValue(output, record); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := output.Write([]byte("]}}\n")); err != nil {
+		return nil, err
+	}
+	return output.buffer.Bytes(), nil
+}
+
+func encodeReportLimited(report Report, limit int, onWrite func(int)) ([]byte, error) {
+	output := &limitedBuffer{limit: limit, name: "attribution report", onWrite: onWrite}
+	if err := writeJSONFields(output, []jsonField{
+		{"version", report.Version}, {"sequence", report.Sequence}, {"generatedAt", report.GeneratedAt},
+		{"records", report.Records}, {"malicious", report.Malicious}, {"vulnerable", report.Vulnerable},
+		{"withdrawn", report.Withdrawn}, {"rejectedAffected", report.RejectedAffected},
+		{"duplicates", report.Duplicates}, {"sources", report.Sources},
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := output.Write([]byte(`,"attributions":[`)); err != nil {
+		return nil, err
+	}
+	for index, attribution := range report.Attributions {
+		if index > 0 {
+			if _, err := output.Write([]byte(",")); err != nil {
+				return nil, err
+			}
+		}
+		if err := writeJSONValue(output, attribution); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := output.Write([]byte("]}\n")); err != nil {
+		return nil, err
+	}
+	return output.buffer.Bytes(), nil
+}
+
+type jsonField struct {
+	name  string
+	value any
+}
+
+func writeJSONFields(output *limitedBuffer, fields []jsonField) error {
+	if _, err := output.Write([]byte("{")); err != nil {
+		return err
+	}
+	for index, field := range fields {
+		if index > 0 {
+			if _, err := output.Write([]byte(",")); err != nil {
+				return err
+			}
+		}
+		if err := writeJSONValue(output, field.name); err != nil {
+			return err
+		}
+		if _, err := output.Write([]byte(":")); err != nil {
+			return err
+		}
+		if err := writeJSONValue(output, field.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeJSONValue(output *limitedBuffer, value any) error {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return err
+	}
+	raw := bytes.TrimSuffix(encoded.Bytes(), []byte("\n"))
+	_, err := output.Write(raw)
+	return err
 }

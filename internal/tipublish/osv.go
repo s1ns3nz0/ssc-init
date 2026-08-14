@@ -1,6 +1,7 @@
 package tipublish
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -74,54 +75,171 @@ type osvReference struct {
 	URL  string `json:"url"`
 }
 
-func readOSV(path string) ([]osvRecord, error) {
+func readOSV(path string, remaining decodedBudget) ([]osvRecord, decodedBudget, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read source: %w", err)
+		return nil, decodedBudget{}, fmt.Errorf("read source: %w", err)
 	}
 	defer file.Close()
-
-	raw, err := io.ReadAll(io.LimitReader(file, maxSourceBytes+1))
-	if err != nil || len(raw) == 0 || len(raw) > maxSourceBytes {
-		return nil, fmt.Errorf("read source: source exceeds bounds")
-	}
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("source record: malformed OSV document")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var records []osvRecord
-	switch raw[0] {
-	case '[':
-		if err := decoder.Decode(&records); err != nil || records == nil {
-			return nil, fmt.Errorf("source record: malformed OSV document")
-		}
-	case '{':
-		var record osvRecord
-		if err := decoder.Decode(&record); err != nil {
-			return nil, fmt.Errorf("source record: malformed OSV document")
-		}
-		records = []osvRecord{record}
-	default:
-		return nil, fmt.Errorf("source record: malformed OSV document")
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("source record: malformed OSV document")
-	}
-	if err := validateDecodedBudget(records); err != nil {
-		return nil, err
-	}
-	return records, nil
+	return readOSVReader(file, remaining)
 }
 
-func validateDecodedBudget(records []osvRecord) error {
-	usage := measureDecodedBudget(records)
-	if usage.elements > maxDecodedElements {
-		return fmt.Errorf("source record: decoded element budget exceeded")
+func readOSVReader(source io.Reader, remaining decodedBudget) ([]osvRecord, decodedBudget, error) {
+	limited := &io.LimitedReader{R: source, N: maxSourceBytes + 1}
+	buffered := bufio.NewReader(limited)
+	first, err := firstJSONByte(buffered)
+	if err != nil {
+		return nil, decodedBudget{}, fmt.Errorf("source record: malformed OSV document")
 	}
-	if usage.stringBytes > maxDecodedStringBytes {
-		return fmt.Errorf("source record: decoded string budget exceeded")
+	decoder := json.NewDecoder(buffered)
+	records := make([]osvRecord, 0)
+	used := decodedBudget{}
+	decodeRecord := func() error {
+		if used.elements >= remaining.elements {
+			return fmt.Errorf("source record: decoded element budget exceeded")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return fmt.Errorf("source record: malformed OSV document")
+		}
+		preflightRemaining := decodedBudget{elements: remaining.elements - used.elements, stringBytes: remaining.stringBytes - used.stringBytes}
+		if err := preflightOSVRecord(raw, preflightRemaining); err != nil {
+			return err
+		}
+		closedDecoder := json.NewDecoder(bytes.NewReader(raw))
+		closedDecoder.DisallowUnknownFields()
+		var record osvRecord
+		if err := closedDecoder.Decode(&record); err != nil {
+			return fmt.Errorf("source record: malformed OSV document")
+		}
+		if err := requireJSONEOF(closedDecoder); err != nil {
+			return err
+		}
+		recordUsage := measureDecodedBudget([]osvRecord{record})
+		if recordUsage.elements > remaining.elements-used.elements {
+			return fmt.Errorf("source record: decoded element budget exceeded")
+		}
+		if recordUsage.stringBytes > remaining.stringBytes-used.stringBytes {
+			return fmt.Errorf("source record: decoded string budget exceeded")
+		}
+		used.elements += recordUsage.elements
+		used.stringBytes += recordUsage.stringBytes
+		records = append(records, record)
+		return nil
+	}
+	switch first {
+	case '[':
+		if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+			return nil, decodedBudget{}, fmt.Errorf("source record: malformed OSV document")
+		}
+		for decoder.More() {
+			if err := decodeRecord(); err != nil {
+				return nil, decodedBudget{}, err
+			}
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim(']') || len(records) == 0 {
+			return nil, decodedBudget{}, fmt.Errorf("source record: malformed OSV document")
+		}
+	case '{':
+		if err := decodeRecord(); err != nil {
+			return nil, decodedBudget{}, err
+		}
+	default:
+		return nil, decodedBudget{}, fmt.Errorf("source record: malformed OSV document")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, decodedBudget{}, err
+	}
+	if limited.N == 0 {
+		return nil, decodedBudget{}, fmt.Errorf("read source: source exceeds bounds")
+	}
+	return records, used, nil
+}
+
+func firstJSONByte(reader *bufio.Reader) (byte, error) {
+	for {
+		value, err := reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if value == ' ' || value == '\n' || value == '\r' || value == '\t' {
+			continue
+		}
+		if err := reader.UnreadByte(); err != nil {
+			return 0, err
+		}
+		return value, nil
+	}
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("source record: malformed OSV document")
+	}
+	return nil
+}
+
+func preflightOSVRecord(raw []byte, remaining decodedBudget) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	used := decodedBudget{}
+	if err := inspectJSONValue(decoder, &used, remaining, true); err != nil {
+		return err
+	}
+	return requireJSONEOF(decoder)
+}
+
+func inspectJSONValue(decoder *json.Decoder, used *decodedBudget, remaining decodedBudget, countElement bool) error {
+	if countElement {
+		used.elements++
+		if used.elements > remaining.elements {
+			return fmt.Errorf("source record: decoded element budget exceeded")
+		}
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("source record: malformed OSV document")
+	}
+	switch value := token.(type) {
+	case string:
+		used.stringBytes += len(value)
+		if used.stringBytes > remaining.stringBytes {
+			return fmt.Errorf("source record: decoded string budget exceeded")
+		}
+	case json.Delim:
+		switch value {
+		case '{':
+			keys := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				key, ok := keyToken.(string)
+				if err != nil || !ok {
+					return fmt.Errorf("source record: malformed OSV document")
+				}
+				if _, duplicate := keys[key]; duplicate {
+					return fmt.Errorf("source record: duplicate JSON field")
+				}
+				keys[key] = struct{}{}
+				if err := inspectJSONValue(decoder, used, remaining, false); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil || closing != json.Delim('}') {
+				return fmt.Errorf("source record: malformed OSV document")
+			}
+		case '[':
+			for decoder.More() {
+				if err := inspectJSONValue(decoder, used, remaining, true); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil || closing != json.Delim(']') {
+				return fmt.Errorf("source record: malformed OSV document")
+			}
+		default:
+			return fmt.Errorf("source record: malformed OSV document")
+		}
 	}
 	return nil
 }
