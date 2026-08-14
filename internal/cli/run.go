@@ -636,6 +636,13 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "bundle "+options.BundleCommand+" failed")
 			return 1
 		}
+		if options.Pretty {
+			if _, err := fmt.Fprintf(stdout, "THREAT INTELLIGENCE STATUS\n  freshness   %s\n  sequence    %d\n  version     %s\n  records     %d\n  malicious   %d\n  vulnerable  %d\n", status.Freshness, status.Sequence, status.Version, status.Records, status.Malicious, status.Vulnerable); err != nil {
+				fmt.Fprintln(stderr, "failed to write bundle output")
+				return 1
+			}
+			return 0
+		}
 		if err := writeJSON(stdout, bundlePayload{SchemaVersion: "ssc-init.bundle-status.v1", Command: options.BundleCommand, Status: status}); err != nil {
 			fmt.Fprintln(stderr, "failed to write bundle output")
 			return 1

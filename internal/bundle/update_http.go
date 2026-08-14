@@ -134,29 +134,56 @@ func networkCode(parent, _ context.Context) UpdateErrorCode {
 }
 
 func validFetchURL(target, base *url.URL, expectedName, sourcePath, repositoryID string) bool {
-	if target == nil || target.Scheme != "https" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || path.Base(target.Path) != expectedName {
+	if target == nil || target.Scheme != "https" || target.User != nil || target.Fragment != "" {
 		return false
 	}
 	host := strings.ToLower(target.Hostname())
 	if strings.EqualFold(target.Host, base.Host) {
-		return target.Path == sourcePath && strings.HasPrefix(target.Path, base.Path+"releases/")
+		return target.RawQuery == "" && path.Base(target.Path) == expectedName &&
+			(target.Path == sourcePath || validTaggedReleasePath(target.Path, base.Path, expectedName))
 	}
 	if target.Port() != "" && target.Port() != "443" {
 		return false
 	}
 	switch host {
 	case "github.com":
-		return target.Path == sourcePath && strings.HasPrefix(target.Path, "/s1ns3nz0/ssc-init-ti/releases/")
+		return target.RawQuery == "" && path.Base(target.Path) == expectedName && target.Path == sourcePath && strings.HasPrefix(target.Path, "/s1ns3nz0/ssc-init-ti/releases/")
 	case "release-assets.githubusercontent.com":
-		return validAssetPath(target.Path, "/github-production-release-asset/", repositoryID)
+		return validAssetPath(target.Path, "/github-production-release-asset/", repositoryID) && validCDNArtifactBinding(target, expectedName)
 	case "objects.githubusercontent.com":
-		return validAssetPath(target.Path, "/github-production-release-asset-2e65be/", repositoryID)
+		return validAssetPath(target.Path, "/github-production-release-asset-2e65be/", repositoryID) && validCDNArtifactBinding(target, expectedName)
 	case "github-releases.githubusercontent.com":
 		parts := strings.Split(strings.TrimPrefix(target.Path, "/"), "/")
-		return len(parts) >= 3 && parts[0] == repositoryID
+		return len(parts) >= 3 && parts[0] == repositoryID && validCDNArtifactBinding(target, expectedName)
 	default:
 		return false
 	}
+}
+
+func validTaggedReleasePath(value, basePath, expectedName string) bool {
+	prefix := basePath + "releases/download/"
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, prefix), "/")
+	if len(parts) != 2 || parts[1] != expectedName {
+		return false
+	}
+	tag := parts[0]
+	return len(tag) == len("ti-")+8 && strings.HasPrefix(tag, "ti-") && asciiDigits(strings.TrimPrefix(tag, "ti-"))
+}
+
+func validCDNArtifactBinding(target *url.URL, expectedName string) bool {
+	if target.RawQuery == "" {
+		return path.Base(target.Path) == expectedName
+	}
+	if len(target.RawQuery) > 4096 {
+		return false
+	}
+	values := target.Query()
+	disposition := values["response-content-disposition"]
+	return len(disposition) == 1 && disposition[0] == "attachment; filename="+expectedName &&
+		len(values["sig"]) == 1 && values.Get("sig") != "" && len(values["jwt"]) == 1 && values.Get("jwt") != ""
 }
 
 func validAssetPath(value, prefix, repositoryID string) bool {
@@ -164,7 +191,7 @@ func validAssetPath(value, prefix, repositoryID string) bool {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(value, prefix), "/")
-	if len(parts) < 3 || parts[0] != repositoryID {
+	if len(parts) < 2 || parts[0] != repositoryID {
 		return false
 	}
 	for _, part := range parts {

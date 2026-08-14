@@ -190,6 +190,7 @@ func TestParseOptionsAcceptsOnlyExplicitLocalBundleCommands(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"bundle", "status", "--family", "policy", "--json"},
+		{"bundle", "status", "--family", "ti", "--pretty"},
 		{"bundle", "rollback", "--family", "ti", "--json"},
 	} {
 		if _, err := ParseOptions(args); err != nil {
@@ -229,7 +230,6 @@ func TestParseOptionsRejectsTIUpdateOutsideClosedForms(t *testing.T) {
 		{"bundle", "update", "--family", "ti"},
 		{"bundle", "update", "--family", "ti", "--json", "--pretty"},
 		{"bundle", "update", "--family", "ti", "--from", "/tmp/b", "--json"},
-		{"bundle", "status", "--family", "ti", "--pretty"},
 		{"scan", "--baseline", "--update-ti", "--update-ti", "--json"},
 		{"hook", "--update-ti"}, {"status", "--json", "--update-ti"},
 	} {

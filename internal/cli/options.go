@@ -385,7 +385,7 @@ func parseBundleOptions(args []string, options *Options) error {
 	if options.JSON == options.Pretty || options.BundleFamily == "" {
 		return ErrInvalidOptions
 	}
-	if options.Pretty && options.BundleCommand != "update" {
+	if options.Pretty && options.BundleCommand != "update" && options.BundleCommand != "status" {
 		return ErrInvalidOptions
 	}
 	if options.BundleCommand == "update" && options.BundleFamily != "ti" {

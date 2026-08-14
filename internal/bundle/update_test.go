@@ -253,6 +253,45 @@ func TestUpdaterBindsReleaseAssetRedirectsToExactRepositoryID(t *testing.T) {
 	}
 }
 
+func TestUpdaterAcceptsOnlyCDNSignedQueryAfterRepositoryBoundRedirect(t *testing.T) {
+	base, _ := url.Parse("https://github.com/s1ns3nz0/ssc-init-ti/")
+	source := "/s1ns3nz0/ssc-init-ti/releases/download/ti-00000007/ti-bundle.json"
+	cdn, _ := url.Parse("https://release-assets.githubusercontent.com/github-production-release-asset/123456789/asset-uuid?sp=r&sig=opaque&jwt=opaque&response-content-disposition=attachment%3B%20filename%3Dti-bundle.json")
+	if !validFetchURL(cdn, base, "ti-bundle.json", source, "123456789") {
+		t.Fatal("repository-bound GitHub CDN signed query rejected")
+	}
+	for _, raw := range []string{
+		"https://github.com/s1ns3nz0/ssc-init-ti/releases/download/ti-00000007/ti-bundle.json?sig=opaque",
+		"https://release-assets.githubusercontent.com/github-production-release-asset/987654321/asset-uuid?sig=opaque&jwt=opaque&response-content-disposition=attachment%3B%20filename%3Dti-bundle.json",
+		"https://release-assets.githubusercontent.com/github-production-release-asset/123456789/asset-uuid?sig=opaque&jwt=opaque&response-content-disposition=attachment%3B%20filename%3Ddifferent.json",
+	} {
+		target, _ := url.Parse(raw)
+		if validFetchURL(target, base, "ti-bundle.json", source, "123456789") {
+			t.Fatalf("unbound query accepted: %s", raw)
+		}
+	}
+}
+
+func TestUpdaterAcceptsOnlyCanonicalLatestToTaggedReleaseRedirect(t *testing.T) {
+	base, _ := url.Parse("https://github.com/s1ns3nz0/ssc-init-ti/")
+	source := "/s1ns3nz0/ssc-init-ti/releases/latest/download/ti-manifest.json"
+	valid, _ := url.Parse("https://github.com/s1ns3nz0/ssc-init-ti/releases/download/ti-00000001/ti-manifest.json")
+	if !validFetchURL(valid, base, "ti-manifest.json", source, "123456789") {
+		t.Fatal("canonical latest-to-tagged release redirect rejected")
+	}
+	for _, raw := range []string{
+		"https://github.com/s1ns3nz0/ssc-init-ti/releases/download/latest/ti-manifest.json",
+		"https://github.com/s1ns3nz0/ssc-init-ti/releases/download/ti-1/ti-manifest.json",
+		"https://github.com/s1ns3nz0/other/releases/download/ti-00000001/ti-manifest.json",
+		"https://github.com/s1ns3nz0/ssc-init-ti/releases/download/ti-00000001/different.json",
+	} {
+		target, _ := url.Parse(raw)
+		if validFetchURL(target, base, "ti-manifest.json", source, "123456789") {
+			t.Fatalf("noncanonical tagged redirect accepted: %s", raw)
+		}
+	}
+}
+
 func TestUpdaterRejectsDifferentRepositoryIDRedirectBeforeNetwork(t *testing.T) {
 	f, key := newUpdateFeed(t)
 	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

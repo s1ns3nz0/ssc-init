@@ -98,6 +98,26 @@ signed record counts, TI-derived matches separately from analyzer-only findings,
 audit run ID, and archive digest. Verify a default scan makes no feed request.
 A synthetic fixture tests detection; it is never evidence the Mac is infected.
 
+### First production release — 2026-08-14
+
+- release: `ti-00000001`, sequence `1`, version `2026.08.14.1`
+- key: `ti-production-2026-01`; freshness after activation: `fresh`
+- manifest SHA-256: `baad45f343cf611564f65770c429334d6b9ec1dd4fcc6e82c92f62fe74fe26b1`
+- bundle SHA-256: `269edfa48434596dbec1971ebf4c4ce58d6005622138511b79318a2e2a60a1f1`
+- signed catalog: 36 records (1 known-malicious, 35 needs-review)
+- Mac smoke audit: `run:hex:abe17c08558edd39154e24ec1ebab29b`, archive SHA-256
+  `0944e91d97c31c64959fbabec470748eafe656cefbbf77d275926e91f45188aa`
+- verified Mac TI match: PyPI `cryptography` `42.0.2` is affected by
+  `GHSA-h4gh-qq45-vh27`; the feed's known-malicious record did not match an
+  installed package
+- scan summary: 537 assets, 28 findings, partial coverage; 27 findings were
+  analyzer/policy results and were kept distinct from the one verified-TI match
+
+The managed audit ZIP reloaded successfully and preserved the exact bundle
+digest, key ID, sequence, freshness, and 36/1/35 counts. The archive hash
+verified; archive authentication remains `unsigned` under the current audit
+format, independently of the signed TI manifest and bundle.
+
 The local end-to-end test uses a source file guarded by the exclusive
 `ti_acceptance` Go build tag to inject a local TLS certificate, feed base,
 repository ID, and test public key into a separately built test binary. Normal

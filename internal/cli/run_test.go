@@ -532,6 +532,16 @@ func TestRunBundleCommandsUseLocalManagerAndEmitPathFreeStatus(t *testing.T) {
 	}
 }
 
+func TestRunBundleStatusPrettyIsHumanReadableAndPathFree(t *testing.T) {
+	manager := &fakeBundleManager{status: bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 9, Version: "2026.08.10", Records: 12, Malicious: 3, Vulnerable: 9}}
+	app := App{BundleManagers: map[bundle.Family]BundleManager{bundle.FamilyTI: manager}}
+	var out, errOut bytes.Buffer
+	code := app.Run(context.Background(), []string{"bundle", "status", "--family", "ti", "--pretty"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "THREAT INTELLIGENCE STATUS") || !strings.Contains(out.String(), "sequence    9") || !strings.Contains(out.String(), "records     12") || strings.Contains(out.String(), "/Users/") || strings.Contains(out.String(), "{") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
 type fakeBundleManager struct {
 	status            bundle.Status
 	source, signature string
