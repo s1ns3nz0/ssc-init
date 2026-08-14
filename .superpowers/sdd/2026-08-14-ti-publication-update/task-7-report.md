@@ -67,3 +67,28 @@ this commit.
 No GitHub repository, environment, secret, release, tag, or production key was
 created or changed. Production remains fail closed because
 `productionTIRepositoryID` and `ProductionKeys()` are intentionally empty.
+
+## Fix round 1: publication gate hardening
+
+- `publisher verify` now applies the updater's complete signed manifest/bundle
+  binding: TI family and schema, version, sequence, key ID, generation and both
+  validity times, exact byte length, SHA-256, closed record bounds, signatures,
+  and current freshness. Individually re-signed adversarial manifests prove
+  length/version/sequence/key/time mismatches fail.
+- Key expansion receives its 32-byte seed only through bounded stdin. Seed and
+  expanded key buffers are cleared. The explicit absolute destination is
+  created mode 0600 with `O_EXCL|O_NOFOLLOW` after symlink-safe parent checks;
+  existing files, dangling/final and intermediate symlinks, plus deterministic
+  racing target creation are rejected without changing the target. An
+  instrumented `go` wrapper proves no seed/private bytes enter helper argv.
+- Publication now requires explicit immutable revision, lowercase digest,
+  reviewed license, HTTPS snapshot URL, and UTC retrieval-time provenance for
+  both sources. There are no license defaults. Canonical provenance JSON and a
+  checksum set covering the four signed client files plus attribution and
+  provenance are uploaded as durable release evidence.
+- Hermetic executable tests run the real publication script in an isolated git
+  repository. Dirty tracked state, missing provenance, test key ID,
+  nonmonotonic sequence, and existing tag each fail independently. Two complete
+  publisher/sign runs with the same inputs and key produce byte-identical
+  manifests, signatures, bundles, attribution, provenance, and checksums; the
+  checksums are then verified.

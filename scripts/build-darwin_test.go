@@ -257,6 +257,21 @@ func TestPublishTIScriptExecutableFailureGatesAndReproducibility(t *testing.T) {
 			t.Fatalf("real publisher is not reproducible: %s", name)
 		}
 	}
+	var provenance struct {
+		SchemaVersion, RetrievedAt string
+		Sources                    []struct{ Name, Revision, SHA256, License, PublicURL string }
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(outputs[0], "source-provenance.json")), &provenance); err != nil {
+		t.Fatal(err)
+	}
+	if provenance.SchemaVersion != "ssc-init.ti-source-provenance.v1" || provenance.RetrievedAt != base["TI_SOURCE_RETRIEVED_AT"] || len(provenance.Sources) != 2 || provenance.Sources[0].Revision != base["TI_OSV_REVISION"] || provenance.Sources[0].License != base["TI_OSV_LICENSE"] || provenance.Sources[1].Revision != base["TI_OPENSSF_REVISION"] || provenance.Sources[1].License != base["TI_OPENSSF_LICENSE"] {
+		t.Fatalf("provenance=%+v", provenance)
+	}
+	check := exec.Command("shasum", "-a", "256", "-c", "checksums.txt")
+	check.Dir = outputs[0]
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("checksums: %v: %s", err, output)
+	}
 }
 
 func publicationSandbox(t *testing.T) string {
