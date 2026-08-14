@@ -101,3 +101,21 @@ rewrite was performed. The intended hardening is preserved in those commits;
 a forward corrective commit restores three fixture files accidentally removed,
 skips `.git` as either a file or directory, and asserts the real repository HEAD
 is byte-identical before and after sandbox creation.
+
+## Fix round 2: ancestor-swap-safe key placement
+
+Private output no longer validates and then reopens an absolute parent path.
+The writer opens `/` once and walks every absolute directory component using
+`openat(O_DIRECTORY|O_NOFOLLOW)`, retaining all directory descriptors. Each
+parent/name binding is recorded by device/inode and rechecked with
+`fstatat(AT_SYMLINK_NOFOLLOW)` before creation, after exclusive creation, and
+after the key is flushed. The final 0600 file is created with
+`openat(O_EXCL|O_NOFOLLOW)` and failed writes are removed using `unlinkat` on
+the retained parent descriptor.
+
+A synchronized adversarial test swaps a validated writable ancestor for a
+symlink tree before traversal. The operation fails and neither the attacker
+victim nor renamed original tree receives key bytes. Final/dangling links and
+failed cleanup remain covered. Removing component `O_NOFOLLOW` and the retained
+identity checks together makes the synchronized test RED (`ancestor swap was
+accepted`); the defense was restored before final verification.

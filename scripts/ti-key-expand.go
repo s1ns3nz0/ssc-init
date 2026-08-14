@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"github.com/s1ns3nz0/ssc-init/scripts/internal/tikey"
 )
 
 func main() {
@@ -23,54 +22,8 @@ func main() {
 	defer clear(seed)
 	key := ed25519.NewKeyFromSeed(seed)
 	defer clear(key)
-	if err := writePrivateExclusive(os.Args[1], key); err != nil {
+	if err := tikey.WritePrivateExclusive(os.Args[1], key, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "private key cannot be written")
 		os.Exit(1)
 	}
-}
-
-func writePrivateExclusive(path string, key []byte) (result error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return fmt.Errorf("unsafe path")
-	}
-	parent := filepath.Dir(path)
-	resolved, err := filepath.EvalSymlinks(parent)
-	if err != nil || resolved != parent {
-		return fmt.Errorf("unsafe parent")
-	}
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("unsafe parent")
-	}
-	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
-		return fmt.Errorf("target exists")
-	}
-	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(parentFD)
-	fd, err := unix.Openat(parentFD, filepath.Base(path), unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return err
-	}
-	file := os.NewFile(uintptr(fd), filepath.Base(path))
-	complete := false
-	defer func() {
-		_ = file.Close()
-		if !complete {
-			_ = unix.Unlinkat(parentFD, filepath.Base(path), 0)
-		}
-	}()
-	if _, err := file.Write(key); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	complete = true
-	return nil
 }
