@@ -21,8 +21,10 @@ func latestPath(name string) string       { return "releases/latest/download/" +
 func releasePath(tag, name string) string { return "releases/download/" + tag + "/" + name }
 
 func validUpdateBase(base *url.URL) bool {
-	return base != nil && base.Scheme == "https" && base.Host != "" && base.User == nil && base.RawQuery == "" && base.Fragment == "" &&
-		strings.HasSuffix(base.Path, "/s1ns3nz0/ssc-init-ti/")
+	if base == nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || !strings.HasSuffix(base.Path, "/s1ns3nz0/ssc-init-ti/") {
+		return false
+	}
+	return !strings.EqualFold(base.Hostname(), "github.com") || base.Port() == "" || base.Port() == "443"
 }
 
 func (u Updater) fetch(ctx context.Context, relative string, limit int64, expectedName string) ([]byte, UpdateErrorCode) {
@@ -139,12 +141,48 @@ func validFetchURL(target, base *url.URL, expectedName, sourcePath string) bool 
 	if strings.EqualFold(target.Host, base.Host) {
 		return target.Path == sourcePath && strings.HasPrefix(target.Path, base.Path+"releases/")
 	}
+	if target.Port() != "" && target.Port() != "443" {
+		return false
+	}
 	switch host {
 	case "github.com":
-		return strings.HasPrefix(target.Path, "/s1ns3nz0/ssc-init-ti/releases/")
-	case "objects.githubusercontent.com", "github-releases.githubusercontent.com", "release-assets.githubusercontent.com":
-		return true
+		return target.Path == sourcePath && strings.HasPrefix(target.Path, "/s1ns3nz0/ssc-init-ti/releases/")
+	case "release-assets.githubusercontent.com":
+		return validAssetPath(target.Path, "/github-production-release-asset/", 3)
+	case "objects.githubusercontent.com":
+		return validAssetPath(target.Path, "/github-production-release-asset-2e65be/", 3)
+	case "github-releases.githubusercontent.com":
+		parts := strings.Split(strings.TrimPrefix(target.Path, "/"), "/")
+		return len(parts) >= 3 && asciiDigits(parts[0])
 	default:
 		return false
 	}
+}
+
+func validAssetPath(value, prefix string, minimumParts int) bool {
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, prefix), "/")
+	if len(parts) < minimumParts {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }

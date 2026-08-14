@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -49,11 +50,12 @@ type UpdateResult struct {
 }
 
 type Updater struct {
-	Manager *Manager
-	Client  *http.Client
-	Base    *url.URL
-	Keys    KeyRegistry
-	Now     func() time.Time
+	Manager      *Manager
+	Client       *http.Client
+	Base         *url.URL
+	Keys         KeyRegistry
+	Now          func() time.Time
+	afterInstall func()
 }
 
 func (u Updater) Update(ctx context.Context) UpdateResult {
@@ -80,6 +82,11 @@ func (u Updater) Update(ctx context.Context) UpdateResult {
 	}
 	verifiedManifest, err := VerifyManifest(manifestRaw, manifestSig, u.Keys, now)
 	if err != nil {
+		return u.failed(ctx, UpdateErrorSignatureInvalid)
+	}
+	manifestKey := u.Keys[FamilyTI][manifest.KeyID]
+	managerKey := u.Manager.Verifier.Keys[FamilyTI][manifest.KeyID]
+	if len(manifestKey) != ed25519.PublicKeySize || !bytes.Equal(manifestKey, managerKey) {
 		return u.failed(ctx, UpdateErrorSignatureInvalid)
 	}
 
@@ -152,8 +159,25 @@ func (u Updater) Update(ctx context.Context) UpdateResult {
 	if installed.Envelope.Sequence != verifiedManifest.Manifest.Sequence || installed.Digest != digest {
 		return u.failed(ctx, UpdateErrorActivationFailed)
 	}
-	status, _ := u.Manager.Status(ctx)
-	return resultFromStatus(UpdateUpdated, UpdateErrorNone, status)
+	if u.afterInstall != nil {
+		u.afterInstall()
+	}
+	return resultFromVerified(UpdateUpdated, installed)
+}
+
+func resultFromVerified(state UpdateStatus, verified Verified) UpdateResult {
+	result := UpdateResult{Status: state, Sequence: verified.Envelope.Sequence, Digest: hex.EncodeToString(verified.Digest[:]), KeyID: verified.Envelope.KeyID, Freshness: FreshnessFresh}
+	if verified.Envelope.TI != nil {
+		result.Records = len(verified.Envelope.TI.Records)
+		for _, record := range verified.Envelope.TI.Records {
+			if record.Verdict == "known-malicious" {
+				result.Malicious++
+			} else {
+				result.Vulnerable++
+			}
+		}
+	}
+	return result
 }
 
 func (u Updater) failed(ctx context.Context, code UpdateErrorCode) UpdateResult {

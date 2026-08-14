@@ -210,6 +210,63 @@ func TestUpdaterRejectsCrossHostRedirectWithoutFollowing(t *testing.T) {
 	}
 }
 
+func TestUpdaterRejectsAllowlistedAssetHostInvalidAuthorityAndPath(t *testing.T) {
+	for _, location := range []string{
+		"https://release-assets.githubusercontent.com:8443/github-production-release-asset/1/x/ti-manifest.json",
+		"https://release-assets.githubusercontent.com/arbitrary/ti-manifest.json",
+		"https://objects.githubusercontent.com/arbitrary/ti-manifest.json",
+		"https://github-releases.githubusercontent.com/not-a-repository/ti-manifest.json",
+	} {
+		t.Run(location, func(t *testing.T) {
+			f, key := newUpdateFeed(t)
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, location, http.StatusFound) })
+			result := updaterForFeed(t, f, key).Update(context.Background())
+			if result.ErrorCode != UpdateErrorRedirectRejected {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestUpdaterRejectsSplitManifestAndBundleTrustForSameKeyID(t *testing.T) {
+	f, manifestKey := newUpdateFeed(t)
+	bundleKey, bundlePrivate := deterministicKey(t, "split bundle trust")
+	f.bundleSig = ed25519.Sign(bundlePrivate, f.bundle)
+	u := updaterForFeed(t, f, bundleKey)
+	u.Keys = KeyRegistry{FamilyTI: {"ti-key": manifestKey}}
+	result := u.Update(context.Background())
+	if result.ErrorCode != UpdateErrorSignatureInvalid || result.Status != UpdateUnavailable {
+		t.Fatalf("result=%+v", result)
+	}
+	status, _ := u.Manager.Status(context.Background())
+	if status.Freshness != FreshnessMissing {
+		t.Fatalf("split-trust bytes activated: %+v", status)
+	}
+}
+
+func TestUpdaterSuccessMetadataSurvivesPostInstallCancellationAndConcurrentChange(t *testing.T) {
+	f, key := newUpdateFeed(t)
+	u := updaterForFeed(t, f, key)
+	ctx, cancel := context.WithCancel(context.Background())
+	u.afterInstall = func() {
+		cancel()
+		raw := validTIBundleSequenceBytes("ti-key", 8)
+		bundlePath, signaturePath := writeSignedBundleFixture(t, raw, f.privateKey)
+		if _, err := u.Manager.Install(context.Background(), bundlePath, signaturePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := u.Update(ctx)
+	wantDigest := sha256.Sum256(f.bundle)
+	if result.Status != UpdateUpdated || result.Sequence != 7 || result.Digest != hex.EncodeToString(wantDigest[:]) || result.KeyID != "ti-key" || result.Freshness != FreshnessFresh {
+		t.Fatalf("result=%+v", result)
+	}
+	status, _ := u.Manager.Status(context.Background())
+	if status.Sequence != 8 {
+		t.Fatalf("concurrent install did not run: %+v", status)
+	}
+}
+
 func TestUpdaterRejectsThirdRedirectAndHTTPBodyIsNeverReturned(t *testing.T) {
 	f, key := newUpdateFeed(t)
 	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
