@@ -104,6 +104,11 @@ and Mac App Store publication are unrelated.
 
 ## 8. External gaps
 
-- Production bundle public keys and publication evidence remain external.
+- TI feed publication is separate. Follow
+  [the TI publication runbook](ti-publication-runbook.md); application releases
+  never contain its private key or source snapshots.
+- Production TI repository identity, public-key review, protected environment,
+  first signed release, and real-release smoke evidence remain externally
+  blocked until the repository owner provisions them.
 - Hosted CI execution evidence remains external.
 - Physical arm64 and Intel smoke-test evidence remains external.

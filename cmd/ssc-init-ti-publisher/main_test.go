@@ -100,6 +100,40 @@ func TestPublisherSignsExactManifestAndBundleBytes(t *testing.T) {
 	}
 }
 
+func TestPublisherVerifyUsesOnlyCompiledProductionTrust(t *testing.T) {
+	useSigningNow(t)
+	output := t.TempDir()
+	if code := run(validArgs(t, output), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("publish code=%d", code)
+	}
+	seed := sha256.Sum256([]byte("compiled verification fixture"))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	keyPath := filepath.Join(t.TempDir(), "signing-key")
+	if err := os.WriteFile(keyPath, privateKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run(signArgs(output, keyPath, "ti-production-2026"), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("sign code=%d", code)
+	}
+
+	original := productionKeysForVerify
+	t.Cleanup(func() { productionKeysForVerify = original })
+	productionKeysForVerify = func() bundle.KeyRegistry {
+		return bundle.KeyRegistry{bundle.FamilyTI: {"ti-production-2026": privateKey.Public().(ed25519.PublicKey)}}
+	}
+	args := []string{"verify", "--manifest-file", filepath.Join(output, "ti-manifest.json"), "--manifest-signature", filepath.Join(output, "ti-manifest.sig"), "--bundle-file", filepath.Join(output, "ti-bundle.json"), "--bundle-signature", filepath.Join(output, "ti-bundle.sig")}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "verified TI release") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	productionKeysForVerify = func() bundle.KeyRegistry { return bundle.KeyRegistry{} }
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(args, &stdout, &stderr); code != 1 || stdout.Len() != 0 || strings.Contains(stderr.String(), output) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestPublisherSignsRejectsUnsafeKeysAndKeyConfusionWithoutLeaks(t *testing.T) {
 	for name, test := range map[string]struct {
 		prepare func(t *testing.T) string

@@ -59,10 +59,12 @@ var (
 	// The local-policy build always opens the store with documented retention
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
-	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
-	bundleKeysForRun             = bundle.ProductionKeys()
-	adapterInputForRun io.Reader = os.Stdin
-	terminalForColor             = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
+	openStoreForRun                        = func(path string) (applicationStore, error) { return store.Open(path) }
+	bundleKeysForRun                       = bundle.ProductionKeys()
+	productionTIConfigForRun               = func() (string, string) { return productionTIBaseURL, productionTIRepositoryID }
+	productionTIHTTPClientForRun           = func() *http.Client { return &http.Client{} }
+	adapterInputForRun           io.Reader = os.Stdin
+	terminalForColor                       = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
 )
 
 func main() {
@@ -650,11 +652,12 @@ func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
 }
 
 func productionTIUpdater(manager *bundle.Manager, now func() time.Time) bundle.Updater {
-	base, err := url.Parse(productionTIBaseURL)
+	baseURL, repositoryID := productionTIConfigForRun()
+	base, err := url.Parse(baseURL)
 	if err != nil {
 		panic("invalid compiled TI feed base")
 	}
-	return bundle.Updater{Manager: manager, Client: &http.Client{}, Base: base, Keys: bundleKeysForRun, Now: func() time.Time { return now().UTC() }, RepositoryID: productionTIRepositoryID}
+	return bundle.Updater{Manager: manager, Client: productionTIHTTPClientForRun(), Base: base, Keys: bundleKeysForRun, Now: func() time.Time { return now().UTC() }, RepositoryID: repositoryID}
 }
 
 func scanConfiguration(ctx context.Context, home string, options cli.Options) (collector.Environment, []collector.Collector, error) {

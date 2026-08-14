@@ -30,6 +30,7 @@ const (
 var (
 	afterSigningInputsReadForRun = func() {}
 	signingNowForRun             = func() time.Time { return time.Now().UTC() }
+	productionKeysForVerify      = bundle.ProductionKeys
 )
 
 type stringList []string
@@ -46,7 +47,85 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "sign" {
 		return runSign(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "verify" {
+		return runVerify(args[1:], stdout, stderr)
+	}
 	return runPublish(args, stdout, stderr)
+}
+
+func runVerify(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("ssc-init-ti-publisher verify", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	var manifestPath, manifestSignaturePath, bundlePath, bundleSignaturePath string
+	flags.StringVar(&manifestPath, "manifest-file", "", "absolute ti-manifest.json path")
+	flags.StringVar(&manifestSignaturePath, "manifest-signature", "", "absolute ti-manifest.sig path")
+	flags.StringVar(&bundlePath, "bundle-file", "", "absolute ti-bundle.json path")
+	flags.StringVar(&bundleSignaturePath, "bundle-signature", "", "absolute ti-bundle.sig path")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !publicationVerificationPaths(manifestPath, manifestSignaturePath, bundlePath, bundleSignaturePath) {
+		fmt.Fprintln(stderr, "invalid command arguments")
+		return 2
+	}
+	manifestRaw, err := readRegularBoundedFile(manifestPath, manifestFileLimit)
+	if err != nil {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	manifestSig, err := readRegularBoundedFile(manifestSignaturePath, 1<<10)
+	if err != nil {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	bundleRaw, err := readRegularBoundedFile(bundlePath, bundleFileLimit)
+	if err != nil {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	bundleSig, err := readRegularBoundedFile(bundleSignaturePath, 1<<10)
+	if err != nil {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	now := signingNowForRun().UTC()
+	keys := productionKeysForVerify()
+	verifiedManifest, err := bundle.VerifyManifest(manifestRaw, manifestSig, keys, now)
+	if err != nil {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	verifiedBundle, err := (bundle.Verifier{Keys: keys}).Verify(bundleRaw, bundleSig, now)
+	if err != nil || verifiedBundle.Envelope.Sequence != verifiedManifest.Manifest.Sequence || verifiedBundle.Envelope.KeyID != verifiedManifest.Manifest.KeyID || hex.EncodeToString(verifiedBundle.Digest[:]) != verifiedManifest.Manifest.SHA256 {
+		fmt.Fprintln(stderr, "publication verification failed")
+		return 1
+	}
+	fmt.Fprintf(stdout, "verified TI release %s with compiled key %s\n", verifiedManifest.Manifest.ReleaseTag, verifiedManifest.Manifest.KeyID)
+	return 0
+}
+
+func publicationVerificationPaths(paths ...string) bool {
+	if len(paths) != 4 {
+		return false
+	}
+	directory := filepath.Dir(paths[0])
+	want := []string{"ti-manifest.json", "ti-manifest.sig", "ti-bundle.json", "ti-bundle.sig"}
+	for index, value := range paths {
+		if !cleanAbsolute(value) || filepath.Dir(value) != directory || filepath.Base(value) != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func readRegularBoundedFile(path string, limit int64) ([]byte, error) {
+	snapshot, err := openRegularSnapshot(path, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.Close()
+	raw := append([]byte(nil), snapshot.Bytes()...)
+	if !snapshot.Unchanged() {
+		return nil, fmt.Errorf("artifact changed")
+	}
+	return raw, nil
 }
 
 func runPublish(args []string, stdout, stderr io.Writer) int {

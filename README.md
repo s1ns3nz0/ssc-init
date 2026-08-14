@@ -49,6 +49,8 @@ ssc-init policy pin
 ssc-init policy check
 ssc-init policy check --pretty
 ssc-init bundle status --family ti --json
+ssc-init bundle update --family ti --pretty
+ssc-init scan --baseline --update-ti --pretty --label explicit-ti-update
 ssc-init bundle install --family ti --from /absolute/bundle.json --signature /absolute/bundle.sig --json
 ssc-init bundle rollback --family ti --json
 ssc-init findings --json
@@ -158,12 +160,19 @@ to one reminder line, while continuing to exit zero.
 
 The executable has no mandatory runtime installation or external runtime dependencies. Enabling external probes records the bounded identity and macOS signature fact of the executable used; neither fact makes that executable safe or trusted.
 
-Bundle commands are local-only. `bundle install` accepts exact local files,
+Bundle install/rollback commands are local-only. `bundle install` accepts exact local files,
 never a URL, and verifies the detached signature again after staging the copied
 bytes. The production trust-root registry is intentionally empty until reviewed
 TI and policy public keys are committed, so installation currently fails closed;
 `bundle status` remains usable and reports `missing`. Publisher signing keys are
 CI secrets and are never stored in this repository.
+
+Remote TI retrieval occurs only after `bundle update --family ti` or
+`scan --baseline --update-ti`; an ordinary scan remains zero-network. Updates
+come exclusively from the compiled `s1ns3nz0/ssc-init-ti` GitHub feed and must
+pass signed-manifest, digest, bundle-signature, validity, and monotonic-sequence
+checks. Failure preserves last-known-good data and reports only a closed reason.
+See the [TI publication runbook](docs/ti-publication-runbook.md).
 
 ## Retention and store size
 

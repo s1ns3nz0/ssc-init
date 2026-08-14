@@ -15,6 +15,92 @@ import (
 	"testing"
 )
 
+func TestPublishTIWorkflowIsPinnedLeastPrivilegeAndFailClosed(t *testing.T) {
+	repositoryRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(mustRead(t, filepath.Join(repositoryRoot, ".github", "workflows", "publish-ti.yml")))
+	for _, required := range []string{
+		"workflow_dispatch:", "environment: ti-production", "permissions:\n  contents: read", "contents: write",
+		"actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
+		"secrets.TI_ED25519_PRIVATE_KEY", "secrets.TI_FEED_TOKEN", "vars.TI_KEY_ID", "persist-credentials: false", "base64 --decode",
+		"scripts/test-publish-ti.sh", "ssc-init-ti-publisher verify", "--clobber=false", "if: always()", "rm -rf -- \"$TI_KEY_DIR\"",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("workflow missing %q", required)
+		}
+	}
+	if strings.Contains(workflow, "echo $PRIVATE_KEY") || strings.Contains(workflow, "set -x") {
+		t.Fatal("workflow risks printing private key")
+	}
+	for _, line := range strings.Split(workflow, "\n") {
+		if strings.Contains(line, "uses:") && !regexp.MustCompile(`@[0-9a-f]{40}(?:\s|$)`).MatchString(line) {
+			t.Fatalf("action is not pinned by full commit SHA: %q", line)
+		}
+	}
+}
+
+func TestPublishTIScriptsRequireExplicitPrivateOutputAndProvenance(t *testing.T) {
+	repositoryRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyScript := string(mustRead(t, filepath.Join(repositoryRoot, "scripts", "generate-ti-key.sh")))
+	publishScript := string(mustRead(t, filepath.Join(repositoryRoot, "scripts", "test-publish-ti.sh")))
+	for _, required := range []string{"--private-output", "[ ! -e \"$private_output\" ]", "chmod 600", "never paste it into logs"} {
+		if !strings.Contains(keyScript, required) {
+			t.Fatalf("key script missing %q", required)
+		}
+	}
+	for _, required := range []string{"git diff --quiet HEAD", "TI_OSV_SHA256", "TI_OPENSSF_SHA256", "TI_LAST_SEQUENCE", "TI_RELEASE_TAG_EXISTS", "test or placeholder key ID refused", "source-provenance.txt"} {
+		if !strings.Contains(publishScript, required) {
+			t.Fatalf("publication script missing %q", required)
+		}
+	}
+}
+
+func TestProductionBuildExcludesTIAcceptanceInjection(t *testing.T) {
+	repositoryRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func(tags string) string {
+		t.Helper()
+		args := []string{"list", "-f", `{{join .GoFiles " "}}`}
+		if tags != "" {
+			args = append(args, "-tags", tags)
+		}
+		args = append(args, "./cmd/ssc-init")
+		command := exec.Command("go", args...)
+		command.Dir = repositoryRoot
+		output, runErr := command.CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("go list: %v: %s", runErr, output)
+		}
+		return string(output)
+	}
+	if strings.Contains(list(""), "ti_acceptance.go") {
+		t.Fatal("normal build includes TI acceptance injection")
+	}
+	if !strings.Contains(list("ti_acceptance"), "ti_acceptance.go") {
+		t.Fatal("acceptance tag does not include its isolated seam")
+	}
+	raw := string(mustRead(t, filepath.Join(repositoryRoot, "cmd", "ssc-init", "ti_acceptance.go")))
+	if !strings.HasPrefix(raw, "//go:build ti_acceptance\n") {
+		t.Fatal("TI acceptance seam lacks an exclusive build constraint")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestBuildScriptDeclaresStaticTargets(t *testing.T) {
 	repositoryRoot := repositoryRoot(t)
 	raw, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "build-darwin.sh"))
