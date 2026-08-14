@@ -45,7 +45,12 @@ func writePrivateExclusive(path string, key []byte) (result error) {
 	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
 		return fmt.Errorf("target exists")
 	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	fd, err := unix.Openat(parentFD, filepath.Base(path), unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -54,7 +59,7 @@ func writePrivateExclusive(path string, key []byte) (result error) {
 	defer func() {
 		_ = file.Close()
 		if !complete {
-			_ = os.Remove(path)
+			_ = unix.Unlinkat(parentFD, filepath.Base(path), 0)
 		}
 	}()
 	if _, err := file.Write(key); err != nil {
