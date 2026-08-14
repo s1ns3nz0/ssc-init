@@ -26,7 +26,27 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
+	"github.com/s1ns3nz0/ssc-init/internal/tipublish"
 )
+
+func TestTIUpdatePublisherSeparatesMaliciousAndVulnerableSources(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report, err := tipublish.Build(tipublish.Input{
+		OSV:     []tipublish.Source{{Path: filepath.Join(repo, "internal/tipublish/testdata/osv-vulnerable.json"), License: "CC-BY-4.0", PublicURLBase: "https://osv.dev/vulnerability/"}},
+		OpenSSF: []tipublish.Source{{Path: filepath.Join(repo, "internal/tipublish/testdata/openssf-malicious.json"), License: "CC-BY-4.0", PublicURLBase: "https://github.com/ossf/malicious-packages/blob/main/osv/malicious/"}},
+		Version: "acceptance", Sequence: 1, KeyID: "ti-acceptance", GeneratedAt: now, ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Malicious != 2 || report.Vulnerable != 2 {
+		t.Fatalf("classifier merged sources: %+v", report)
+	}
+}
 
 func TestTIUpdateSignedLifecycleAndAuditEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
@@ -93,9 +113,13 @@ func TestTIUpdateSignedLifecycleAndAuditEvidence(t *testing.T) {
 		t.Fatalf("second=%+v", second)
 	}
 	feed.set(t, signedAcceptanceRelease(t, private, keyID, 1, now), false)
+	requestsBeforeRollback := feed.accepts()
 	rollback := updater.Update(context.Background())
 	if rollback.Status != bundle.UpdateDegraded || rollback.Sequence != 2 || rollback.ErrorCode != bundle.UpdateErrorRollbackRejected {
 		t.Fatalf("rollback=%+v", rollback)
+	}
+	if got := feed.accepts() - requestsBeforeRollback; got != 2 {
+		t.Fatalf("rollback fetched %d files; bundle bytes must not be fetched", got)
 	}
 
 	active, err := manager.Active(context.Background())
@@ -254,6 +278,13 @@ func TestTIUpdateRealCLIExplicitUpdateAffectsSameScanAndArchive(t *testing.T) {
 		t.Fatalf("run %v: %v: %s", args, runErr, output)
 		return nil, -1
 	}
+	requestsBeforeDefault := feed.accepts()
+	if _, code := run("scan", "--baseline", "--json", "--project-root", project); code != 0 && code != 4 {
+		t.Fatalf("default scan code=%d", code)
+	}
+	if got := feed.accepts(); got != requestsBeforeDefault {
+		t.Fatalf("default scan made %d feed requests", got-requestsBeforeDefault)
+	}
 	if output, code := run("bundle", "update", "--family", "ti", "--json"); code != 0 || !bytes.Contains(output, []byte(`"sequence":1`)) {
 		t.Fatalf("update code=%d output=%s", code, output)
 	}
@@ -271,10 +302,19 @@ func TestTIUpdateRealCLIExplicitUpdateAffectsSameScanAndArchive(t *testing.T) {
 	dataDir := filepath.Join(home, "Library", "Application Support", "SSC Init")
 	auditManager := &audit.Manager{Root: filepath.Join(dataDir, "audit"), Home: home, Now: time.Now, Random: rand.Reader, Render: audit.ReportText}
 	listed, err := auditManager.List(context.Background())
-	if err != nil || len(listed) != 1 {
+	if err != nil || len(listed) != 2 {
 		t.Fatalf("audit list=%+v err=%v", listed, err)
 	}
-	verified, err := auditManager.Open(context.Background(), listed[0].RunID)
+	var updatedAudit audit.Stored
+	for _, stored := range listed {
+		if stored.Label == "ti-real-cli" {
+			updatedAudit = stored
+		}
+	}
+	if updatedAudit.RunID == "" {
+		t.Fatalf("updated audit missing: %+v", listed)
+	}
+	verified, err := auditManager.Open(context.Background(), updatedAudit.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,11 +325,14 @@ func TestTIUpdateRealCLIExplicitUpdateAffectsSameScanAndArchive(t *testing.T) {
 	for _, item := range verified.Record.Findings {
 		gotMalicious = gotMalicious || item.Verdict == model.VerdictKnownMalicious
 		gotVulnerable = gotVulnerable || item.Verdict == model.VerdictNeedsReview
+		if len(item.Bundles) != 1 || item.Bundles[0].Sequence != 2 {
+			t.Fatalf("finding evaluated against pre-update bundle: %+v", item)
+		}
 	}
 	if !gotMalicious || !gotVulnerable {
 		t.Fatalf("archived findings=%+v", verified.Record.Findings)
 	}
-	archivePath := filepath.Join(dataDir, "audit", filepath.Base(listed[0].SafePath))
+	archivePath := filepath.Join(dataDir, "audit", filepath.Base(updatedAudit.SafePath))
 	raw, err := os.ReadFile(archivePath)
 	if err != nil {
 		t.Fatal(err)

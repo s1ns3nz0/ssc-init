@@ -46,6 +46,15 @@ These assertions cover the six required mutation boundaries: default-network
 guard, manifest signature, bundle digest, rollback, classification separation,
 and update-before-finding evaluation.
 
+All six source mutations were executed individually and restored. The exact RED
+signals were: default scan made four feed requests; bad manifest signature
+advanced visible LKG state to sequence 2; digest bypass returned `updated`;
+rollback guard bypass fetched four files instead of manifest/signature only;
+classifier merge produced 4 malicious/0 vulnerable instead of 2/2; and deferred
+update archived a TI finding bound to sequence 1 instead of sequence 2. The
+rollback and ordering exercises found two initially insensitive assertions;
+both tests were strengthened before the mutations were rerun RED.
+
 ## Verification before commit
 
 Focused acceptance, workflow, production-build exclusion, publisher verify,
