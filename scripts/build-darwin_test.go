@@ -32,6 +32,7 @@ func TestPublishTIWorkflowIsPinnedLeastPrivilegeAndFailClosed(t *testing.T) {
 		"secrets.TI_ED25519_PRIVATE_KEY", "secrets.TI_FEED_TOKEN", "vars.TI_KEY_ID", "persist-credentials: false", "base64 --decode",
 		"osv_revision:", "osv_license:", "openssf_revision:", "openssf_license:", "source_retrieved_at:",
 		"scripts/test-publish-ti.sh", "ssc-init-ti-publisher verify", "source-provenance.json", "checksums.txt", "--clobber=false", "if: always()", "rm -rf -- \"$TI_KEY_DIR\"",
+		"go test ./scripts -run 'Test(PublishTI|GenerateTIKey|ProductionBuildExcludesTI)' -count=1",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("workflow missing %q", required)
@@ -39,6 +40,9 @@ func TestPublishTIWorkflowIsPinnedLeastPrivilegeAndFailClosed(t *testing.T) {
 	}
 	if strings.Contains(workflow, "echo $PRIVATE_KEY") || strings.Contains(workflow, "set -x") {
 		t.Fatal("workflow risks printing private key")
+	}
+	if strings.Contains(workflow, "./scripts -count=1") {
+		t.Fatal("Ubuntu publication gate runs Darwin-only release build tests")
 	}
 	for _, line := range strings.Split(workflow, "\n") {
 		if strings.Contains(line, "uses:") && !regexp.MustCompile(`@[0-9a-f]{40}(?:\s|$)`).MatchString(line) {
