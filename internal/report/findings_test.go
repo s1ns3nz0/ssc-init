@@ -74,3 +74,57 @@ func TestWriteFindingsPrettyAddsHumanReasonWithoutChangingJSON(t *testing.T) {
 		t.Fatalf("JSON contract gained a presentation-only reason: %s", jsonOutput.String())
 	}
 }
+
+func TestWriteFindingsPrettyShowsClosedTIDetailsWithoutChangingJSON(t *testing.T) {
+	assetID := "asset:sha256:" + strings.Repeat("b", 64)
+	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 5, IntelligenceIDs: []string{"MAL-2026-0042"}, EvidenceIDs: []string{"evidence:sha256:" + strings.Repeat("c", 64)}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory, Bundles: []model.BundleReference{{Family: "ti", Sequence: 42, Digest: strings.Repeat("d", 64)}}}
+	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("a", 64), Assets: []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "compromised-sdk"}}, Findings: []model.Finding{finding}}
+	var output bytes.Buffer
+	if err := WriteFindingsPretty(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"advisory: MAL-2026-0042", "sequence: 42", "evidence: 1 linked item", "action: REVIEW NOW"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("TI detail missing %q:\n%s", want, output.String())
+		}
+	}
+	for _, forbidden := range []string{"https://", "evidence:sha256:"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("TI detail leaked %q:\n%s", forbidden, output.String())
+		}
+	}
+	var got bytes.Buffer
+	if err := WriteFindingsJSON(&got, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.String(), `"reason":`) || strings.Contains(got.String(), `"advisoryId":`) {
+		t.Fatalf("presentation fields changed JSON contract: %s", got.String())
+	}
+}
+
+func TestWriteFindingsPrettyNeverPrintsIntelligenceSourceURL(t *testing.T) {
+	assetID := "asset:sha256:" + strings.Repeat("b", 64)
+	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 5, IntelligenceIDs: []string{"MAL-2026-0042", "https://osv.dev/private?q=secret"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("a", 64), Assets: []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "compromised-sdk"}}, Findings: []model.Finding{finding}}
+	var output bytes.Buffer
+	if err := WriteFindingsPretty(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "https://") || strings.Contains(output.String(), "?q=secret") {
+		t.Fatalf("source URL leaked:\n%s", output.String())
+	}
+}
+
+func TestWriteFindingsPrettyNeverPrintsOpaqueEvidenceID(t *testing.T) {
+	assetID := "asset:sha256:" + strings.Repeat("b", 64)
+	evidenceID := "evidence:sha256:" + strings.Repeat("c", 64)
+	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictNeedsReview, Severity: model.SeverityMedium, Confidence: model.ConfidenceHigh, Level: 5, IntelligenceIDs: []string{"GHSA-2345-6789-cfgh"}, EvidenceIDs: []string{evidenceID}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("a", 64), Assets: []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "review-sdk"}}, Findings: []model.Finding{finding}}
+	var output bytes.Buffer
+	if err := WriteFindingsPretty(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), evidenceID) {
+		t.Fatalf("opaque evidence ID leaked:\n%s", output.String())
+	}
+}

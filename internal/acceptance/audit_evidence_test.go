@@ -12,8 +12,56 @@ import (
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/audit"
+	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/store"
 )
+
+func TestAuditEvidencePreservesClosedTIExplanation(t *testing.T) {
+	at := time.Date(2026, 8, 14, 1, 2, 3, 0, time.UTC)
+	assetID := "pkg:npm/compromised-sdk@1.2.3"
+	asset := model.Asset{ID: assetID, Type: model.AssetPackage, Name: "compromised-sdk", Version: "1.2.3", ObservedAt: at}
+	finding := model.Finding{
+		ID: "finding:ti", AssetID: assetID, AssetType: model.AssetPackage, Version: "1.2.3",
+		Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1,
+		IntelligenceIDs: []string{"MAL-2026-0042"}, DetectedAt: at, Action: model.ActionAdvisory,
+		Bundles: []model.BundleReference{{Family: "ti", Sequence: 42, Digest: strings.Repeat("d", 64)}},
+	}
+	run := audit.Run{
+		ID: "run:hex:0123456789abcdef0123456789abcdef", ScanID: "scan:sha256:" + strings.Repeat("a", 64), DeviceID: "device:sha256:" + strings.Repeat("b", 64),
+		Product: "ssc-init", Version: "v1.0.0", StartedAt: at.Add(-time.Minute), FinishedAt: at,
+	}
+	receipt := &audit.IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 18432, Malicious: 612, Vulnerable: 17820, RecordedAt: at}
+	record, err := audit.Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, []model.Finding{finding}, run, receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := audit.ReportText(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := audit.Encode(record, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := audit.Verify(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Record.Intelligence == nil || verified.Record.Intelligence.Sequence != 42 || verified.Record.Intelligence.Records != 18432 || verified.Record.Intelligence.Malicious != 612 || verified.Record.Intelligence.Vulnerable != 17820 {
+		t.Fatalf("verified receipt=%+v", verified.Record.Intelligence)
+	}
+	text := string(report)
+	for _, want := range []string{"INTELLIGENCE", "updated", "sequence", "42", "records", "18432", "malicious", "612", "vulnerable", "17820", "verified malicious-package intelligence matched this exact package version"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("archived report missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"\x1b[", "https://", "/Users/", "evidence:sha256:", "PRIVATE_SIGNING_KEY"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("archived report leaked %q:\n%s", forbidden, text)
+		}
+	}
+}
 
 func TestAuditEvidenceLifecycle(t *testing.T) {
 	userHome, err := os.UserHomeDir()
@@ -119,7 +167,7 @@ func TestAuditEvidenceLifecycle(t *testing.T) {
 func assertOrderedAuditSections(t *testing.T, output string) {
 	t.Helper()
 	position := -1
-	for _, section := range []string{"ASSESSMENT", "PRIORITY FINDINGS", "NEXT STEPS", "SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE"} {
+	for _, section := range []string{"ASSESSMENT", "INTELLIGENCE", "PRIORITY FINDINGS", "NEXT STEPS", "SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE"} {
 		next := strings.Index(output[position+1:], section)
 		if next < 0 {
 			t.Fatalf("section %q is missing or out of order: %q", section, output)

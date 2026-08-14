@@ -17,6 +17,9 @@ func Match(assetID, value, expression string) (bool, bool) {
 	if !supportedAsset(assetID) || value == "" || expression == "" || len(value) > 128 || len(expression) > maxRangeBytes || strings.ContainsRune(expression, 0) {
 		return false, false
 	}
+	if strings.HasPrefix(expression, osvExpressionPrefix) {
+		return matchOSVExpression(assetID, value, expression)
+	}
 	version, ok := parseVersion(value)
 	if !ok {
 		return false, false
@@ -37,7 +40,7 @@ func Match(assetID, value, expression string) (bool, bool) {
 }
 
 func supportedAsset(assetID string) bool {
-	for _, prefix := range []string{"pkg:npm/", "pkg:pypi/", "pkg:golang/", "pkg:cargo/", "pkg:brew/"} {
+	for _, prefix := range []string{"pkg:npm/", "pkg:pypi/", "pkg:go/", "pkg:golang/", "pkg:cargo/", "pkg:brew/"} {
 		if strings.HasPrefix(assetID, prefix) {
 			return true
 		}

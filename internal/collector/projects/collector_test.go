@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,9 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/evidence"
+	"github.com/s1ns3nz0/ssc-init/internal/finding"
 	"github.com/s1ns3nz0/ssc-init/internal/inventory"
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 	"github.com/s1ns3nz0/ssc-init/internal/testutil"
@@ -140,6 +144,32 @@ func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testin
 	collection := collectProjectEvidence(t, home, result)
 	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
 		t.Fatalf("manifest evidence was not preserved: %+v", collection)
+	}
+}
+
+func TestProjectCollectorGoSumAssetMatchesVersionRangeTI(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	writeProjectFile(t, filepath.Join(root, "go.sum"), "example.com/demo v1.2.3 h1:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=\n")
+	result := collectProjectsAt(t, home, root)
+	var asset model.Asset
+	for _, candidate := range result.Assets {
+		if candidate.ID == "pkg:go/example.com/demo@v1.2.3" {
+			asset = candidate
+			break
+		}
+	}
+	if asset.ID == "" {
+		t.Fatalf("Go package asset not collected: %+v", result.Assets)
+	}
+	digest := sha256.Sum256([]byte("go TI fixture"))
+	active := bundle.ActiveBundle{
+		Verified: bundle.Verified{Envelope: bundle.Envelope{Family: bundle.FamilyTI, Sequence: 1, TI: &bundle.TIPayload{Records: []bundle.TIRecord{{ID: "go-range", AssetID: "pkg:golang/example.com/demo", VersionRange: ">=1.0.0 <2.0.0", Verdict: "needs-review", Confidence: "medium"}}}}, Digest: digest},
+		Status:   bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 1},
+	}
+	findings := finding.Correlate(model.Inventory{Assets: []model.Asset{asset}}, active, time.Unix(1, 0).UTC())
+	if len(findings) != 1 || len(findings[0].IntelligenceIDs) != 1 || findings[0].IntelligenceIDs[0] != "go-range" {
+		t.Fatalf("findings=%+v", findings)
 	}
 }
 

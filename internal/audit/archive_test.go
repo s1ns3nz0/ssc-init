@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -69,11 +70,106 @@ func TestVerifyRoundTripsEncodedRecord(t *testing.T) {
 	}
 }
 
+func TestEncodeRoundTripsCanonicalIntelligenceReceipt(t *testing.T) {
+	record := validRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: record.Run.FinishedAt}
+	encoded, err := Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertZIPNames(t, encoded, "manifest.json", "summary.json", "report.txt", "intelligence.json", "inventory.json", "findings.json", "coverage.json", "changes.json")
+	verified, err := Verify(bytes.NewReader(encoded), int64(len(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified.Record.Intelligence, record.Intelligence) {
+		t.Fatalf("receipt=%+v want=%+v", verified.Record.Intelligence, record.Intelligence)
+	}
+}
+
+func TestVerifyRejectsMalformedOversizedAndPrivateIntelligenceReceipt(t *testing.T) {
+	record := validRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	encoded, err := Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string][]byte{
+		"duplicate": []byte(`{"family":"ti","family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"` + strings.Repeat("d", 64) + `","keyId":"ti-prod-1","recordedAt":"2026-08-11T16:02:03Z"}` + "\n"),
+		"unknown":   []byte(`{"family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"` + strings.Repeat("d", 64) + `","keyId":"ti-prod-1","recordedAt":"2026-08-11T16:02:03Z","sourceUrl":"https://private.example"}` + "\n"),
+		"oversized": append([]byte(`{"family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"`+strings.Repeat("d", 64)+`","keyId":"`), append(bytes.Repeat([]byte("x"), 2048), []byte(`","recordedAt":"2026-08-11T16:02:03Z"}`+"\n")...)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertVerifyError(t, replaceSignedArchiveEntry(t, encoded, "intelligence.json", value))
+		})
+	}
+	private := record
+	private.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "/Users/alice/private-key", RecordedAt: private.Run.FinishedAt}
+	assertVerifyError(t, archiveFromUncheckedRecord(t, private, []byte("report\n")))
+}
+
+func replaceSignedArchiveEntry(t *testing.T, encoded []byte, name string, value []byte) []byte {
+	t.Helper()
+	entries := unzipEntries(t, encoded)
+	entries[name] = value
+	manifest, err := decodeCanonical[Manifest](entries["manifest.json"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range manifest.Entries {
+		if manifest.Entries[index].Name == name {
+			digest := sha256.Sum256(value)
+			manifest.Entries[index].Size = int64(len(value))
+			manifest.Entries[index].SHA256 = hex.EncodeToString(digest[:])
+		}
+	}
+	entries["manifest.json"], err = canonicalJSON(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return zipEntries(t, zipNames(encoded, t), entries)
+}
+
 func TestVerifyRejectsChecksumMutation(t *testing.T) {
 	encoded := validArchive(t)
 	entries := unzipEntries(t, encoded)
 	entries["report.txt"] = []byte("tamper\n")
 	assertVerifyError(t, zipEntries(t, zipNames(encoded, t), entries))
+}
+
+func TestEncodeAllowsTabAndLFInReportText(t *testing.T) {
+	if _, err := Encode(validRecord(), []byte("field\tvalue\nnext line\n")); err != nil {
+		t.Fatalf("safe report rejected: %v", err)
+	}
+}
+
+func TestEncodeRejectsReportTextControlRunes(t *testing.T) {
+	for name, report := range map[string][]byte{
+		"ansi-csi": []byte("risk \x1b[31mred\x1b[0m\n"),
+		"ansi-osc": []byte("title \x1b]0;private\x07\n"),
+		"nul":      []byte("a\x00b\n"),
+		"cr":       []byte("a\rb\n"),
+		"del":      []byte("a\x7fb\n"),
+		"c1-csi":   []byte("a\u009bb\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Encode(validRecord(), report); err == nil {
+				t.Fatalf("unsafe report accepted: %q", report)
+			}
+		})
+	}
+}
+
+func TestRecordEntriesRejectsReportTextControlRunesBeforeZIPConstruction(t *testing.T) {
+	if _, err := recordEntries(validRecord(), []byte("report\n\x1b[31mprivate\x1b[0m\n")); err == nil {
+		t.Fatal("unsafe report reached ZIP construction")
+	}
+}
+
+func TestVerifyRejectsCataloguedReportTextControlMutation(t *testing.T) {
+	encoded := validArchive(t)
+	mutated := replaceSignedArchiveEntry(t, encoded, "report.txt", []byte("report\n\x1b[31mprivate\x1b[0m\n"))
+	assertVerifyError(t, mutated)
 }
 
 func TestVerifyRejectsDuplicateTraversalAndUnknownEntries(t *testing.T) {

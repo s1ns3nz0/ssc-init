@@ -77,6 +77,22 @@ type Summary struct {
 	Changes         int `json:"changes"`
 }
 
+// IntelligenceUpdate is the deliberately closed receipt for the explicit TI
+// update that preceded a scan. It contains no transport or manifest material.
+type IntelligenceUpdate struct {
+	Family     string    `json:"family"`
+	Status     string    `json:"status"`
+	ErrorCode  string    `json:"errorCode,omitempty"`
+	Freshness  string    `json:"freshness"`
+	Sequence   uint64    `json:"sequence,omitempty"`
+	Digest     string    `json:"digest,omitempty"`
+	KeyID      string    `json:"keyId,omitempty"`
+	Records    int       `json:"records"`
+	Malicious  int       `json:"malicious"`
+	Vulnerable int       `json:"vulnerable"`
+	RecordedAt time.Time `json:"recordedAt"`
+}
+
 type Record struct {
 	SchemaVersion    string                  `json:"schemaVersion"`
 	Profile          Profile                 `json:"profile"`
@@ -89,6 +105,7 @@ type Record struct {
 	EvidenceCoverage *model.EvidenceCoverage `json:"evidenceCoverage,omitempty"`
 	Changes          model.Delta             `json:"changes,omitempty"`
 	Failure          *Failure                `json:"failure,omitempty"`
+	Intelligence     *IntelligenceUpdate     `json:"intelligence,omitempty"`
 }
 
 var (
@@ -99,7 +116,7 @@ var (
 func ValidRunID(value string) bool { return runIDPattern.MatchString(value) }
 
 // Build constructs a normalized record from a complete or partial scan.
-func Build(scan model.ScanResult, inventory model.Inventory, delta model.Delta, findings []model.Finding, run Run) (Record, error) {
+func Build(scan model.ScanResult, inventory model.Inventory, delta model.Delta, findings []model.Finding, run Run, intelligence ...*IntelligenceUpdate) (Record, error) {
 	state, ok := scanState(scan.Status)
 	if !ok {
 		return Record{}, errors.New("audit requires a complete or partial scan")
@@ -129,6 +146,14 @@ func Build(scan model.ScanResult, inventory model.Inventory, delta model.Delta, 
 		Findings:      clonedFindings,
 		Coverage:      clonedCoverage,
 		Changes:       clonedDelta,
+	}
+	if len(intelligence) > 1 {
+		return Record{}, errors.New("multiple intelligence receipts")
+	}
+	if len(intelligence) == 1 && intelligence[0] != nil {
+		value := *intelligence[0]
+		value.RecordedAt = value.RecordedAt.UTC()
+		record.Intelligence = &value
 	}
 	if scan.EvidenceCoverage.Status != "" || len(scan.EvidenceCoverage.Targets) != 0 || len(scan.EvidenceCoverage.Errors) != 0 {
 		coverage, err := cloneEvidenceCoverage(scan.EvidenceCoverage)

@@ -29,6 +29,7 @@ var (
 	argumentPattern       = regexp.MustCompile(`(?i)(?:^|[\s(\[{,;])-{1,2}[a-z0-9][a-z0-9_-]*`)
 	privateIDPattern      = regexp.MustCompile(`(?i)(?:^|[-_:])(?:workspace|worktree|product)[-_](?:id|private|secret|value|path)(?:$|[-_:])`)
 	packageSegmentPattern = regexp.MustCompile(`\A[A-Za-z0-9][A-Za-z0-9._~+-]*\z`)
+	updateKeyIDPattern    = regexp.MustCompile(`\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z`)
 	dockerSegmentPattern  = regexp.MustCompile(`\A[a-z0-9]+(?:[._-][a-z0-9]+)*\z`)
 	domainLabelPattern    = regexp.MustCompile(`\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\z`)
 )
@@ -40,13 +41,16 @@ func Validate(record Record) error {
 		return errors.New("invalid audit record")
 	}
 	if record.State == StateFailed {
-		if record.Failure == nil || !validFailure(record.Failure.Stage, record.Failure.Code) || !emptyFailurePayload(record) {
+		if record.Failure == nil || record.Intelligence != nil || !validFailure(record.Failure.Stage, record.Failure.Code) || !emptyFailurePayload(record) {
 			return errors.New("invalid failed audit record")
 		}
 		return nil
 	}
 	if (record.State != StateComplete && record.State != StatePartial) || record.Failure != nil || containsOriginalErrorText(record) {
 		return errors.New("invalid completed audit record")
+	}
+	if !validIntelligenceUpdate(record.Intelligence, record.Run) {
+		return errors.New("invalid intelligence update receipt")
 	}
 	if err := validateInventory(record.Profile, record.Inventory); err != nil {
 		return err
@@ -61,6 +65,47 @@ func Validate(record Record) error {
 		return errors.New("redacted audit record retains display identity")
 	}
 	return nil
+}
+
+func validIntelligenceUpdate(value *IntelligenceUpdate, run Run) bool {
+	if value == nil {
+		return true
+	}
+	if value.Family != "ti" || value.RecordedAt.IsZero() || value.RecordedAt.Location() != time.UTC || value.RecordedAt.Before(run.StartedAt) || value.RecordedAt.After(run.FinishedAt) {
+		return false
+	}
+	hasIdentity := value.Sequence > 0 && sha256Hex(value.Digest) && updateKeyIDPattern.MatchString(value.KeyID)
+	validCounts := value.Records >= 0 && value.Records <= 100_000 && value.Malicious >= 0 && value.Malicious <= 100_000 && value.Vulnerable >= 0 && value.Vulnerable <= 100_000 && value.Malicious+value.Vulnerable == value.Records
+	hasIdentity = hasIdentity && validCounts
+	hasNoIdentity := value.Sequence == 0 && value.Digest == "" && value.KeyID == "" && value.Records == 0 && value.Malicious == 0 && value.Vulnerable == 0
+	if !hasIdentity && !hasNoIdentity {
+		return false
+	}
+	switch value.Status {
+	case "updated", "current":
+		return value.ErrorCode == "" && value.Freshness == "fresh" && hasIdentity
+	case "degraded":
+		return validUpdateErrorCode(value.ErrorCode) && value.Freshness != "expired" && (value.Freshness == "fresh" || value.Freshness == "stale") && hasIdentity
+	case "unavailable":
+		if !validUpdateErrorCode(value.ErrorCode) {
+			return false
+		}
+		if value.Freshness == "expired" {
+			return hasIdentity
+		}
+		return (value.Freshness == "missing" || value.Freshness == "unavailable") && hasNoIdentity
+	default:
+		return false
+	}
+}
+
+func validUpdateErrorCode(value string) bool {
+	switch value {
+	case "network-unavailable", "redirect-rejected", "response-limit", "manifest-invalid", "signature-invalid", "bundle-invalid", "rollback-rejected", "activation-failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func validProfile(value Profile) bool { return value == ProfileInternal || value == ProfileRedacted }

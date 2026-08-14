@@ -1,0 +1,52 @@
+[
+  {
+    "id": "GHSA-2026-1",
+    "modified": "2026-08-13T00:00:00Z",
+    "affected": [
+      {
+        "package": {"ecosystem": "PyPI", "name": "Requests"},
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {"introduced": "2.0.0"},
+              {"fixed": "2.5.0"}
+            ]
+          }
+        ],
+        "versions": []
+      }
+    ],
+    "severity": [
+      {"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:L"}
+    ],
+    "references": [
+      {"type": "ADVISORY", "url": "https://osv.dev/vulnerability/GHSA-2026-1"}
+    ]
+  },
+  {
+    "id": "GO-2026-1",
+    "modified": "2026-08-13T00:00:00Z",
+    "affected": [
+      {
+        "package": {"ecosystem": "Go", "name": "example.com/mod"},
+        "ranges": [
+          {
+            "type": "SEMVER",
+            "events": [
+              {"introduced": "0"},
+              {"fixed": "1.2.3"}
+            ]
+          }
+        ],
+        "versions": []
+      }
+    ],
+    "severity": [
+      {"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H"}
+    ],
+    "references": [
+      {"type": "ADVISORY", "url": "https://osv.dev/vulnerability/GO-2026-1"}
+    ]
+  }
+]

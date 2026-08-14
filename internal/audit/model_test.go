@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -18,6 +19,19 @@ func TestBuildCreatesClosedCompleteAndPartialRecords(t *testing.T) {
 	partial, err := Build(model.ScanResult{Status: model.ScanPartial}, model.Inventory{}, model.Delta{}, nil, validRun())
 	if err != nil || partial.State != StatePartial {
 		t.Fatalf("partial=%+v err=%v", partial, err)
+	}
+}
+
+func TestBuildRecordsClosedIntelligenceUpdateReceipt(t *testing.T) {
+	receipt := &IntelligenceUpdate{Family: "ti", Status: "degraded", ErrorCode: "network-unavailable", Freshness: "stale", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: validRun().FinishedAt}
+	record, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, validRun(), receipt)
+	receipt.RecordedAt = receipt.RecordedAt.UTC()
+	if err != nil || record.Intelligence == nil || *record.Intelligence != *receipt {
+		t.Fatalf("intelligence=%+v err=%v", record.Intelligence, err)
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil || strings.Contains(string(encoded), "http") || strings.Contains(string(encoded), "manifest") || strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), "\x1b[") {
+		t.Fatalf("unsafe intelligence receipt: err=%v bytes=%q", err, encoded)
 	}
 }
 

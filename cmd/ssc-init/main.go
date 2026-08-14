@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +40,11 @@ import (
 
 var version = "dev"
 
+const (
+	productionTIBaseURL      = "https://github.com/s1ns3nz0/ssc-init-ti/"
+	productionTIRepositoryID = "1333823234"
+)
+
 type applicationStore interface {
 	scan.SnapshotStore
 	Close() error
@@ -52,10 +59,12 @@ var (
 	// The local-policy build always opens the store with documented retention
 	// defaults. Only a future verified, signed organization bundle may wire
 	// store.Options here; local policy is deliberately outside this seam.
-	openStoreForRun              = func(path string) (applicationStore, error) { return store.Open(path) }
-	bundleKeysForRun             = bundle.KeyRegistry{}
-	adapterInputForRun io.Reader = os.Stdin
-	terminalForColor             = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
+	openStoreForRun                        = func(path string) (applicationStore, error) { return store.Open(path) }
+	bundleKeysForRun                       = bundle.ProductionKeys()
+	productionTIConfigForRun               = func() (string, string) { return productionTIBaseURL, productionTIRepositoryID }
+	productionTIHTTPClientForRun           = func() *http.Client { return &http.Client{} }
+	adapterInputForRun           io.Reader = os.Stdin
+	terminalForColor                       = func(file *os.File) bool { return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd()) }
 )
 
 func main() {
@@ -255,6 +264,13 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		if tiManager, policyManager, managerErr := findingManagers(home); managerErr == nil {
 			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+			if options.UpdateTI {
+				updater := productionTIUpdater(tiManager, environment.Now)
+				app.TIUpdater = updater
+			}
+		} else if options.UpdateTI {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
 		}
 		policyContents, policyErr := os.ReadFile(paths.Install().PolicyFile)
 		if policyErr == nil {
@@ -346,6 +362,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			manager := &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
 			app.BundleManagers[family] = manager
+			if family == bundle.FamilyTI && options.BundleCommand == "update" {
+				updater := productionTIUpdater(manager, time.Now)
+				app.TIUpdater = updater
+			}
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
@@ -629,6 +649,15 @@ func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
 	}
 	organization, err := makeManager(bundle.FamilyPolicy)
 	return ti, organization, err
+}
+
+func productionTIUpdater(manager *bundle.Manager, now func() time.Time) bundle.Updater {
+	baseURL, repositoryID := productionTIConfigForRun()
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		panic("invalid compiled TI feed base")
+	}
+	return bundle.Updater{Manager: manager, Client: productionTIHTTPClientForRun(), Base: base, Keys: bundleKeysForRun, Now: func() time.Time { return now().UTC() }, RepositoryID: repositoryID}
 }
 
 func scanConfiguration(ctx context.Context, home string, options cli.Options) (collector.Environment, []collector.Collector, error) {

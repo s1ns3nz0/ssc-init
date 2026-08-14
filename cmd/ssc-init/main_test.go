@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/s1ns3nz0/ssc-init/internal/audit"
+	"github.com/s1ns3nz0/ssc-init/internal/bundle"
 	"github.com/s1ns3nz0/ssc-init/internal/cli"
 	"github.com/s1ns3nz0/ssc-init/internal/collector"
 	"github.com/s1ns3nz0/ssc-init/internal/collector/projects"
@@ -56,6 +57,21 @@ func TestColorEnabledRequiresTerminalAndHonorsNoColor(t *testing.T) {
 	}
 	if colorEnabled(&bytes.Buffer{}) {
 		t.Fatal("redirected output enabled color")
+	}
+}
+
+func TestProductionTIUpdaterUsesOnlyReviewedCompiledFeedIdentity(t *testing.T) {
+	manager := &bundle.Manager{}
+	updater := productionTIUpdater(manager, time.Now)
+	if updater.Manager != manager || updater.Base == nil || updater.Base.String() != "https://github.com/s1ns3nz0/ssc-init-ti/" || updater.RepositoryID != productionTIRepositoryID {
+		t.Fatalf("updater=%+v", updater)
+	}
+	if productionTIRepositoryID != "1333823234" {
+		t.Fatalf("repository id=%q", productionTIRepositoryID)
+	}
+	keys := bundle.ProductionKeys()
+	if len(keys[bundle.FamilyTI]) != 1 {
+		t.Fatalf("production TI trust=%v", keys)
 	}
 }
 

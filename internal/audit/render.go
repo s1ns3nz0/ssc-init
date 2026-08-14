@@ -55,11 +55,13 @@ func WritePrettyStyled(writer io.Writer, record Record, stored *Stored, style St
 	}
 	if record.State == StateFailed {
 		printer.assessment(record)
+		printer.intelligence(record)
 		printer.line(fmt.Sprintf("FAILED stage=%s code=%s", record.Failure.Stage, record.Failure.Code))
 		printer.auditEvidence(stored)
 		return printer.err
 	}
 	printer.assessment(record)
+	printer.intelligence(record)
 	printer.priorityFindings(record)
 	printer.nextSteps(record)
 	printer.summary(record.Summary)
@@ -179,7 +181,7 @@ func (p *auditPrinter) line(value string) {
 func (p *auditPrinter) field(name, value string) { p.line(fmt.Sprintf("  %-10s %s", name, value)) }
 
 func (p *auditPrinter) styled(value, code string) string {
-	if !p.color {
+	if !p.color || code == "" {
 		return value
 	}
 	return code + value + ansiReset
@@ -207,7 +209,7 @@ func (p *auditPrinter) assessment(record Record) {
 	if status == "ACTION REQUIRED" {
 		color = ansiRed
 	} else if status == "NO ACTION IDENTIFIED" {
-		color = ansiGreen
+		color = ""
 	}
 	p.field("status", p.styled(status, color))
 	p.field("reason", reason)
@@ -215,10 +217,35 @@ func (p *auditPrinter) assessment(record Record) {
 	coverage := coverageAssessment(record)
 	coverageColor := ansiYellow
 	if record.State == StateComplete {
-		coverageColor = ansiGreen
+		coverageColor = ""
 	}
 	p.field("coverage", p.styled(coverage, coverageColor))
 	p.field("mode", "advisory — nothing was blocked automatically")
+}
+
+func (p *auditPrinter) intelligence(record Record) {
+	p.heading("INTELLIGENCE")
+	if record.Intelligence == nil {
+		p.field("update", "not requested")
+		p.field("freshness", p.styled("unavailable", ansiYellow))
+		return
+	}
+	update := record.Intelligence
+	statusColor, freshnessColor := ansiYellow, ansiYellow
+	if (update.Status == "updated" || update.Status == "current") && update.Freshness == "fresh" {
+		statusColor, freshnessColor = ansiGreen, ansiGreen
+	}
+	p.field("update", p.styled(update.Status, statusColor))
+	p.field("freshness", p.styled(update.Freshness, freshnessColor))
+	if update.Sequence > 0 {
+		p.field("sequence", fmt.Sprintf("%d", update.Sequence))
+		p.field("records", fmt.Sprintf("%d", update.Records))
+		p.field("malicious", fmt.Sprintf("%d", update.Malicious))
+		p.field("vulnerable", fmt.Sprintf("%d", update.Vulnerable))
+	}
+	if update.ErrorCode != "" {
+		p.field("error", update.ErrorCode)
+	}
 }
 
 func assessment(record Record) (string, string, string) {
@@ -363,7 +390,7 @@ func (p *auditPrinter) auditEvidence(stored *Stored) {
 		p.field("state", "unavailable")
 		return
 	}
-	p.field("state", p.styled("saved", ansiGreen))
+	p.field("state", "saved")
 	p.field("file", stored.SafePath)
 	p.field("sha256", stored.SHA256)
 	p.line("  verify: ssc-init audit verify <absolute-zip> --pretty")
@@ -383,6 +410,12 @@ func (p *auditPrinter) findingDetails(record Record) {
 		}
 		p.line(fmt.Sprintf("  %-13s %-20s %-24s %-11s %-22s %s", strings.ToUpper(string(finding.Severity)), assets[finding.AssetID], classification, strings.ToUpper(string(finding.Confidence)), findingBasis(finding), finding.Action))
 		p.line("    why       " + findingdisplay.Reason(finding))
+		if advisories := findingdisplay.PublicAdvisories(finding); advisories != "" {
+			p.line("    advisory  " + advisories)
+		}
+		if sequence := tiSequence(finding); sequence > 0 {
+			p.line(fmt.Sprintf("    sequence  %d", sequence))
+		}
 		p.line("    rules     " + findingdisplay.Rules(finding))
 		p.line("    evidence  " + findingdisplay.Evidence(finding))
 		p.line("    action    " + findingdisplay.Action(finding))
@@ -390,6 +423,15 @@ func (p *auditPrinter) findingDetails(record Record) {
 	if len(rows) == 0 {
 		p.line("  (none)")
 	}
+}
+
+func tiSequence(finding model.Finding) uint64 {
+	for _, reference := range finding.Bundles {
+		if reference.Family == "ti" {
+			return reference.Sequence
+		}
+	}
+	return 0
 }
 
 func orderedFindings(findings []model.Finding) []model.Finding {

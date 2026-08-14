@@ -301,6 +301,124 @@ func (f fakeFindingService) Evaluate(context.Context, model.Inventory) (finding.
 	return f.result, nil
 }
 
+type updaterFunc func(context.Context) bundle.UpdateResult
+
+func (f updaterFunc) Update(ctx context.Context) bundle.UpdateResult { return f(ctx) }
+
+type findingServiceFunc func(context.Context, model.Inventory) (finding.Result, error)
+
+func (f findingServiceFunc) Evaluate(ctx context.Context, inventory model.Inventory) (finding.Result, error) {
+	return f(ctx, inventory)
+}
+
+func TestScanUpdateTIRunsBeforeCollectorsAndChangesSameScanFinding(t *testing.T) {
+	order := []string{}
+	active := false
+	asset := model.Asset{ID: "pkg:npm/bad@1.0.0", Type: model.AssetPackage, Name: "bad", Version: "1.0.0"}
+	item := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"MAL-1"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	app := App{
+		TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult {
+			order = append(order, "update")
+			active = true
+			return bundle.UpdateResult{Status: bundle.UpdateUpdated, Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessFresh}
+		}),
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			order = append(order, "scan")
+			return model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, false, nil
+		}),
+		FindingService: findingServiceFunc(func(context.Context, model.Inventory) (finding.Result, error) {
+			if !active {
+				t.Fatal("finding evaluation used pre-update state")
+			}
+			return finding.Result{Intelligence: "fresh", Findings: []model.Finding{item}}, nil
+		}),
+	}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--update-ti", "--pretty"}, &out, &errOut); code != 4 || strings.Join(order, ",") != "update,scan" {
+		t.Fatalf("code=%d order=%v out=%q err=%q", code, order, out.String(), errOut.String())
+	}
+}
+
+func TestDefaultScanAndOtherCommandsNeverInvokeTIUpdater(t *testing.T) {
+	calls := 0
+	app := App{TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult { calls++; return bundle.UpdateResult{} }), BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, false, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &out, &errOut); code != 0 || calls != 0 {
+		t.Fatalf("code=%d calls=%d err=%q", code, calls, errOut.String())
+	}
+}
+
+func TestScanUpdateTICancellationStopsBeforeCollectors(t *testing.T) {
+	scans := 0
+	app := App{TIUpdater: updaterFunc(func(ctx context.Context) bundle.UpdateResult {
+		return bundle.UpdateResult{Status: bundle.UpdateUnavailable, ErrorCode: bundle.UpdateErrorCancellation, Freshness: bundle.FreshnessMissing}
+	}), BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		scans++
+		return model.ScanResult{}, model.Inventory{}, model.Delta{}, false, nil
+	})}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--update-ti", "--json"}, &out, &errOut); code != 1 || scans != 0 {
+		t.Fatalf("code=%d scans=%d out=%q err=%q", code, scans, out.String(), errOut.String())
+	}
+}
+
+func TestBundleUpdateWritesClosedJSONResult(t *testing.T) {
+	result := bundle.UpdateResult{Status: bundle.UpdateDegraded, ErrorCode: bundle.UpdateErrorNetwork, Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessStale}
+	app := App{TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult { return result })}
+	var out, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"bundle", "update", "--family", "ti", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), `"schemaVersion":"ssc-init.bundle-update.v1"`) || strings.Contains(out.String(), "http") || strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestAuditReceiptCopiesVerifiedBundleCountsExactly(t *testing.T) {
+	result := bundle.UpdateResult{Status: bundle.UpdateDegraded, ErrorCode: bundle.UpdateErrorNetwork, Sequence: 41, Digest: strings.Repeat("b", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessStale, Records: 18432, Malicious: 612, Vulnerable: 17820}
+	receipt := auditReceipt(result)
+	if receipt.Records != result.Records || receipt.Malicious != result.Malicious || receipt.Vulnerable != result.Vulnerable {
+		t.Fatalf("receipt=%+v result=%+v", receipt, result)
+	}
+}
+
+func TestScanUpdateTIJSONIncludesClosedResultWithoutChangingOrdinaryScan(t *testing.T) {
+	identified := bundle.UpdateResult{Status: bundle.UpdateUpdated, Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessFresh, Records: 3, Malicious: 1, Vulnerable: 2}
+	for name, result := range map[string]bundle.UpdateResult{
+		"updated":     identified,
+		"degraded":    {Status: bundle.UpdateDegraded, ErrorCode: bundle.UpdateErrorNetwork, Sequence: 41, Digest: strings.Repeat("b", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessStale, Records: 2, Malicious: 1, Vulnerable: 1},
+		"unavailable": {Status: bundle.UpdateUnavailable, ErrorCode: bundle.UpdateErrorNetwork, Freshness: bundle.FreshnessMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := App{TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult { return result }), BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+				return model.ScanResult{SchemaVersion: "ssc-init.scan.v7", Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, false, nil
+			})}
+			var out, errOut bytes.Buffer
+			if code := app.Run(context.Background(), []string{"scan", "--baseline", "--update-ti", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+				t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+			}
+			var payload struct {
+				Intelligence bundle.UpdateResult `json:"intelligence"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &payload); err != nil || payload.Intelligence != result {
+				t.Fatalf("intelligence=%+v want=%+v err=%v output=%q", payload.Intelligence, result, err, out.String())
+			}
+			for _, forbidden := range []string{"http://", "https://", "manifest", "/Users/", "PRIVATE", "\x1b["} {
+				if strings.Contains(out.String(), forbidden) {
+					t.Fatalf("output contains %q: %q", forbidden, out.String())
+				}
+			}
+		})
+	}
+
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{SchemaVersion: "ssc-init.scan.v7", Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, false, nil
+	})}
+	var ordinary, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &ordinary, &errOut); code != 0 || strings.Contains(ordinary.String(), `"intelligence"`) {
+		t.Fatalf("ordinary code=%d out=%q err=%q", code, ordinary.String(), errOut.String())
+	}
+}
+
 type fakeWebhook struct {
 	destination string
 	body        []byte

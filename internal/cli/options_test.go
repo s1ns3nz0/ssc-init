@@ -207,6 +207,38 @@ func TestParseOptionsAcceptsOnlyExplicitLocalBundleCommands(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsExplicitTIUpdateForms(t *testing.T) {
+	for _, testCase := range []struct {
+		args []string
+		want Options
+	}{
+		{[]string{"bundle", "update", "--family", "ti", "--json"}, Options{Command: "bundle", BundleCommand: "update", BundleFamily: "ti", JSON: true}},
+		{[]string{"bundle", "update", "--pretty", "--family", "ti"}, Options{Command: "bundle", BundleCommand: "update", BundleFamily: "ti", Pretty: true}},
+		{[]string{"scan", "--baseline", "--update-ti", "--json"}, Options{Command: "scan", Baseline: true, UpdateTI: true, JSON: true}},
+	} {
+		got, err := ParseOptions(testCase.args)
+		if err != nil || !reflect.DeepEqual(got, testCase.want) {
+			t.Fatalf("args=%v got=%+v want=%+v err=%v", testCase.args, got, testCase.want, err)
+		}
+	}
+}
+
+func TestParseOptionsRejectsTIUpdateOutsideClosedForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"bundle", "update", "--family", "policy", "--json"},
+		{"bundle", "update", "--family", "ti"},
+		{"bundle", "update", "--family", "ti", "--json", "--pretty"},
+		{"bundle", "update", "--family", "ti", "--from", "/tmp/b", "--json"},
+		{"bundle", "status", "--family", "ti", "--pretty"},
+		{"scan", "--baseline", "--update-ti", "--update-ti", "--json"},
+		{"hook", "--update-ti"}, {"status", "--json", "--update-ti"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted invalid update form %v", args)
+		}
+	}
+}
+
 func TestParseOptionsRejectsUndocumentedInstallForms(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	for _, invalid := range [][]string{

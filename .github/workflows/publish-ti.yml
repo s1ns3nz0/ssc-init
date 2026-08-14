@@ -1,0 +1,128 @@
+name: Publish signed TI snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      osv_url: {description: "Pinned HTTPS OSV snapshot URL", required: true, type: string}
+      osv_sha256: {description: "OSV snapshot SHA-256", required: true, type: string}
+      osv_revision: {description: "Immutable OSV source revision", required: true, type: string}
+      osv_license: {description: "Reviewed OSV redistribution license", required: true, type: string}
+      openssf_url: {description: "Pinned HTTPS OpenSSF snapshot URL", required: true, type: string}
+      openssf_sha256: {description: "OpenSSF snapshot SHA-256", required: true, type: string}
+      openssf_revision: {description: "Immutable OpenSSF source revision", required: true, type: string}
+      openssf_license: {description: "Reviewed OpenSSF redistribution license", required: true, type: string}
+      source_retrieved_at: {description: "UTC RFC3339 source retrieval time", required: true, type: string}
+      version: {description: "Public feed version", required: true, type: string}
+      sequence: {description: "Strictly increasing positive sequence", required: true, type: number}
+      generated_at: {description: "RFC3339 generation time", required: true, type: string}
+      valid_from: {description: "RFC3339 validity start", required: true, type: string}
+      valid_until: {description: "RFC3339 validity end", required: true, type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ti
+  cancel-in-progress: false
+
+jobs:
+  verify-inputs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {persist-credentials: false}
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with: {go-version-file: go.mod, cache: true}
+      - name: Require clean reviewed checkout
+        run: test -z "$(git status --short)"
+      - name: Verify implementation gates
+        run: |
+          go mod verify
+          go test ./internal/tipublish ./internal/bundle ./cmd/ssc-init-ti-publisher ./scripts -count=1
+          go vet ./internal/tipublish ./internal/bundle ./cmd/ssc-init-ti-publisher
+
+  publish:
+    needs: verify-inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ti-production
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {persist-credentials: false}
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with: {go-version-file: go.mod, cache: true}
+      - name: Download exact source snapshots
+        env:
+          OSV_URL: ${{ inputs.osv_url }}
+          OPENSSF_URL: ${{ inputs.openssf_url }}
+          OSV_SHA256: ${{ inputs.osv_sha256 }}
+          OPENSSF_SHA256: ${{ inputs.openssf_sha256 }}
+        run: |
+          case "$OSV_URL:$OPENSSF_URL" in https://*:https://*) ;; *) exit 1;; esac
+          mkdir -m 700 source
+          curl --fail --silent --show-error --location --proto '=https' --max-filesize 16777216 --max-redirs 2 --max-time 300 --output source/osv.json "$OSV_URL"
+          curl --fail --silent --show-error --location --proto '=https' --max-filesize 16777216 --max-redirs 2 --max-time 300 --output source/openssf.json "$OPENSSF_URL"
+          printf '%s  %s\n' "$OSV_SHA256" source/osv.json | shasum -a 256 -c -
+          printf '%s  %s\n' "$OPENSSF_SHA256" source/openssf.json | shasum -a 256 -c -
+      - name: Materialize protected signing key
+        env:
+          PRIVATE_KEY_B64: ${{ secrets.TI_ED25519_PRIVATE_KEY }}
+        run: |
+          test -n "$PRIVATE_KEY_B64"
+          key_dir=$(mktemp -d "$RUNNER_TEMP/ssc-init-ti-key.XXXXXX")
+          chmod 700 "$key_dir"
+          printf '%s' "$PRIVATE_KEY_B64" | base64 --decode > "$key_dir/private.key"
+          chmod 600 "$key_dir/private.key"
+          echo "TI_PRIVATE_KEY_FILE=$key_dir/private.key" >> "$GITHUB_ENV"
+          echo "TI_KEY_DIR=$key_dir" >> "$GITHUB_ENV"
+      - name: Reject rollback and existing immutable tag
+        env:
+          GH_TOKEN: ${{ secrets.TI_FEED_TOKEN }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          tag=$(printf 'ti-%08d' "$SEQUENCE")
+          if gh release view "$tag" --repo s1ns3nz0/ssc-init-ti >/dev/null 2>&1; then exit 1; fi
+          latest=$(gh release list --repo s1ns3nz0/ssc-init-ti --limit 100 --json tagName --jq '[.[].tagName | select(test("^ti-[0-9]{8}$")) | ltrimstr("ti-") | tonumber] | max // 0')
+          test "$SEQUENCE" -gt "$latest"
+          echo "TI_LAST_SEQUENCE=$latest" >> "$GITHUB_ENV"
+      - name: Build, sign, reproduce, and verify with compiled trust
+        env:
+          TI_OSV_SOURCE: ${{ github.workspace }}/source/osv.json
+          TI_OPENSSF_SOURCE: ${{ github.workspace }}/source/openssf.json
+          TI_OSV_SHA256: ${{ inputs.osv_sha256 }}
+          TI_OPENSSF_SHA256: ${{ inputs.openssf_sha256 }}
+          TI_OSV_REVISION: ${{ inputs.osv_revision }}
+          TI_OPENSSF_REVISION: ${{ inputs.openssf_revision }}
+          TI_OSV_LICENSE: ${{ inputs.osv_license }}
+          TI_OPENSSF_LICENSE: ${{ inputs.openssf_license }}
+          TI_SOURCE_RETRIEVED_AT: ${{ inputs.source_retrieved_at }}
+          TI_OSV_PUBLIC_URL: ${{ inputs.osv_url }}
+          TI_OPENSSF_PUBLIC_URL: ${{ inputs.openssf_url }}
+          TI_VERSION: ${{ inputs.version }}
+          TI_SEQUENCE: ${{ inputs.sequence }}
+          TI_KEY_ID: ${{ vars.TI_KEY_ID }}
+          TI_GENERATED_AT: ${{ inputs.generated_at }}
+          TI_VALID_FROM: ${{ inputs.valid_from }}
+          TI_VALID_UNTIL: ${{ inputs.valid_until }}
+          TI_OUTPUT_DIR: ${{ github.workspace }}/publication
+        run: |
+          mkdir -m 700 "$TI_OUTPUT_DIR"
+          sh scripts/test-publish-ti.sh
+          go test ./internal/bundle -run 'TestProductionKeys' -count=1
+          go run ./cmd/ssc-init-ti-publisher verify --manifest-file "$TI_OUTPUT_DIR/ti-manifest.json" --manifest-signature "$TI_OUTPUT_DIR/ti-manifest.sig" --bundle-file "$TI_OUTPUT_DIR/ti-bundle.json" --bundle-signature "$TI_OUTPUT_DIR/ti-bundle.sig"
+      - name: Publish four immutable signed assets last
+        env:
+          GH_TOKEN: ${{ secrets.TI_FEED_TOKEN }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          tag=$(printf 'ti-%08d' "$SEQUENCE")
+          gh release create "$tag" --repo s1ns3nz0/ssc-init-ti --latest=false --title "$tag" --notes-file publication/attribution-report.json
+          gh release upload "$tag" --repo s1ns3nz0/ssc-init-ti --clobber=false publication/ti-manifest.json publication/ti-manifest.sig publication/ti-bundle.json publication/ti-bundle.sig
+          gh release upload "$tag" --repo s1ns3nz0/ssc-init-ti --clobber=false publication/attribution-report.json publication/source-provenance.json publication/checksums.txt
+          gh release edit "$tag" --repo s1ns3nz0/ssc-init-ti --latest
+      - name: Remove private key
+        if: always()
+        run: |
+          if [ -n "${TI_KEY_DIR:-}" ]; then rm -rf -- "$TI_KEY_DIR"; fi

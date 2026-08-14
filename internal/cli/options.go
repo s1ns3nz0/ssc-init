@@ -21,6 +21,7 @@ type Options struct {
 	Pretty         bool
 	Baseline       bool
 	ExternalProbes bool
+	UpdateTI       bool
 	ProjectRoots   []string
 	ScanLabel      string
 
@@ -343,16 +344,17 @@ func parseBundleOptions(args []string, options *Options) error {
 		return ErrInvalidOptions
 	}
 	options.BundleCommand = args[0]
-	if options.BundleCommand != "install" && options.BundleCommand != "status" && options.BundleCommand != "rollback" {
+	if options.BundleCommand != "install" && options.BundleCommand != "status" && options.BundleCommand != "rollback" && options.BundleCommand != "update" {
 		return ErrInvalidOptions
 	}
 	for index := 1; index < len(args); index++ {
 		flag := args[index]
-		if flag == "--json" {
-			if options.JSON {
+		if flag == "--json" || flag == "--pretty" {
+			if options.JSON || options.Pretty {
 				return ErrInvalidOptions
 			}
-			options.JSON = true
+			options.JSON = flag == "--json"
+			options.Pretty = flag == "--pretty"
 			continue
 		}
 		index++
@@ -380,7 +382,13 @@ func parseBundleOptions(args []string, options *Options) error {
 			return ErrInvalidOptions
 		}
 	}
-	if !options.JSON || options.BundleFamily == "" {
+	if options.JSON == options.Pretty || options.BundleFamily == "" {
+		return ErrInvalidOptions
+	}
+	if options.Pretty && options.BundleCommand != "update" {
+		return ErrInvalidOptions
+	}
+	if options.BundleCommand == "update" && options.BundleFamily != "ti" {
 		return ErrInvalidOptions
 	}
 	if options.BundleCommand == "install" {
@@ -480,6 +488,11 @@ func parseScanOptions(args []string, options *Options) error {
 				return ErrInvalidOptions
 			}
 			options.ExternalProbes = true
+		case argument == "--update-ti":
+			if options.UpdateTI {
+				return ErrInvalidOptions
+			}
+			options.UpdateTI = true
 		case argument == "--project-root":
 			index++
 			if index == len(args) || addProjectRoot(options, seenRoots, args[index]) != nil {

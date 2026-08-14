@@ -11,17 +11,19 @@ import (
 	"io"
 	"os"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
 const (
-	maxArchiveBytes     int64 = 256 << 20
-	maxArchiveEntries         = 8
-	maxEntryBytes       int64 = 64 << 20
-	maxExpandedBytes    int64 = 128 << 20
-	maxCompressionRatio int64 = 100
+	maxArchiveBytes             int64 = 256 << 20
+	maxArchiveEntries                 = 8
+	maxEntryBytes               int64 = 64 << 20
+	maxExpandedBytes            int64 = 128 << 20
+	maxCompressionRatio         int64 = 100
+	maxIntelligenceReceiptBytes int64 = 1024
 )
 
 type EntryDigest struct {
@@ -60,7 +62,7 @@ func Encode(record Record, reportText []byte) ([]byte, error) {
 	if err := Validate(record); err != nil {
 		return nil, err
 	}
-	if !utf8.Valid(reportText) || int64(len(reportText)) > maxEntryBytes {
+	if !validReportText(reportText) || int64(len(reportText)) > maxEntryBytes {
 		return nil, errors.New("invalid audit report")
 	}
 	entries, err := recordEntries(record, reportText)
@@ -97,6 +99,9 @@ func Encode(record Record, reportText []byte) ([]byte, error) {
 }
 
 func recordEntries(record Record, reportText []byte) ([]archiveEntry, error) {
+	if !validReportText(reportText) {
+		return nil, errors.New("invalid audit report")
+	}
 	summary, err := canonicalJSON(record.Summary)
 	if err != nil {
 		return nil, err
@@ -108,6 +113,13 @@ func recordEntries(record Record, reportText []byte) ([]archiveEntry, error) {
 			return nil, err
 		}
 		return append(entries, archiveEntry{name: "failure.json", data: failure}), nil
+	}
+	if record.Intelligence != nil {
+		intelligence, err := canonicalJSON(record.Intelligence)
+		if err != nil || int64(len(intelligence)) > maxIntelligenceReceiptBytes {
+			return nil, errors.New("invalid intelligence receipt")
+		}
+		entries = append(entries, archiveEntry{name: "intelligence.json", data: intelligence})
 	}
 	payloads := []struct {
 		name  string
@@ -182,6 +194,9 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 		if file.UncompressedSize64 > uint64(maxEntryBytes) {
 			return Verified{}, errors.New("audit ZIP entry too large")
 		}
+		if file.Name == "intelligence.json" && file.UncompressedSize64 > uint64(maxIntelligenceReceiptBytes) {
+			return Verified{}, errors.New("intelligence receipt too large")
+		}
 		if file.UncompressedSize64 > 0 && (file.CompressedSize64 == 0 || file.UncompressedSize64 > file.CompressedSize64*uint64(maxCompressionRatio)) {
 			return Verified{}, errors.New("invalid audit ZIP compression ratio")
 		}
@@ -207,7 +222,7 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 	if err != nil {
 		return Verified{}, errors.New("invalid audit manifest")
 	}
-	catalog, err := catalogForState(manifest.State)
+	catalog, err := catalogForManifest(manifest)
 	if err != nil || !sameZIPOrder(archive.File, catalog) || manifest.SchemaVersion != schemaVersion || manifest.Authentication != "unsigned" || len(manifest.Entries) != len(catalog)-1 {
 		return Verified{}, errors.New("invalid audit manifest contract")
 	}
@@ -218,6 +233,9 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 		if entry.Name != expectedName || entry.Size != int64(len(content)) || entry.SHA256 != hex.EncodeToString(digest[:]) {
 			return Verified{}, errors.New("audit entry digest mismatch")
 		}
+	}
+	if !validReportText(contents["report.txt"]) {
+		return Verified{}, errors.New("invalid audit report")
 	}
 	record, err := decodeRecord(manifest, contents)
 	if err != nil {
@@ -233,9 +251,21 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 	return Verified{Manifest: manifest, Record: record, ZIPSHA256: hex.EncodeToString(zipDigest.Sum(nil))}, nil
 }
 
+func validReportText(value []byte) bool {
+	if !utf8.Valid(value) {
+		return false
+	}
+	for _, character := range string(value) {
+		if unicode.IsControl(character) && character != '\n' && character != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 func validArchiveEntryName(name string) bool {
 	switch name {
-	case "manifest.json", "summary.json", "report.txt", "inventory.json", "findings.json", "coverage.json", "changes.json", "failure.json":
+	case "manifest.json", "summary.json", "report.txt", "intelligence.json", "inventory.json", "findings.json", "coverage.json", "changes.json", "failure.json":
 		return true
 	default:
 		return false
@@ -266,6 +296,17 @@ func catalogForState(state State) ([]string, error) {
 	}
 }
 
+func catalogForManifest(manifest Manifest) ([]string, error) {
+	catalog, err := catalogForState(manifest.State)
+	if err != nil || manifest.State == StateFailed {
+		return catalog, err
+	}
+	if len(manifest.Entries) == len(catalog) && len(manifest.Entries) > 2 && manifest.Entries[2].Name == "intelligence.json" {
+		return []string{"manifest.json", "summary.json", "report.txt", "intelligence.json", "inventory.json", "findings.json", "coverage.json", "changes.json"}, nil
+	}
+	return catalog, nil
+}
+
 func sameZIPOrder(files []*zip.File, names []string) bool {
 	if len(files) != len(names) {
 		return false
@@ -291,6 +332,13 @@ func decodeRecord(manifest Manifest, contents map[string][]byte) (Record, error)
 		}
 		record.Failure = &failure
 		return record, nil
+	}
+	if content, present := contents["intelligence.json"]; present {
+		intelligence, err := decodeCanonical[IntelligenceUpdate](content)
+		if err != nil {
+			return Record{}, errors.New("invalid intelligence receipt")
+		}
+		record.Intelligence = &intelligence
 	}
 	if record.Inventory, err = decodeCanonical[model.Inventory](contents["inventory.json"]); err != nil {
 		return Record{}, errors.New("invalid audit inventory")

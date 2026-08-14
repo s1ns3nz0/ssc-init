@@ -1,0 +1,29 @@
+[
+  {
+    "schema_version": "1.7.4",
+    "id": "MAL-2026-1",
+    "modified": "2026-08-13T00:00:00Z",
+    "published": "2026-08-12T00:00:00Z",
+    "summary": "Malicious code in evil (npm)",
+    "details": "Pinned inert fixture metadata.",
+    "affected": [
+      {
+        "package": {"ecosystem": "npm", "name": "evil"},
+        "ranges": [],
+        "versions": ["1.0.0", "1.0.1"]
+      }
+    ],
+    "severity": [],
+    "references": [
+      {"type": "REPORT", "url": "https://github.com/ossf/malicious-packages/blob/main/osv/malicious/npm/evil/MAL-2026-1.json"}
+    ],
+    "credits": [
+      {"name": "Fixture Reporter", "type": "REPORTER", "contact": ["https://example.test/reporter"]}
+    ],
+    "database_specific": {
+      "malicious-packages-origins": [
+        {"id": "npm/fixture/evil", "source": "fixture", "versions": ["1.0.0", "1.0.1"]}
+      ]
+    }
+  }
+]

@@ -71,7 +71,7 @@ func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
 		return rows[i].ID < rows[j].ID
 	})
 	status := "NO ACTION IDENTIFIED"
-	statusColor := "\x1b[32m"
+	statusColor := ""
 	for _, finding := range rows {
 		if finding.Verdict == model.VerdictKnownMalicious || finding.Verdict == model.VerdictBehaviorMalicious {
 			status, statusColor = "ACTION REQUIRED", "\x1b[31m"
@@ -84,7 +84,7 @@ func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
 		}
 	}
 	paint := func(value, code string) string {
-		if !color {
+		if !color || code == "" {
 			return value
 		}
 		return code + value + "\x1b[0m"
@@ -119,6 +119,31 @@ func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
 		if _, err := fmt.Fprintln(writer, "              why: "+findingdisplay.Reason(finding)); err != nil {
 			return err
 		}
+		if advisories := findingdisplay.PublicAdvisories(finding); advisories != "" {
+			if _, err := fmt.Fprintln(writer, "              advisory: "+advisories); err != nil {
+				return err
+			}
+		}
+		if sequence := findingTISequence(finding); sequence > 0 {
+			if _, err := fmt.Fprintf(writer, "              sequence: %d\n", sequence); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(writer, "              evidence: "+findingdisplay.Evidence(finding)); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(writer, "              action: "+findingdisplay.Action(finding)); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func findingTISequence(finding model.Finding) uint64 {
+	for _, reference := range finding.Bundles {
+		if reference.Family == "ti" {
+			return reference.Sequence
+		}
+	}
+	return 0
 }
