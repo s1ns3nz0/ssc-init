@@ -15,7 +15,7 @@ func TestWritePrettyRendersProgressiveAuditSummary(t *testing.T) {
 	if err := WritePretty(&output, graphRecord(), stored); err != nil {
 		t.Fatal(err)
 	}
-	assertOrderedText(t, output.String(), "SSC Init security review", "ASSESSMENT", "PRIORITY FINDINGS", "NEXT STEPS", "SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE")
+	assertOrderedText(t, output.String(), "SSC Init security review", "ASSESSMENT", "INTELLIGENCE", "PRIORITY FINDINGS", "NEXT STEPS", "SUMMARY", "FINDINGS", "CHANGES", "COVERAGE", "ASSETS", "AUDIT EVIDENCE")
 	for _, want := range []string{"state      COMPLETE", "assets", "observations", "evidence", "findings", "changes", "state      saved", stored.SafePath, stored.SHA256} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("pretty output missing %q:\n%s", want, output.String())
@@ -34,11 +34,68 @@ func TestWritePrettyLeadsWithActionAssessmentAndPriorityFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	assertOrderedText(t, text, "SSC Init security review", "ASSESSMENT", "ACTION REQUIRED", "PRIORITY FINDINGS", "KNOWN MALICIOUS", "NEXT STEPS", "SUMMARY")
+	assertOrderedText(t, text, "SSC Init security review", "ASSESSMENT", "ACTION REQUIRED", "INTELLIGENCE", "PRIORITY FINDINGS", "KNOWN MALICIOUS", "NEXT STEPS", "SUMMARY")
 	for _, want := range []string{"reason", "known-malicious", "confidence", "HIGH", "coverage", "advisory", "IMMEDIATE", "Inspect:", "Review evidence:", "Verify archive:"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("action-first output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestWritePrettyExplainsVerifiedMaliciousTIAndUpdateState(t *testing.T) {
+	record := graphRecord()
+	record.Findings[0].Verdict = model.VerdictKnownMalicious
+	record.Findings[0].Severity = model.SeverityCritical
+	record.Findings[0].Confidence = model.ConfidenceHigh
+	record.Findings[0].IntelligenceIDs = []string{"MAL-2026-0042"}
+	record.Findings[0].Bundles = []model.BundleReference{{Family: "ti", Sequence: 42, Digest: strings.Repeat("d", 64)}}
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+
+	var output bytes.Buffer
+	if err := WritePrettyStyled(&output, record, nil, Style{Color: true}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	assertOrderedText(t, text, "ASSESSMENT", "ACTION REQUIRED", "INTELLIGENCE", "updated", "PRIORITY FINDINGS")
+	for _, want := range []string{"fresh", "sequence", "42", "verified malicious-package intelligence matched this exact package version", "\x1b[31m"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("TI output missing %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(text, "\x1b[32mfresh\x1b[0m") || strings.Contains(text, "\x1b[32mNO ACTION IDENTIFIED") {
+		t.Fatalf("fresh update or host safety was colored incorrectly:\n%q", text)
+	}
+}
+
+func TestWritePrettyShowsDegradedAndUnavailableIntelligenceWithoutLeaking(t *testing.T) {
+	for name, receipt := range map[string]*IntelligenceUpdate{
+		"degraded": {Family: "ti", Status: "degraded", ErrorCode: "network-unavailable", Freshness: "stale", Sequence: 41, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1"},
+		"missing":  {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "missing"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := graphRecord()
+			receipt.RecordedAt = record.Run.FinishedAt
+			record.Intelligence = receipt
+			var output bytes.Buffer
+			if err := WritePrettyStyled(&output, record, nil, Style{Color: true}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.String(), "\x1b[33m") {
+				t.Fatalf("degraded/unavailable state lacks warning color: %q", output.String())
+			}
+		})
+	}
+}
+
+func TestReportTextIntelligenceIsANSIFree(t *testing.T) {
+	record := graphRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "current", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	report, err := ReportText(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(report, []byte("\x1b[")) || !bytes.Contains(report, []byte("INTELLIGENCE")) {
+		t.Fatalf("invalid archived report: %q", report)
 	}
 }
 
@@ -51,7 +108,7 @@ func TestWritePrettyStyledColorsRiskButStoredReportRemainsPlain(t *testing.T) {
 	if err := WritePrettyStyled(&output, record, &Stored{SafePath: "$SSC_INIT_DATA/audit/run.zip", SHA256: strings.Repeat("a", 64), Valid: true}, Style{Color: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "\x1b[31mACTION REQUIRED\x1b[0m") || !strings.Contains(output.String(), "\x1b[31mKNOWN MALICIOUS\x1b[0m") || !strings.Contains(output.String(), "\x1b[32msaved\x1b[0m") {
+	if !strings.Contains(output.String(), "\x1b[31mACTION REQUIRED\x1b[0m") || !strings.Contains(output.String(), "\x1b[31mKNOWN MALICIOUS\x1b[0m") || strings.Contains(output.String(), "\x1b[32msaved\x1b[0m") {
 		t.Fatalf("risk and evidence states were not colored semantically:\n%q", output.String())
 	}
 	report, err := ReportText(record)

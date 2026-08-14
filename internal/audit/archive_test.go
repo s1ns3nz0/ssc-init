@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,66 @@ func TestVerifyRoundTripsEncodedRecord(t *testing.T) {
 	if !reflect.DeepEqual(verified.Record, record) || verified.Manifest.Authentication != "unsigned" || verified.ZIPSHA256 == "" {
 		t.Fatalf("Verify result = %#v", verified)
 	}
+}
+
+func TestEncodeRoundTripsCanonicalIntelligenceReceipt(t *testing.T) {
+	record := validRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	encoded, err := Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertZIPNames(t, encoded, "manifest.json", "summary.json", "report.txt", "intelligence.json", "inventory.json", "findings.json", "coverage.json", "changes.json")
+	verified, err := Verify(bytes.NewReader(encoded), int64(len(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified.Record.Intelligence, record.Intelligence) {
+		t.Fatalf("receipt=%+v want=%+v", verified.Record.Intelligence, record.Intelligence)
+	}
+}
+
+func TestVerifyRejectsMalformedOversizedAndPrivateIntelligenceReceipt(t *testing.T) {
+	record := validRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	encoded, err := Encode(record, []byte("report\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string][]byte{
+		"duplicate": []byte(`{"family":"ti","family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"` + strings.Repeat("d", 64) + `","keyId":"ti-prod-1","recordedAt":"2026-08-11T16:02:03Z"}` + "\n"),
+		"unknown":   []byte(`{"family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"` + strings.Repeat("d", 64) + `","keyId":"ti-prod-1","recordedAt":"2026-08-11T16:02:03Z","sourceUrl":"https://private.example"}` + "\n"),
+		"oversized": append([]byte(`{"family":"ti","status":"updated","freshness":"fresh","sequence":42,"digest":"`+strings.Repeat("d", 64)+`","keyId":"`), append(bytes.Repeat([]byte("x"), 2048), []byte(`","recordedAt":"2026-08-11T16:02:03Z"}`+"\n")...)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertVerifyError(t, replaceSignedArchiveEntry(t, encoded, "intelligence.json", value))
+		})
+	}
+	private := record
+	private.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "/Users/alice/private-key", RecordedAt: private.Run.FinishedAt}
+	assertVerifyError(t, archiveFromUncheckedRecord(t, private, []byte("report\n")))
+}
+
+func replaceSignedArchiveEntry(t *testing.T, encoded []byte, name string, value []byte) []byte {
+	t.Helper()
+	entries := unzipEntries(t, encoded)
+	entries[name] = value
+	manifest, err := decodeCanonical[Manifest](entries["manifest.json"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range manifest.Entries {
+		if manifest.Entries[index].Name == name {
+			digest := sha256.Sum256(value)
+			manifest.Entries[index].Size = int64(len(value))
+			manifest.Entries[index].SHA256 = hex.EncodeToString(digest[:])
+		}
+	}
+	entries["manifest.json"], err = canonicalJSON(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return zipEntries(t, zipNames(encoded, t), entries)
 }
 
 func TestVerifyRejectsChecksumMutation(t *testing.T) {

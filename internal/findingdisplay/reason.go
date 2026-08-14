@@ -2,6 +2,7 @@ package findingdisplay
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -36,9 +37,55 @@ func Reason(finding model.Finding) string {
 		}
 	}
 	if len(finding.IntelligenceIDs) > 0 {
+		if finding.Verdict == model.VerdictKnownMalicious && hasMaliciousPackageAdvisory(finding) {
+			return "verified malicious-package intelligence matched this exact package version"
+		}
+		if advisory := firstPublicAdvisory(finding); advisory != "" {
+			return "this installed version is affected by " + advisory
+		}
 		return "verified threat intelligence matched this asset"
 	}
 	return "additional local review rule matched"
+}
+
+var publicAdvisoryPattern = regexp.MustCompile(`\A[A-Z][A-Z0-9]*(?:-[A-Za-z0-9]+)+\z`)
+
+// PublicAdvisories returns only closed public source record identifiers.
+func PublicAdvisories(finding model.Finding) string {
+	seen := make(map[string]struct{}, len(finding.IntelligenceIDs))
+	values := make([]string, 0, len(finding.IntelligenceIDs))
+	for _, value := range finding.IntelligenceIDs {
+		if child := strings.IndexByte(value, '#'); child >= 0 {
+			value = value[:child]
+		}
+		if len(value) == 0 || len(value) > 128 || !publicAdvisoryPattern.MatchString(value) {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return strings.Join(values, ", ")
+}
+
+func firstPublicAdvisory(finding model.Finding) string {
+	advisories := PublicAdvisories(finding)
+	if separator := strings.Index(advisories, ", "); separator >= 0 {
+		return advisories[:separator]
+	}
+	return advisories
+}
+
+func hasMaliciousPackageAdvisory(finding model.Finding) bool {
+	for _, value := range strings.Split(PublicAdvisories(finding), ", ") {
+		if strings.HasPrefix(value, "MAL-") {
+			return true
+		}
+	}
+	return false
 }
 
 var reasonPriority = []string{
