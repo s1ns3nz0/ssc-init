@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,7 @@ func TestRunWritesUnsignedBundleAndPublicAttributionReport(t *testing.T) {
 }
 
 func TestPublisherSignsExactManifestAndBundleBytes(t *testing.T) {
+	useSigningNow(t)
 	output := t.TempDir()
 	if code := run(validArgs(t, output), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
 		t.Fatalf("publish code=%d", code)
@@ -133,6 +135,7 @@ func TestPublisherSignsRejectsUnsafeKeysAndKeyConfusionWithoutLeaks(t *testing.T
 }
 
 func TestPublisherSignsRejectsTestAndMismatchedKeyIDs(t *testing.T) {
+	useSigningNow(t)
 	for _, test := range [][3]string{
 		{"test key id", "test-ti-2026", "test-ti-2026"},
 		{"mismatched key id", "ti-production-2026", "ti-production-2027"},
@@ -154,6 +157,134 @@ func TestPublisherSignsRejectsTestAndMismatchedKeyIDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublisherSignsRejectsExpiredReleaseAtSigningTime(t *testing.T) {
+	useSigningNow(t)
+	output := t.TempDir()
+	args := validArgs(t, output)
+	replaceFlagValue(args, "--generated-at", "2020-01-02T00:00:00Z")
+	replaceFlagValue(args, "--valid-from", "2020-01-01T00:00:00Z")
+	replaceFlagValue(args, "--valid-until", "2020-01-03T00:00:00Z")
+	if code := run(args, new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("publish code=%d", code)
+	}
+	keyPath := privateKeyFile(t, 0o600, ed25519.PrivateKeySize)
+	if code := run(signArgs(output, keyPath, "ti-production-2026"), new(bytes.Buffer), new(bytes.Buffer)); code != 1 {
+		t.Fatalf("expired release sign code=%d", code)
+	}
+}
+
+func TestPublisherSignsRejectsNoncanonicalKeyIDBeforeOutput(t *testing.T) {
+	output := t.TempDir()
+	args := validArgs(t, output)
+	replaceFlagValue(args, "--key-id", "ti production 2026")
+	if code := run(args, new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("publish code=%d", code)
+	}
+	keyPath := privateKeyFile(t, 0o600, ed25519.PrivateKeySize)
+	var stdout, stderr bytes.Buffer
+	if code := run(signArgs(output, keyPath, "ti production 2026"), &stdout, &stderr); code != 1 || stdout.Len() != 0 || strings.Contains(stderr.String(), "ti production 2026") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestSignPublicationBytesClearsCallerPrivateKey(t *testing.T) {
+	output := t.TempDir()
+	if code := run(validArgs(t, output), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("publish code=%d", code)
+	}
+	manifestRaw, err := os.ReadFile(filepath.Join(output, "ti-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleRaw, err := os.ReadFile(filepath.Join(output, "ti-bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := sha256.Sum256([]byte("clear private signing bytes"))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := append(ed25519.PublicKey(nil), privateKey.Public().(ed25519.PublicKey)...)
+	manifestSignature, bundleSignature, err := signPublicationBytes(manifestRaw, bundleRaw, privateKey)
+	if err != nil || !ed25519.Verify(publicKey, manifestRaw, manifestSignature) || !ed25519.Verify(publicKey, bundleRaw, bundleSignature) {
+		t.Fatalf("signatures invalid: %v", err)
+	}
+	for index, value := range privateKey {
+		if value != 0 {
+			t.Fatalf("private key byte %d retained", index)
+		}
+	}
+}
+
+func TestPublisherSignsRejectsArtifactChangedAfterRead(t *testing.T) {
+	useSigningNow(t)
+	output := t.TempDir()
+	if code := run(validArgs(t, output), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("publish code=%d", code)
+	}
+	bundlePath := filepath.Join(output, "ti-bundle.json")
+	oldHook := afterSigningInputsReadForRun
+	t.Cleanup(func() { afterSigningInputsReadForRun = oldHook })
+	afterSigningInputsReadForRun = func() {
+		raw, err := os.ReadFile(bundlePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[len(raw)-2] ^= 1
+		if err := os.WriteFile(bundlePath, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyPath := privateKeyFile(t, 0o600, ed25519.PrivateKeySize)
+	if code := run(signArgs(output, keyPath, "ti-production-2026"), new(bytes.Buffer), new(bytes.Buffer)); code != 1 {
+		t.Fatalf("changed artifact sign code=%d", code)
+	}
+	for _, name := range []string{"ti-manifest.sig", "ti-bundle.sig"} {
+		if _, err := os.Stat(filepath.Join(output, name)); !os.IsNotExist(err) {
+			t.Fatalf("changed artifact left %s: %v", name, err)
+		}
+	}
+}
+
+func TestWriteSignaturePairFailureLeavesNoPartialSignedPublication(t *testing.T) {
+	output := t.TempDir()
+	for _, name := range []string{"ti-manifest.json", "ti-bundle.json"} {
+		if err := os.WriteFile(filepath.Join(output, name), []byte("unsigned"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := 0
+	writer := func(path string, raw []byte) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected second signature failure")
+		}
+		return writeExclusive(path, raw)
+	}
+	if err := writeSignaturePair(output, []byte("manifest signature"), []byte("bundle signature"), writer); err == nil {
+		t.Fatal("second signature failure accepted")
+	}
+	for _, name := range []string{"ti-manifest.sig", "ti-bundle.sig"} {
+		if _, err := os.Stat(filepath.Join(output, name)); !os.IsNotExist(err) {
+			t.Fatalf("partial signed publication left %s: %v", name, err)
+		}
+	}
+}
+
+func replaceFlagValue(args []string, flag, value string) {
+	for index := range args {
+		if args[index] == flag {
+			args[index+1] = value
+			return
+		}
+	}
+}
+
+func useSigningNow(t *testing.T) {
+	t.Helper()
+	old := signingNowForRun
+	signingNowForRun = func() time.Time { return time.Date(2026, 8, 14, 1, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { signingNowForRun = old })
 }
 
 func signArgs(output, keyPath, keyID string) []string {

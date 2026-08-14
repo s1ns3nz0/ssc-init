@@ -202,3 +202,40 @@ func hasDuplicateObjectKey(raw []byte) bool {
 	_, err := decoder.Token()
 	return err != io.EOF
 }
+
+type exactJSONFields map[string]exactJSONFields
+
+// hasExactJSONFields rejects aliases accepted by encoding/json's
+// case-insensitive struct matching. Nested object schemas are checked
+// recursively when a field supplies a child schema.
+func hasExactJSONFields(raw []byte, fields exactJSONFields) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]struct{}, len(fields))
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		child, allowed := fields[key]
+		if err != nil || !ok || !allowed {
+			return false
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		if child != nil && !hasExactJSONFields(value, child) {
+			return false
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
+}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,6 +25,11 @@ const (
 	manifestFileLimit = 64 << 10
 	bundleFileLimit   = 16 << 20
 	privateKeyLimit   = 1 << 10
+)
+
+var (
+	afterSigningInputsReadForRun = func() {}
+	signingNowForRun             = func() time.Time { return time.Now().UTC() }
 )
 
 type stringList []string
@@ -157,7 +163,7 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "invalid command arguments")
 		return 2
 	}
-	if strings.HasPrefix(strings.ToLower(keyID), "test") {
+	if !validSigningKeyID(keyID) || strings.HasPrefix(strings.ToLower(keyID), "test") {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
@@ -166,30 +172,29 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	privateKey := ed25519.PrivateKey(privateKeyBytes)
-	manifestBytes, err := readRegularBounded(manifestPath, manifestFileLimit)
+	defer clear(privateKeyBytes)
+	manifestSnapshot, err := openRegularSnapshot(manifestPath, manifestFileLimit)
 	if err != nil {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	var manifestMetadata struct {
-		GeneratedAt time.Time `json:"generatedAt"`
-	}
-	if err := json.Unmarshal(manifestBytes, &manifestMetadata); err != nil {
-		fmt.Fprintln(stderr, "signing input is invalid")
-		return 1
-	}
-	manifest, err := bundle.LoadManifest(manifestBytes, manifestMetadata.GeneratedAt)
+	defer manifestSnapshot.Close()
+	manifestBytes := manifestSnapshot.Bytes()
+	signingNow := signingNowForRun()
+	manifest, err := bundle.LoadManifest(manifestBytes, signingNow)
 	if err != nil || manifest.KeyID != keyID {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	bundleBytes, err := readRegularBounded(bundlePath, bundleFileLimit)
+	bundleSnapshot, err := openRegularSnapshot(bundlePath, bundleFileLimit)
 	if err != nil {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	envelope, err := bundle.Load(bundleBytes, manifest.GeneratedAt)
+	defer bundleSnapshot.Close()
+	bundleBytes := bundleSnapshot.Bytes()
+	afterSigningInputsReadForRun()
+	envelope, err := bundle.Load(bundleBytes, signingNow)
 	digest := sha256.Sum256(bundleBytes)
 	if err != nil || envelope.Family != bundle.FamilyTI || envelope.KeyID != keyID || envelope.Sequence != manifest.Sequence || envelope.Version != manifest.Version ||
 		!envelope.GeneratedAt.Equal(manifest.GeneratedAt) || !envelope.ValidFrom.Equal(manifest.ValidFrom) || !envelope.ValidUntil.Equal(manifest.ValidUntil) ||
@@ -197,29 +202,64 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	bundleSignature, err := bundle.Sign(bundleBytes, privateKey)
+	manifestSignature, bundleSignature, err := signPublicationBytes(manifestBytes, bundleBytes, privateKeyBytes)
 	if err != nil {
 		fmt.Fprintln(stderr, "signing input is invalid")
 		return 1
 	}
-	manifestSignature := ed25519.Sign(privateKey, manifestBytes)
+	if !manifestSnapshot.Unchanged() || !bundleSnapshot.Unchanged() {
+		fmt.Fprintln(stderr, "signing input is invalid")
+		return 1
+	}
 	manifestSignaturePath := filepath.Join(outputDirectory, "ti-manifest.sig")
 	bundleSignaturePath := filepath.Join(outputDirectory, "ti-bundle.sig")
 	if exists(manifestSignaturePath) || exists(bundleSignaturePath) {
 		fmt.Fprintln(stderr, "signature artifacts already exist")
 		return 1
 	}
-	if err := writeExclusive(manifestSignaturePath, manifestSignature); err != nil {
-		fmt.Fprintln(stderr, "signature artifacts cannot be written")
-		return 1
-	}
-	if err := writeExclusive(bundleSignaturePath, bundleSignature); err != nil {
-		_ = os.Remove(manifestSignaturePath)
+	if err := writeSignaturePair(outputDirectory, manifestSignature, bundleSignature, writeExclusive); err != nil {
 		fmt.Fprintln(stderr, "signature artifacts cannot be written")
 		return 1
 	}
 	fmt.Fprintf(stdout, "signed TI release %s with key %s\n", manifest.ReleaseTag, keyID)
 	return 0
+}
+
+func writeSignaturePair(outputDirectory string, manifestSignature, bundleSignature []byte, writer func(string, []byte) error) error {
+	manifestPath := filepath.Join(outputDirectory, "ti-manifest.sig")
+	if err := writer(manifestPath, manifestSignature); err != nil {
+		return err
+	}
+	if err := writer(filepath.Join(outputDirectory, "ti-bundle.sig"), bundleSignature); err != nil {
+		_ = os.Remove(manifestPath)
+		return err
+	}
+	return nil
+}
+
+func signPublicationBytes(manifestBytes, bundleBytes, privateKeyBytes []byte) ([]byte, []byte, error) {
+	defer clear(privateKeyBytes)
+	if len(privateKeyBytes) != ed25519.PrivateKeySize {
+		return nil, nil, fmt.Errorf("invalid private key")
+	}
+	privateKey := ed25519.PrivateKey(privateKeyBytes)
+	bundleSignature, err := bundle.Sign(bundleBytes, privateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ed25519.Sign(privateKey, manifestBytes), bundleSignature, nil
+}
+
+func validSigningKeyID(keyID string) bool {
+	if len(keyID) < len("ti-a") || len(keyID) > 128 || !strings.HasPrefix(keyID, "ti-") || keyID[len(keyID)-1] == '-' {
+		return false
+	}
+	for _, character := range keyID {
+		if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func signingPaths(manifestPath, bundlePath, privateKeyPath, outputDirectory string) bool {
@@ -236,12 +276,58 @@ func readPrivateKey(path string) ([]byte, error) {
 	return readOpenedBounded(path, info, privateKeyLimit, true)
 }
 
-func readRegularBounded(path string, limit int64) ([]byte, error) {
+type regularSnapshot struct {
+	path   string
+	file   *os.File
+	opened os.FileInfo
+	raw    []byte
+	limit  int64
+}
+
+func openRegularSnapshot(path string, limit int64) (*regularSnapshot, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
 		return nil, fmt.Errorf("invalid regular file")
 	}
-	return readOpenedBounded(path, info, limit, false)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		_ = file.Close()
+		return nil, fmt.Errorf("file identity changed")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(raw)) > limit || opened.Size() != int64(len(raw)) {
+		_ = file.Close()
+		return nil, fmt.Errorf("invalid regular file size")
+	}
+	return &regularSnapshot{path: path, file: file, opened: opened, raw: raw, limit: limit}, nil
+}
+
+func (snapshot *regularSnapshot) Bytes() []byte { return snapshot.raw }
+
+func (snapshot *regularSnapshot) Close() { _ = snapshot.file.Close() }
+
+func (snapshot *regularSnapshot) Unchanged() bool {
+	pathBefore, err := os.Lstat(snapshot.path)
+	currentBefore, statErr := snapshot.file.Stat()
+	if err != nil || statErr != nil || !pathBefore.Mode().IsRegular() || !os.SameFile(snapshot.opened, pathBefore) || !sameSnapshotInfo(snapshot.opened, currentBefore) {
+		return false
+	}
+	if _, err := snapshot.file.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	currentRaw, err := io.ReadAll(io.LimitReader(snapshot.file, snapshot.limit+1))
+	currentAfter, statErr := snapshot.file.Stat()
+	pathAfter, pathErr := os.Lstat(snapshot.path)
+	return err == nil && statErr == nil && pathErr == nil && int64(len(currentRaw)) <= snapshot.limit && bytes.Equal(snapshot.raw, currentRaw) &&
+		pathAfter.Mode().IsRegular() && os.SameFile(snapshot.opened, pathAfter) && sameSnapshotInfo(snapshot.opened, currentAfter)
+}
+
+func sameSnapshotInfo(left, right os.FileInfo) bool {
+	return left.Size() == right.Size() && left.Mode() == right.Mode() && left.ModTime().Equal(right.ModTime())
 }
 
 func readOpenedBounded(path string, expected os.FileInfo, limit int64, private bool) ([]byte, error) {

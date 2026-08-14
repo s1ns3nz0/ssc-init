@@ -44,6 +44,21 @@ func TestVerifyManifestRejectsClosedSchemaAndImmutableLocatorMutations(t *testin
 	}
 }
 
+func TestLoadManifestRejectsNoncanonicalAndCaseFoldDuplicateMemberNames(t *testing.T) {
+	valid := string(manifestFixture("ti-production-2026"))
+	for name, candidate := range map[string]string{
+		"case alias":          strings.Replace(valid, `"family":"ti"`, `"Family":"ti"`, 1),
+		"case fold duplicate": strings.Replace(valid, `"family":"ti"`, `"family":"policy","Family":"ti"`, 1),
+		"key id alias":        strings.Replace(valid, `"keyId":"ti-production-2026"`, `"KeyId":"ti-production-2026"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadManifest([]byte(candidate), manifestNow()); err != ErrMalformed {
+				t.Fatalf("noncanonical member accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestVerifyManifestRejectsInvalidTimesDigestAndLengthBounds(t *testing.T) {
 	publicKey, privateKey := deterministicKey(t, "manifest bounds")
 	valid := string(manifestFixture("ti-production-2026"))

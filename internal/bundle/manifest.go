@@ -14,6 +14,21 @@ const (
 	maxManifestBytes      = 64 << 10
 )
 
+var manifestJSONFields = exactJSONFields{
+	"schemaVersion": nil,
+	"family":        nil,
+	"version":       nil,
+	"sequence":      nil,
+	"keyId":         nil,
+	"generatedAt":   nil,
+	"validFrom":     nil,
+	"validUntil":    nil,
+	"length":        nil,
+	"sha256":        nil,
+	"releaseTag":    nil,
+	"artifact":      nil,
+}
+
 type Manifest struct {
 	SchemaVersion string    `json:"schemaVersion"`
 	Family        Family    `json:"family"`
@@ -35,7 +50,7 @@ type VerifiedManifest struct {
 }
 
 func LoadManifest(raw []byte, now time.Time) (Manifest, error) {
-	if len(raw) == 0 || len(raw) > maxManifestBytes || hasDuplicateObjectKey(raw) {
+	if len(raw) == 0 || len(raw) > maxManifestBytes || hasDuplicateObjectKey(raw) || !hasExactJSONFields(raw, manifestJSONFields) {
 		return Manifest{}, ErrMalformed
 	}
 	var manifest Manifest
