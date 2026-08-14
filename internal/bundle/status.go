@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"path"
 	"strconv"
@@ -26,6 +27,11 @@ type Status struct {
 	Sequence   uint64    `json:"sequence,omitempty"`
 	Version    string    `json:"version,omitempty"`
 	ValidUntil time.Time `json:"validUntil,omitempty"`
+	Digest     string    `json:"digest,omitempty"`
+	KeyID      string    `json:"keyId,omitempty"`
+	Records    int       `json:"records"`
+	Malicious  int       `json:"malicious"`
+	Vulnerable int       `json:"vulnerable"`
 }
 
 func (m Manager) Status(ctx context.Context) (Status, error) {
@@ -69,5 +75,16 @@ func (m Manager) Status(ctx context.Context) (Status, error) {
 			freshness = FreshnessExpired
 		}
 	}
-	return Status{Family: m.Family, Freshness: freshness, Sequence: sequence, Version: verified.Envelope.Version, ValidUntil: verified.Envelope.ValidUntil}, nil
+	status := Status{Family: m.Family, Freshness: freshness, Sequence: sequence, Version: verified.Envelope.Version, ValidUntil: verified.Envelope.ValidUntil, Digest: hex.EncodeToString(verified.Digest[:]), KeyID: verified.Envelope.KeyID}
+	if verified.Envelope.TI != nil {
+		status.Records = len(verified.Envelope.TI.Records)
+		for _, record := range verified.Envelope.TI.Records {
+			if record.Verdict == "known-malicious" {
+				status.Malicious++
+			} else {
+				status.Vulnerable++
+			}
+		}
+	}
+	return status, nil
 }

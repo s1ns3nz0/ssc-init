@@ -38,6 +38,9 @@ func TestManagerReportsMissingFreshStaleAndExpiredWithoutChangingState(t *testin
 		if err != nil || status.Freshness != testCase.want || status.Sequence != 7 || status.Family != FamilyTI {
 			t.Fatalf("now=%s status=%+v err=%v", testCase.now, status, err)
 		}
+		if len(status.Digest) != 64 || status.KeyID != "ti-key" || status.Records != 0 {
+			t.Fatalf("verified metadata missing: %+v", status)
+		}
 	}
 }
 
