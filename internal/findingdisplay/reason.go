@@ -48,18 +48,23 @@ func Reason(finding model.Finding) string {
 	return "additional local review rule matched"
 }
 
-var publicAdvisoryPattern = regexp.MustCompile(`\A[A-Z][A-Z0-9]*(?:-[A-Za-z0-9]+)+\z`)
+var publicAdvisoryPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\ACVE-[0-9]{4}-[0-9]{4,}(?:#[0-9]{3})?\z`),
+	regexp.MustCompile(`\AGHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}(?:#[0-9]{3})?\z`),
+	regexp.MustCompile(`\A(?:OSV|GO|PYSEC|RUSTSEC)-[0-9]{4}-[0-9]+(?:#[0-9]{3})?\z`),
+	regexp.MustCompile(`\AMAL-[0-9]{4}-[0-9]+(?:#[0-9]{3})?\z`),
+}
 
 // PublicAdvisories returns only closed public source record identifiers.
 func PublicAdvisories(finding model.Finding) string {
 	seen := make(map[string]struct{}, len(finding.IntelligenceIDs))
 	values := make([]string, 0, len(finding.IntelligenceIDs))
 	for _, value := range finding.IntelligenceIDs {
+		if len(value) == 0 || len(value) > 128 || !publicAdvisoryID(value) {
+			continue
+		}
 		if child := strings.IndexByte(value, '#'); child >= 0 {
 			value = value[:child]
-		}
-		if len(value) == 0 || len(value) > 128 || !publicAdvisoryPattern.MatchString(value) {
-			continue
 		}
 		if _, duplicate := seen[value]; duplicate {
 			continue
@@ -69,6 +74,15 @@ func PublicAdvisories(finding model.Finding) string {
 	}
 	sort.Strings(values)
 	return strings.Join(values, ", ")
+}
+
+func publicAdvisoryID(value string) bool {
+	for _, pattern := range publicAdvisoryPatterns {
+		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstPublicAdvisory(finding model.Finding) string {

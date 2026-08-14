@@ -72,7 +72,7 @@ func TestVerifyRoundTripsEncodedRecord(t *testing.T) {
 
 func TestEncodeRoundTripsCanonicalIntelligenceReceipt(t *testing.T) {
 	record := validRecord()
-	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: record.Run.FinishedAt}
 	encoded, err := Encode(record, []byte("report\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +135,41 @@ func TestVerifyRejectsChecksumMutation(t *testing.T) {
 	entries := unzipEntries(t, encoded)
 	entries["report.txt"] = []byte("tamper\n")
 	assertVerifyError(t, zipEntries(t, zipNames(encoded, t), entries))
+}
+
+func TestEncodeAllowsTabAndLFInReportText(t *testing.T) {
+	if _, err := Encode(validRecord(), []byte("field\tvalue\nnext line\n")); err != nil {
+		t.Fatalf("safe report rejected: %v", err)
+	}
+}
+
+func TestEncodeRejectsReportTextControlRunes(t *testing.T) {
+	for name, report := range map[string][]byte{
+		"ansi-csi": []byte("risk \x1b[31mred\x1b[0m\n"),
+		"ansi-osc": []byte("title \x1b]0;private\x07\n"),
+		"nul":      []byte("a\x00b\n"),
+		"cr":       []byte("a\rb\n"),
+		"del":      []byte("a\x7fb\n"),
+		"c1-csi":   []byte("a\u009bb\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Encode(validRecord(), report); err == nil {
+				t.Fatalf("unsafe report accepted: %q", report)
+			}
+		})
+	}
+}
+
+func TestRecordEntriesRejectsReportTextControlRunesBeforeZIPConstruction(t *testing.T) {
+	if _, err := recordEntries(validRecord(), []byte("report\n\x1b[31mprivate\x1b[0m\n")); err == nil {
+		t.Fatal("unsafe report reached ZIP construction")
+	}
+}
+
+func TestVerifyRejectsCataloguedReportTextControlMutation(t *testing.T) {
+	encoded := validArchive(t)
+	mutated := replaceSignedArchiveEntry(t, encoded, "report.txt", []byte("report\n\x1b[31mprivate\x1b[0m\n"))
+	assertVerifyError(t, mutated)
 }
 
 func TestVerifyRejectsDuplicateTraversalAndUnknownEntries(t *testing.T) {

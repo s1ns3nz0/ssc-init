@@ -239,6 +239,9 @@ func (p *auditPrinter) intelligence(record Record) {
 	p.field("freshness", p.styled(update.Freshness, freshnessColor))
 	if update.Sequence > 0 {
 		p.field("sequence", fmt.Sprintf("%d", update.Sequence))
+		p.field("records", fmt.Sprintf("%d", update.Records))
+		p.field("malicious", fmt.Sprintf("%d", update.Malicious))
+		p.field("vulnerable", fmt.Sprintf("%d", update.Vulnerable))
 	}
 	if update.ErrorCode != "" {
 		p.field("error", update.ErrorCode)

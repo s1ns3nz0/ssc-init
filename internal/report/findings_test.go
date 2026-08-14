@@ -118,7 +118,7 @@ func TestWriteFindingsPrettyNeverPrintsIntelligenceSourceURL(t *testing.T) {
 func TestWriteFindingsPrettyNeverPrintsOpaqueEvidenceID(t *testing.T) {
 	assetID := "asset:sha256:" + strings.Repeat("b", 64)
 	evidenceID := "evidence:sha256:" + strings.Repeat("c", 64)
-	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictNeedsReview, Severity: model.SeverityMedium, Confidence: model.ConfidenceHigh, Level: 5, IntelligenceIDs: []string{"GHSA-abcd-1234-wxyz"}, EvidenceIDs: []string{evidenceID}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictNeedsReview, Severity: model.SeverityMedium, Confidence: model.ConfidenceHigh, Level: 5, IntelligenceIDs: []string{"GHSA-2345-6789-cfgh"}, EvidenceIDs: []string{evidenceID}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
 	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("a", 64), Assets: []model.Asset{{ID: assetID, Type: model.AssetPackage, Name: "review-sdk"}}, Findings: []model.Finding{finding}}
 	var output bytes.Buffer
 	if err := WriteFindingsPretty(&output, data, false); err != nil {

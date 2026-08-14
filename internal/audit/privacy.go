@@ -75,7 +75,9 @@ func validIntelligenceUpdate(value *IntelligenceUpdate, run Run) bool {
 		return false
 	}
 	hasIdentity := value.Sequence > 0 && sha256Hex(value.Digest) && updateKeyIDPattern.MatchString(value.KeyID)
-	hasNoIdentity := value.Sequence == 0 && value.Digest == "" && value.KeyID == ""
+	validCounts := value.Records >= 0 && value.Records <= 100_000 && value.Malicious >= 0 && value.Malicious <= 100_000 && value.Vulnerable >= 0 && value.Vulnerable <= 100_000 && value.Malicious+value.Vulnerable == value.Records
+	hasIdentity = hasIdentity && validCounts
+	hasNoIdentity := value.Sequence == 0 && value.Digest == "" && value.KeyID == "" && value.Records == 0 && value.Malicious == 0 && value.Vulnerable == 0
 	if !hasIdentity && !hasNoIdentity {
 		return false
 	}

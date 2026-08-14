@@ -15,8 +15,8 @@ func TestReasonExplainsVerifiedMaliciousPackageMatch(t *testing.T) {
 }
 
 func TestReasonExplainsOSVAffectedVersionWithPublicAdvisory(t *testing.T) {
-	finding := model.Finding{Verdict: model.VerdictNeedsReview, IntelligenceIDs: []string{"GHSA-abcd-1234-wxyz"}}
-	if got := Reason(finding); got != "this installed version is affected by GHSA-abcd-1234-wxyz" {
+	finding := model.Finding{Verdict: model.VerdictNeedsReview, IntelligenceIDs: []string{"GHSA-2345-6789-cfgh"}}
+	if got := Reason(finding); got != "this installed version is affected by GHSA-2345-6789-cfgh" {
 		t.Fatalf("reason=%q", got)
 	}
 }
@@ -30,10 +30,28 @@ func TestReasonDoesNotCallOpaqueKnownMaliciousIDPackageIntelligence(t *testing.T
 
 func TestPublicAdvisoriesExcludeTransportAndOpaqueIdentifiers(t *testing.T) {
 	finding := model.Finding{IntelligenceIDs: []string{
-		"GHSA-abcd-1234-wxyz", "https://osv.dev/vulnerability/GHSA-secret?q=private", "/Users/alice/private", "secret.example",
+		"GHSA-2345-6789-cfgh", "https://osv.dev/vulnerability/GHSA-secret?q=private", "/Users/alice/private", "secret.example",
 		"PRIVATE_RESPONSE_BODY", "PRIVATE_SIGNING_KEY", "raw source text", "evidence:sha256:" + strings.Repeat("c", 64),
 	}}
-	if got := PublicAdvisories(finding); got != "GHSA-abcd-1234-wxyz" {
+	if got := PublicAdvisories(finding); got != "GHSA-2345-6789-cfgh" {
 		t.Fatalf("advisories=%q", got)
+	}
+}
+
+func TestPublicAdvisoriesUsesClosedProducerBackedNamespaces(t *testing.T) {
+	finding := model.Finding{IntelligenceIDs: []string{
+		"CVE-2026-12345", "GHSA-2345-6789-cfgh", "GO-2026-1", "MAL-2026-0042#001", "OSV-2026-77",
+		"CUSTOMER-TICKET-42", "GHSA-abcd-1234-wxyz", "INTERNAL-CASE-1234", "MAL-SINGLE", "SOURCE-RESPONSE-2026",
+	}}
+	want := "CVE-2026-12345, GHSA-2345-6789-cfgh, GO-2026-1, MAL-2026-0042, OSV-2026-77"
+	if got := PublicAdvisories(finding); got != want {
+		t.Fatalf("advisories=%q want=%q", got, want)
+	}
+}
+
+func TestReasonDoesNotDescribeOpaqueHyphenIDAsAffectedVersion(t *testing.T) {
+	finding := model.Finding{Verdict: model.VerdictNeedsReview, IntelligenceIDs: []string{"INTERNAL-CASE-1234"}}
+	if got := Reason(finding); got != "verified threat intelligence matched this asset" {
+		t.Fatalf("reason=%q", got)
 	}
 }

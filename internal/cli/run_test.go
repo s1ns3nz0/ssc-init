@@ -373,6 +373,14 @@ func TestBundleUpdateWritesClosedJSONResult(t *testing.T) {
 	}
 }
 
+func TestAuditReceiptCopiesVerifiedBundleCountsExactly(t *testing.T) {
+	result := bundle.UpdateResult{Status: bundle.UpdateDegraded, ErrorCode: bundle.UpdateErrorNetwork, Sequence: 41, Digest: strings.Repeat("b", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessStale, Records: 18432, Malicious: 612, Vulnerable: 17820}
+	receipt := auditReceipt(result)
+	if receipt.Records != result.Records || receipt.Malicious != result.Malicious || receipt.Vulnerable != result.Vulnerable {
+		t.Fatalf("receipt=%+v result=%+v", receipt, result)
+	}
+}
+
 func TestScanUpdateTIJSONIncludesClosedResultWithoutChangingOrdinaryScan(t *testing.T) {
 	identified := bundle.UpdateResult{Status: bundle.UpdateUpdated, Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessFresh, Records: 3, Malicious: 1, Vulnerable: 2}
 	for name, result := range map[string]bundle.UpdateResult{

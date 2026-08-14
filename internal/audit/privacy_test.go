@@ -54,7 +54,7 @@ func TestValidateRejectsOpenIntelligenceUpdateValues(t *testing.T) {
 }
 
 func TestValidateIntelligenceUpdateAcceptsOnlyEmittableStateMatrix(t *testing.T) {
-	identified := IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1"}
+	identified := IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3}
 	valid := []IntelligenceUpdate{
 		identified,
 		func() IntelligenceUpdate { v := identified; v.Status = "current"; return v }(),
@@ -102,6 +102,10 @@ func TestValidateIntelligenceUpdateAcceptsOnlyEmittableStateMatrix(t *testing.T)
 		"digest-only":               {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired", Digest: strings.Repeat("a", 64)},
 		"key-only":                  {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired", KeyID: "ti-prod-1"},
 		"cancellation":              {Family: "ti", Status: "unavailable", ErrorCode: "cancellation", Freshness: "missing"},
+		"count-mismatch":            identified,
+		"negative-count":            identified,
+		"count-over-limit":          identified,
+		"missing-with-counts":       {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "missing", Records: 1, Malicious: 1},
 	}
 	invalid["wrong-family"] = func() IntelligenceUpdate { v := invalid["wrong-family"]; v.Family = "policy"; return v }()
 	invalid["updated-stale"] = func() IntelligenceUpdate { v := invalid["updated-stale"]; v.Freshness = "stale"; return v }()
@@ -134,6 +138,13 @@ func TestValidateIntelligenceUpdateAcceptsOnlyEmittableStateMatrix(t *testing.T)
 	invalid["fresh-unavailable"] = func() IntelligenceUpdate {
 		v := invalid["fresh-unavailable"]
 		v.Status, v.ErrorCode = "unavailable", "network-unavailable"
+		return v
+	}()
+	invalid["count-mismatch"] = func() IntelligenceUpdate { v := invalid["count-mismatch"]; v.Records = 5; return v }()
+	invalid["negative-count"] = func() IntelligenceUpdate { v := invalid["negative-count"]; v.Malicious = -1; return v }()
+	invalid["count-over-limit"] = func() IntelligenceUpdate {
+		v := invalid["count-over-limit"]
+		v.Records, v.Vulnerable = 100001, 100000
 		return v
 	}()
 	for name, receipt := range invalid {

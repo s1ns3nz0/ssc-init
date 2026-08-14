@@ -30,7 +30,7 @@ func TestAuditEvidencePreservesClosedTIExplanation(t *testing.T) {
 		ID: "run:hex:0123456789abcdef0123456789abcdef", ScanID: "scan:sha256:" + strings.Repeat("a", 64), DeviceID: "device:sha256:" + strings.Repeat("b", 64),
 		Product: "ssc-init", Version: "v1.0.0", StartedAt: at.Add(-time.Minute), FinishedAt: at,
 	}
-	receipt := &audit.IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: at}
+	receipt := &audit.IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 18432, Malicious: 612, Vulnerable: 17820, RecordedAt: at}
 	record, err := audit.Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, []model.Finding{finding}, run, receipt)
 	if err != nil {
 		t.Fatal(err)
@@ -47,11 +47,11 @@ func TestAuditEvidencePreservesClosedTIExplanation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified.Record.Intelligence == nil || verified.Record.Intelligence.Sequence != 42 {
+	if verified.Record.Intelligence == nil || verified.Record.Intelligence.Sequence != 42 || verified.Record.Intelligence.Records != 18432 || verified.Record.Intelligence.Malicious != 612 || verified.Record.Intelligence.Vulnerable != 17820 {
 		t.Fatalf("verified receipt=%+v", verified.Record.Intelligence)
 	}
 	text := string(report)
-	for _, want := range []string{"INTELLIGENCE", "updated", "sequence", "42", "verified malicious-package intelligence matched this exact package version"} {
+	for _, want := range []string{"INTELLIGENCE", "updated", "sequence", "42", "records", "18432", "malicious", "612", "vulnerable", "17820", "verified malicious-package intelligence matched this exact package version"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("archived report missing %q:\n%s", want, text)
 		}

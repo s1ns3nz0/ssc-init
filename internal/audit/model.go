@@ -87,6 +87,9 @@ type IntelligenceUpdate struct {
 	Sequence   uint64    `json:"sequence,omitempty"`
 	Digest     string    `json:"digest,omitempty"`
 	KeyID      string    `json:"keyId,omitempty"`
+	Records    int       `json:"records"`
+	Malicious  int       `json:"malicious"`
+	Vulnerable int       `json:"vulnerable"`
 	RecordedAt time.Time `json:"recordedAt"`
 }
 

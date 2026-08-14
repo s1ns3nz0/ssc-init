@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/s1ns3nz0/ssc-init/internal/model"
@@ -61,7 +62,7 @@ func Encode(record Record, reportText []byte) ([]byte, error) {
 	if err := Validate(record); err != nil {
 		return nil, err
 	}
-	if !utf8.Valid(reportText) || int64(len(reportText)) > maxEntryBytes {
+	if !validReportText(reportText) || int64(len(reportText)) > maxEntryBytes {
 		return nil, errors.New("invalid audit report")
 	}
 	entries, err := recordEntries(record, reportText)
@@ -98,6 +99,9 @@ func Encode(record Record, reportText []byte) ([]byte, error) {
 }
 
 func recordEntries(record Record, reportText []byte) ([]archiveEntry, error) {
+	if !validReportText(reportText) {
+		return nil, errors.New("invalid audit report")
+	}
 	summary, err := canonicalJSON(record.Summary)
 	if err != nil {
 		return nil, err
@@ -230,6 +234,9 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 			return Verified{}, errors.New("audit entry digest mismatch")
 		}
 	}
+	if !validReportText(contents["report.txt"]) {
+		return Verified{}, errors.New("invalid audit report")
+	}
 	record, err := decodeRecord(manifest, contents)
 	if err != nil {
 		return Verified{}, err
@@ -242,6 +249,18 @@ func Verify(reader io.ReaderAt, size int64) (Verified, error) {
 		return Verified{}, errors.New("cannot hash audit ZIP")
 	}
 	return Verified{Manifest: manifest, Record: record, ZIPSHA256: hex.EncodeToString(zipDigest.Sum(nil))}, nil
+}
+
+func validReportText(value []byte) bool {
+	if !utf8.Valid(value) {
+		return false
+	}
+	for _, character := range string(value) {
+		if unicode.IsControl(character) && character != '\n' && character != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func validArchiveEntryName(name string) bool {

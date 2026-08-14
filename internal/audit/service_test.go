@@ -29,9 +29,9 @@ func TestServiceCompleteArchivesExactModelUsedForRendering(t *testing.T) {
 func TestServiceCompleteWithIntelligencePersistsClosedReceipt(t *testing.T) {
 	manager := newTestManager(t)
 	service := Service{Manager: manager, Product: "ssc-init", Version: "dev", DeviceID: validRun().DeviceID, Now: func() time.Time { return validRun().FinishedAt }}
-	receipt := &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: validRun().FinishedAt.UTC()}
+	receipt := &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: validRun().FinishedAt.UTC()}
 	outcome := service.CompleteWithIntelligence(context.Background(), validRun(), model.ScanResult{ScanID: validRun().ScanID, Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, receipt)
-	if outcome.Stored == nil || outcome.Record.Intelligence == nil || outcome.Record.Intelligence.Sequence != 42 {
+	if outcome.Stored == nil || outcome.Record.Intelligence == nil || outcome.Record.Intelligence.Sequence != 42 || outcome.Record.Intelligence.Records != 4 {
 		t.Fatalf("outcome=%+v", outcome)
 	}
 }

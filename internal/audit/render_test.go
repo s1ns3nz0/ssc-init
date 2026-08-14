@@ -49,7 +49,7 @@ func TestWritePrettyExplainsVerifiedMaliciousTIAndUpdateState(t *testing.T) {
 	record.Findings[0].Confidence = model.ConfidenceHigh
 	record.Findings[0].IntelligenceIDs = []string{"MAL-2026-0042"}
 	record.Findings[0].Bundles = []model.BundleReference{{Family: "ti", Sequence: 42, Digest: strings.Repeat("d", 64)}}
-	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 18432, Malicious: 612, Vulnerable: 17820, RecordedAt: record.Run.FinishedAt}
 
 	var output bytes.Buffer
 	if err := WritePrettyStyled(&output, record, nil, Style{Color: true}); err != nil {
@@ -57,7 +57,7 @@ func TestWritePrettyExplainsVerifiedMaliciousTIAndUpdateState(t *testing.T) {
 	}
 	text := output.String()
 	assertOrderedText(t, text, "ASSESSMENT", "ACTION REQUIRED", "INTELLIGENCE", "updated", "PRIORITY FINDINGS")
-	for _, want := range []string{"fresh", "sequence", "42", "verified malicious-package intelligence matched this exact package version", "\x1b[31m"} {
+	for _, want := range []string{"fresh", "sequence", "42", "records", "18432", "malicious", "612", "vulnerable", "17820", "verified malicious-package intelligence matched this exact package version", "\x1b[31m"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("TI output missing %q:\n%s", want, text)
 		}

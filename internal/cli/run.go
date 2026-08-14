@@ -1122,7 +1122,7 @@ func findingExitCode(findings []model.Finding) int {
 }
 
 func auditReceipt(result bundle.UpdateResult) *audit.IntelligenceUpdate {
-	return &audit.IntelligenceUpdate{Family: "ti", Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID}
+	return &audit.IntelligenceUpdate{Family: "ti", Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID, Records: result.Records, Malicious: result.Malicious, Vulnerable: result.Vulnerable}
 }
 
 func writeScanUpdateJSON(writer io.Writer, scan model.ScanResult, inventory model.Inventory, delta model.Delta, update bundle.UpdateResult) error {

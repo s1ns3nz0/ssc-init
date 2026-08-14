@@ -63,3 +63,33 @@ go test ./... -count=1
 go vet ./...
 git diff HEAD^ --check
 ```
+
+## Fix round 1: closed advisory IDs, signed counts, and report bytes
+
+Status: DONE
+
+The independent review's three Important findings were addressed with strict
+RED/GREEN cycles:
+
+- Public advisory presentation now accepts only closed producer/source
+  namespaces and shapes: CVE, official GHSA, OSV, Go, PYSEC, RUSTSEC, and the
+  numeric-year OpenSSF MAL form. Only the publisher's `#NNN` expansion suffix
+  is stripped. Plausible opaque hyphenated values and namespace lookalikes are
+  neither displayed nor described as affected-version advisories.
+- `IntelligenceUpdate` now persists `records`, `malicious`, and `vulnerable`
+  from the verified `bundle.UpdateResult`. Counts are bounded to 100,000,
+  nonnegative, and must satisfy `records = malicious + vulnerable`. Identity-
+  free unavailable receipts require all-zero counts. Updated, current,
+  degraded/LKG, and expired identified receipts preserve the exact signed
+  bundle composition through canonical archive reload and render all three
+  rows in `INTELLIGENCE`.
+- Audit reports now use an explicit text policy: valid UTF-8 with LF and tab as
+  the only permitted control characters. Encode rejects unsafe bytes before
+  ZIP construction, and Verify independently rejects a correctly catalogued
+  and rehashed hostile `report.txt`, covering CSI, OSC, NUL, CR, DEL, and C1
+  controls while preserving Unicode prose.
+
+Mutation evidence killed and restored a broad advisory allow, omitted count
+wiring, missing count-sum validation, and removed Verify-side report control
+validation. Legacy archives without an intelligence receipt retain their
+existing closed catalog and verification behavior.
