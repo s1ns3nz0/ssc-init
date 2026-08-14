@@ -30,7 +30,8 @@ func TestPublishTIWorkflowIsPinnedLeastPrivilegeAndFailClosed(t *testing.T) {
 		"workflow_dispatch:", "environment: ti-production", "permissions:\n  contents: read", "contents: write",
 		"actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
 		"secrets.TI_ED25519_PRIVATE_KEY", "secrets.TI_FEED_TOKEN", "vars.TI_KEY_ID", "persist-credentials: false", "base64 --decode",
-		"scripts/test-publish-ti.sh", "ssc-init-ti-publisher verify", "--clobber=false", "if: always()", "rm -rf -- \"$TI_KEY_DIR\"",
+		"osv_revision:", "osv_license:", "openssf_revision:", "openssf_license:", "source_retrieved_at:",
+		"scripts/test-publish-ti.sh", "ssc-init-ti-publisher verify", "source-provenance.json", "checksums.txt", "--clobber=false", "if: always()", "rm -rf -- \"$TI_KEY_DIR\"",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("workflow missing %q", required)
@@ -139,6 +140,31 @@ func TestGenerateTIKeyKeepsSeedOffArgvAndRejectsUnsafeTargets(t *testing.T) {
 	}
 	if out, err := run(filepath.Join(linked, "private.key")); err == nil {
 		t.Fatalf("intermediate symlink accepted: %s", out)
+	}
+	racePath := filepath.Join(root, "raced-private.key")
+	command := exec.Command(realGo, "run", "./scripts/ti-key-expand.go", racePath)
+	command.Dir = repo
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(racePath, []byte("attacker-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write(bytes.Repeat([]byte{7}, ed25519.SeedSize)); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("racing target creation was overwritten")
+	}
+	if got := string(mustRead(t, racePath)); got != "attacker-owned" {
+		t.Fatalf("racing target changed: %q", got)
 	}
 }
 

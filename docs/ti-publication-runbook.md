@@ -29,9 +29,10 @@ repository ID to bypass this stop.
 
 ## Prepare and publish
 
-Pin immutable OSV and OpenSSF malicious-package revisions. Record their public
-revision identifiers, retrieval time, SHA-256 digests, license, and public
-source URLs. Only npm, PyPI, Go, and crates.io records with approved
+Pin immutable OSV and OpenSSF malicious-package revisions. Workflow inputs
+require each exact public snapshot URL, immutable revision, lowercase SHA-256,
+reviewed redistribution license, plus one UTC RFC3339 retrieval timestamp. No
+license is inferred or defaulted. Only npm, PyPI, Go, and crates.io records with approved
 redistribution licenses are accepted. Run:
 
 ```sh
@@ -47,8 +48,11 @@ protected environment reviewer must compare those values to the source record.
 The workflow verifies source digests, normalization, licenses, bounds,
 reproducibility, and monotonic sequence; signs exact manifest and bundle bytes;
 then verifies both signatures with the public key compiled into the checkout.
-It creates immutable tag `ti-%08d`, uploads exactly the four client assets, and
-only then marks the release latest. Existing tags/assets are never overwritten.
+It creates immutable tag `ti-%08d`, uploads the four client assets, and also
+uploads `attribution-report.json`, canonical `source-provenance.json`, and
+`checksums.txt` as durable operator evidence. Checksums bind both signatures,
+both signed documents, attribution, and provenance. Only after every asset is
+present does it mark the release latest. Existing tags/assets are never overwritten.
 
 ## Rotation
 
