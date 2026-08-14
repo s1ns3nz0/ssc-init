@@ -42,7 +42,7 @@ var version = "dev"
 
 const (
 	productionTIBaseURL      = "https://github.com/s1ns3nz0/ssc-init-ti/"
-	productionTIRepositoryID = "" // provision only after the public feed repository exists and its immutable numeric ID is reviewed
+	productionTIRepositoryID = "1333823234"
 )
 
 type applicationStore interface {

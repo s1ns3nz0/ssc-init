@@ -6,8 +6,19 @@ It never requires Apple signing or the Mac App Store.
 
 ## External provisioning gate
 
-Production publication is **blocked** until the repository owner completes all
-of the following outside this repository:
+Production trust was provisioned on 2026-08-14 with these reviewed public
+identifiers:
+
+- feed: `https://github.com/s1ns3nz0/ssc-init-ti`
+- immutable GitHub repository ID: `1333823234`
+- key ID: `ti-production-2026-01`
+- Ed25519 public key (base64 raw): `513aUPfBg20IaplRs5TMcEi8duIi27DUKpq8EMWgDV4=`
+- protected source-repository environment: `ti-production`
+
+The private key exists only as the `TI_ED25519_PRIVATE_KEY` environment secret;
+its local staging file was deleted after registration. `TI_FEED_TOKEN` and the
+reviewed `TI_KEY_ID` environment variable are also configured. Future rotation
+or reprovisioning must complete all of the following outside this repository:
 
 1. Create the public `s1ns3nz0/ssc-init-ti` repository and record its immutable
    numeric repository ID for reviewed compilation into `productionTIRepositoryID`.

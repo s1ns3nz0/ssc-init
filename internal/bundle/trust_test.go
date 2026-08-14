@@ -2,14 +2,22 @@ package bundle
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
 
 func TestProductionKeysContainNoTestOrPrivateKeyMaterial(t *testing.T) {
 	keys := ProductionKeys()
-	if len(keys) != 0 {
-		t.Fatal("production trust must remain empty until a reviewed public key is provisioned")
+	if len(keys) != 1 || len(keys[FamilyTI]) != 1 {
+		t.Fatalf("production trust registry shape=%v", keys)
+	}
+	want, err := hex.DecodeString("e75dda50f7c1836d086a9951b394cc7048bc76e222dbb0d42a9abc10c5a00d5e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keys[FamilyTI]["ti-production-2026-01"]; !ed25519.PublicKey(got).Equal(ed25519.PublicKey(want)) {
+		t.Fatalf("reviewed production key mismatch: %x", got)
 	}
 	for family, familyKeys := range keys {
 		for keyID, key := range familyKeys {
