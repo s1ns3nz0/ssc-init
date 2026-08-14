@@ -31,7 +31,7 @@ func TestValidateRejectsEverySensitiveMarker(t *testing.T) {
 
 func TestValidateRejectsOpenIntelligenceUpdateValues(t *testing.T) {
 	base := validRecord()
-	base.Intelligence = &IntelligenceUpdate{Status: "updated", Freshness: "fresh", Sequence: 1, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: base.Run.FinishedAt}
+	base.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 1, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: base.Run.FinishedAt}
 	if err := Validate(base); err != nil {
 		t.Fatalf("valid receipt rejected: %v", err)
 	}
@@ -48,6 +48,112 @@ func TestValidateRejectsOpenIntelligenceUpdateValues(t *testing.T) {
 			mutate(record.Intelligence)
 			if Validate(record) == nil {
 				t.Fatal("accepted open receipt")
+			}
+		})
+	}
+}
+
+func TestValidateIntelligenceUpdateAcceptsOnlyEmittableStateMatrix(t *testing.T) {
+	identified := IntelligenceUpdate{Family: "ti", Status: "updated", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1"}
+	valid := []IntelligenceUpdate{
+		identified,
+		func() IntelligenceUpdate { v := identified; v.Status = "current"; return v }(),
+		func() IntelligenceUpdate {
+			v := identified
+			v.Status, v.ErrorCode = "degraded", "network-unavailable"
+			return v
+		}(),
+		func() IntelligenceUpdate {
+			v := identified
+			v.Status, v.ErrorCode, v.Freshness = "degraded", "signature-invalid", "stale"
+			return v
+		}(),
+		{Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "missing"},
+		{Family: "ti", Status: "unavailable", ErrorCode: "bundle-invalid", Freshness: "unavailable"},
+		func() IntelligenceUpdate {
+			v := identified
+			v.Status, v.ErrorCode, v.Freshness = "unavailable", "network-unavailable", "expired"
+			return v
+		}(),
+	}
+	for index, receipt := range valid {
+		record := validRecord()
+		receipt.RecordedAt = record.Run.FinishedAt
+		record.Intelligence = &receipt
+		if err := Validate(record); err != nil {
+			t.Fatalf("valid[%d]=%+v rejected: %v", index, receipt, err)
+		}
+	}
+
+	invalid := map[string]IntelligenceUpdate{
+		"wrong-family":              identified,
+		"updated-no-identity":       {Family: "ti", Status: "updated", Freshness: "fresh"},
+		"updated-stale":             identified,
+		"updated-error":             identified,
+		"current-stale":             identified,
+		"degraded-no-error":         identified,
+		"degraded-no-identity":      {Family: "ti", Status: "degraded", ErrorCode: "network-unavailable", Freshness: "fresh"},
+		"degraded-expired":          identified,
+		"missing-with-identity":     identified,
+		"unavailable-with-identity": identified,
+		"expired-no-identity":       {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired"},
+		"fresh-unavailable":         identified,
+		"sequence-only":             {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired", Sequence: 1},
+		"digest-only":               {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired", Digest: strings.Repeat("a", 64)},
+		"key-only":                  {Family: "ti", Status: "unavailable", ErrorCode: "network-unavailable", Freshness: "expired", KeyID: "ti-prod-1"},
+		"cancellation":              {Family: "ti", Status: "unavailable", ErrorCode: "cancellation", Freshness: "missing"},
+	}
+	invalid["wrong-family"] = func() IntelligenceUpdate { v := invalid["wrong-family"]; v.Family = "policy"; return v }()
+	invalid["updated-stale"] = func() IntelligenceUpdate { v := invalid["updated-stale"]; v.Freshness = "stale"; return v }()
+	invalid["updated-error"] = func() IntelligenceUpdate {
+		v := invalid["updated-error"]
+		v.ErrorCode = "network-unavailable"
+		return v
+	}()
+	invalid["current-stale"] = func() IntelligenceUpdate {
+		v := invalid["current-stale"]
+		v.Status, v.Freshness = "current", "stale"
+		return v
+	}()
+	invalid["degraded-no-error"] = func() IntelligenceUpdate { v := invalid["degraded-no-error"]; v.Status = "degraded"; return v }()
+	invalid["degraded-expired"] = func() IntelligenceUpdate {
+		v := invalid["degraded-expired"]
+		v.Status, v.ErrorCode, v.Freshness = "degraded", "network-unavailable", "expired"
+		return v
+	}()
+	invalid["missing-with-identity"] = func() IntelligenceUpdate {
+		v := invalid["missing-with-identity"]
+		v.Status, v.ErrorCode, v.Freshness = "unavailable", "network-unavailable", "missing"
+		return v
+	}()
+	invalid["unavailable-with-identity"] = func() IntelligenceUpdate {
+		v := invalid["unavailable-with-identity"]
+		v.Status, v.ErrorCode, v.Freshness = "unavailable", "network-unavailable", "unavailable"
+		return v
+	}()
+	invalid["fresh-unavailable"] = func() IntelligenceUpdate {
+		v := invalid["fresh-unavailable"]
+		v.Status, v.ErrorCode = "unavailable", "network-unavailable"
+		return v
+	}()
+	for name, receipt := range invalid {
+		t.Run(name, func(t *testing.T) {
+			record := validRecord()
+			receipt.RecordedAt = record.Run.FinishedAt
+			record.Intelligence = &receipt
+			if Validate(record) == nil {
+				t.Fatalf("accepted impossible receipt %+v", receipt)
+			}
+		})
+	}
+	for name, timestamp := range map[string]time.Time{"before": validRecord().Run.StartedAt.Add(-time.Second), "after": validRecord().Run.FinishedAt.Add(time.Second), "non-utc": validRecord().Run.FinishedAt.In(time.FixedZone("KST", 9*60*60))} {
+		t.Run("timestamp-"+name, func(t *testing.T) {
+			record := validRecord()
+			receipt := identified
+			receipt.RecordedAt = timestamp
+			record.Intelligence = &receipt
+			if Validate(record) == nil {
+				t.Fatal("accepted impossible timestamp")
 			}
 		})
 	}

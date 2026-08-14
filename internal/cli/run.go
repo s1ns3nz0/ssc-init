@@ -271,7 +271,13 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			}
 			return exitCode
 		}
-		if err := report.WriteJSON(stdout, scan, inventory, delta); err != nil {
+		var writeErr error
+		if options.UpdateTI {
+			writeErr = writeScanUpdateJSON(stdout, scan, inventory, delta, update)
+		} else {
+			writeErr = report.WriteJSON(stdout, scan, inventory, delta)
+		}
+		if writeErr != nil {
 			fmt.Fprintln(stderr, "failed to write baseline output")
 			return 1
 		}
@@ -1116,7 +1122,29 @@ func findingExitCode(findings []model.Finding) int {
 }
 
 func auditReceipt(result bundle.UpdateResult) *audit.IntelligenceUpdate {
-	return &audit.IntelligenceUpdate{Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID}
+	return &audit.IntelligenceUpdate{Family: "ti", Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID}
+}
+
+func writeScanUpdateJSON(writer io.Writer, scan model.ScanResult, inventory model.Inventory, delta model.Delta, update bundle.UpdateResult) error {
+	var baseline bytes.Buffer
+	if err := report.WriteJSON(&baseline, scan, inventory, delta); err != nil {
+		return err
+	}
+	raw := baseline.Bytes()
+	if len(raw) < 2 || raw[len(raw)-2] != '}' || raw[len(raw)-1] != '\n' {
+		return errors.New("invalid baseline JSON")
+	}
+	encoded, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(raw[:len(raw)-2]); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, ",\"intelligence\":%s}\n", encoded); err != nil {
+		return err
+	}
+	return nil
 }
 
 type statusPayload struct {

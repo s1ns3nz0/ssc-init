@@ -373,6 +373,44 @@ func TestBundleUpdateWritesClosedJSONResult(t *testing.T) {
 	}
 }
 
+func TestScanUpdateTIJSONIncludesClosedResultWithoutChangingOrdinaryScan(t *testing.T) {
+	identified := bundle.UpdateResult{Status: bundle.UpdateUpdated, Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessFresh, Records: 3, Malicious: 1, Vulnerable: 2}
+	for name, result := range map[string]bundle.UpdateResult{
+		"updated":     identified,
+		"degraded":    {Status: bundle.UpdateDegraded, ErrorCode: bundle.UpdateErrorNetwork, Sequence: 41, Digest: strings.Repeat("b", 64), KeyID: "ti-prod-1", Freshness: bundle.FreshnessStale, Records: 2, Malicious: 1, Vulnerable: 1},
+		"unavailable": {Status: bundle.UpdateUnavailable, ErrorCode: bundle.UpdateErrorNetwork, Freshness: bundle.FreshnessMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := App{TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult { return result }), BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+				return model.ScanResult{SchemaVersion: "ssc-init.scan.v7", Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, false, nil
+			})}
+			var out, errOut bytes.Buffer
+			if code := app.Run(context.Background(), []string{"scan", "--baseline", "--update-ti", "--json"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+				t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+			}
+			var payload struct {
+				Intelligence bundle.UpdateResult `json:"intelligence"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &payload); err != nil || payload.Intelligence != result {
+				t.Fatalf("intelligence=%+v want=%+v err=%v output=%q", payload.Intelligence, result, err, out.String())
+			}
+			for _, forbidden := range []string{"http://", "https://", "manifest", "/Users/", "PRIVATE", "\x1b["} {
+				if strings.Contains(out.String(), forbidden) {
+					t.Fatalf("output contains %q: %q", forbidden, out.String())
+				}
+			}
+		})
+	}
+
+	app := App{BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+		return model.ScanResult{SchemaVersion: "ssc-init.scan.v7", Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, false, nil
+	})}
+	var ordinary, errOut bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &ordinary, &errOut); code != 0 || strings.Contains(ordinary.String(), `"intelligence"`) {
+		t.Fatalf("ordinary code=%d out=%q err=%q", code, ordinary.String(), errOut.String())
+	}
+}
+
 type fakeWebhook struct {
 	destination string
 	body        []byte

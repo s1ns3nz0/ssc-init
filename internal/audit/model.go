@@ -80,6 +80,7 @@ type Summary struct {
 // IntelligenceUpdate is the deliberately closed receipt for the explicit TI
 // update that preceded a scan. It contains no transport or manifest material.
 type IntelligenceUpdate struct {
+	Family     string    `json:"family"`
 	Status     string    `json:"status"`
 	ErrorCode  string    `json:"errorCode,omitempty"`
 	Freshness  string    `json:"freshness"`

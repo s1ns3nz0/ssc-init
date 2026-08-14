@@ -23,7 +23,7 @@ func TestBuildCreatesClosedCompleteAndPartialRecords(t *testing.T) {
 }
 
 func TestBuildRecordsClosedIntelligenceUpdateReceipt(t *testing.T) {
-	receipt := &IntelligenceUpdate{Status: "degraded", ErrorCode: "network-unavailable", Freshness: "stale", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: validRun().FinishedAt}
+	receipt := &IntelligenceUpdate{Family: "ti", Status: "degraded", ErrorCode: "network-unavailable", Freshness: "stale", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: validRun().FinishedAt}
 	record, err := Build(model.ScanResult{Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, validRun(), receipt)
 	receipt.RecordedAt = receipt.RecordedAt.UTC()
 	if err != nil || record.Intelligence == nil || *record.Intelligence != *receipt {
