@@ -5,8 +5,13 @@ on:
     inputs:
       osv_url: {description: "Pinned HTTPS OSV snapshot URL", required: true, type: string}
       osv_sha256: {description: "OSV snapshot SHA-256", required: true, type: string}
+      osv_revision: {description: "Immutable OSV source revision", required: true, type: string}
+      osv_license: {description: "Reviewed OSV redistribution license", required: true, type: string}
       openssf_url: {description: "Pinned HTTPS OpenSSF snapshot URL", required: true, type: string}
       openssf_sha256: {description: "OpenSSF snapshot SHA-256", required: true, type: string}
+      openssf_revision: {description: "Immutable OpenSSF source revision", required: true, type: string}
+      openssf_license: {description: "Reviewed OpenSSF redistribution license", required: true, type: string}
+      source_retrieved_at: {description: "UTC RFC3339 source retrieval time", required: true, type: string}
       version: {description: "Public feed version", required: true, type: string}
       sequence: {description: "Strictly increasing positive sequence", required: true, type: number}
       generated_at: {description: "RFC3339 generation time", required: true, type: string}
@@ -88,6 +93,13 @@ jobs:
           TI_OPENSSF_SOURCE: ${{ github.workspace }}/source/openssf.json
           TI_OSV_SHA256: ${{ inputs.osv_sha256 }}
           TI_OPENSSF_SHA256: ${{ inputs.openssf_sha256 }}
+          TI_OSV_REVISION: ${{ inputs.osv_revision }}
+          TI_OPENSSF_REVISION: ${{ inputs.openssf_revision }}
+          TI_OSV_LICENSE: ${{ inputs.osv_license }}
+          TI_OPENSSF_LICENSE: ${{ inputs.openssf_license }}
+          TI_SOURCE_RETRIEVED_AT: ${{ inputs.source_retrieved_at }}
+          TI_OSV_PUBLIC_URL: ${{ inputs.osv_url }}
+          TI_OPENSSF_PUBLIC_URL: ${{ inputs.openssf_url }}
           TI_VERSION: ${{ inputs.version }}
           TI_SEQUENCE: ${{ inputs.sequence }}
           TI_KEY_ID: ${{ vars.TI_KEY_ID }}
@@ -108,6 +120,7 @@ jobs:
           tag=$(printf 'ti-%08d' "$SEQUENCE")
           gh release create "$tag" --repo s1ns3nz0/ssc-init-ti --latest=false --title "$tag" --notes-file publication/attribution-report.json
           gh release upload "$tag" --repo s1ns3nz0/ssc-init-ti --clobber=false publication/ti-manifest.json publication/ti-manifest.sig publication/ti-bundle.json publication/ti-bundle.sig
+          gh release upload "$tag" --repo s1ns3nz0/ssc-init-ti --clobber=false publication/attribution-report.json publication/source-provenance.json publication/checksums.txt
           gh release edit "$tag" --repo s1ns3nz0/ssc-init-ti --latest
       - name: Remove private key
         if: always()

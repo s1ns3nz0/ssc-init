@@ -3,9 +3,13 @@ package scripts_test
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPublishTIWorkflowIsPinnedLeastPrivilegeAndFailClosed(t *testing.T) {
@@ -48,16 +53,246 @@ func TestPublishTIScriptsRequireExplicitPrivateOutputAndProvenance(t *testing.T)
 	}
 	keyScript := string(mustRead(t, filepath.Join(repositoryRoot, "scripts", "generate-ti-key.sh")))
 	publishScript := string(mustRead(t, filepath.Join(repositoryRoot, "scripts", "test-publish-ti.sh")))
-	for _, required := range []string{"--private-output", "[ ! -e \"$private_output\" ]", "chmod 600", "never paste it into logs"} {
+	for _, required := range []string{"--private-output", "tail -c 32 | go run", "never paste it into logs"} {
 		if !strings.Contains(keyScript, required) {
 			t.Fatalf("key script missing %q", required)
 		}
 	}
-	for _, required := range []string{"git diff --quiet HEAD", "TI_OSV_SHA256", "TI_OPENSSF_SHA256", "TI_LAST_SEQUENCE", "TI_RELEASE_TAG_EXISTS", "test or placeholder key ID refused", "source-provenance.txt"} {
+	for _, required := range []string{"git diff --quiet HEAD", "TI_OSV_SHA256", "TI_OPENSSF_SHA256", "TI_OSV_REVISION", "TI_OSV_LICENSE", "TI_SOURCE_RETRIEVED_AT", "TI_LAST_SEQUENCE", "TI_RELEASE_TAG_EXISTS", "test or placeholder key ID refused", "source-provenance.json"} {
 		if !strings.Contains(publishScript, required) {
 			t.Fatalf("publication script missing %q", required)
 		}
 	}
+}
+
+func TestGenerateTIKeyKeepsSeedOffArgvAndRejectsUnsafeTargets(t *testing.T) {
+	repo := repositoryRoot(t)
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(userHome, ".ssc-ti-key-script-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(wrapperDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(root, "argv.log")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TI_ARGV_LOG\"\nexec \"$TI_REAL_GO\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "go"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run := func(output string) ([]byte, error) {
+		command := exec.Command("sh", filepath.Join(repo, "scripts/generate-ti-key.sh"), "--private-output", output)
+		command.Dir = repo
+		command.Env = append(os.Environ(), "PATH="+wrapperDir+":"+os.Getenv("PATH"), "TI_ARGV_LOG="+argvLog, "TI_REAL_GO="+realGo)
+		return command.CombinedOutput()
+	}
+	privatePath := filepath.Join(root, "private.key")
+	output, err := run(privatePath)
+	if err != nil {
+		t.Fatalf("generate: %v: %s", err, output)
+	}
+	key := mustRead(t, privatePath)
+	if len(key) != ed25519.PrivateKeySize {
+		t.Fatalf("private size=%d", len(key))
+	}
+	argv := string(mustRead(t, argvLog))
+	if strings.Contains(argv, string(key[:16])) || strings.Contains(argv, "=") || !strings.Contains(argv, privatePath) {
+		t.Fatalf("unsafe helper argv=%q", argv)
+	}
+	if info, err := os.Stat(privatePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v err=%v", info.Mode(), err)
+	}
+
+	for name, prepare := range map[string]func(string){
+		"existing":         func(path string) { _ = os.WriteFile(path, []byte("preserve"), 0o600) },
+		"dangling symlink": func(path string) { _ = os.Symlink(filepath.Join(root, "victim"), path) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(root, strings.ReplaceAll(name, " ", "-"))
+			prepare(path)
+			if out, err := run(path); err == nil {
+				t.Fatalf("unsafe target accepted: %s", out)
+			}
+			if name == "dangling symlink" {
+				if _, err := os.Stat(filepath.Join(root, "victim")); !os.IsNotExist(err) {
+					t.Fatal("dangling symlink target was written")
+				}
+			}
+		})
+	}
+	actual := filepath.Join(root, "actual")
+	if err := os.Mkdir(actual, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "linked")
+	if err := os.Symlink(actual, linked); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(filepath.Join(linked, "private.key")); err == nil {
+		t.Fatalf("intermediate symlink accepted: %s", out)
+	}
+}
+
+func TestPublishTIScriptExecutableFailureGatesAndReproducibility(t *testing.T) {
+	repo := publicationSandbox(t)
+	osv := filepath.Join(repo, "internal/tipublish/testdata/osv-vulnerable.json")
+	openssf := filepath.Join(repo, "internal/tipublish/testdata/openssf-malicious.json")
+	osvDigest := fmt.Sprintf("%x", sha256.Sum256(mustRead(t, osv)))
+	openssfDigest := fmt.Sprintf("%x", sha256.Sum256(mustRead(t, openssf)))
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(repo, "private.key")
+	if err := os.WriteFile(keyPath, private, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	base := map[string]string{
+		"TI_OSV_SOURCE": osv, "TI_OPENSSF_SOURCE": openssf, "TI_OSV_SHA256": osvDigest, "TI_OPENSSF_SHA256": openssfDigest,
+		"TI_OSV_REVISION": "osv-commit-0123456789abcdef", "TI_OPENSSF_REVISION": "openssf-commit-fedcba9876543210",
+		"TI_OSV_LICENSE": "CC-BY-4.0", "TI_OPENSSF_LICENSE": "Apache-2.0", "TI_SOURCE_RETRIEVED_AT": now.Format(time.RFC3339),
+		"TI_OSV_PUBLIC_URL": "https://example.test/osv.json", "TI_OPENSSF_PUBLIC_URL": "https://example.test/openssf.json",
+		"TI_VERSION": "acceptance", "TI_SEQUENCE": "42", "TI_KEY_ID": "ti-fixture-2026", "TI_GENERATED_AT": now.Format(time.RFC3339),
+		"TI_VALID_FROM": now.Add(-time.Hour).Format(time.RFC3339), "TI_VALID_UNTIL": now.Add(time.Hour).Format(time.RFC3339), "TI_PRIVATE_KEY_FILE": keyPath,
+	}
+	run := func(overrides map[string]string, unset string, output string) ([]byte, error) {
+		values := map[string]string{}
+		for _, entry := range os.Environ() {
+			parts := strings.SplitN(entry, "=", 2)
+			values[parts[0]] = parts[1]
+		}
+		for k, v := range base {
+			values[k] = v
+		}
+		for k, v := range overrides {
+			values[k] = v
+		}
+		delete(values, unset)
+		values["TI_OUTPUT_DIR"] = output
+		env := make([]string, 0, len(values))
+		for k, v := range values {
+			env = append(env, k+"="+v)
+		}
+		command := exec.Command("sh", "scripts/test-publish-ti.sh")
+		command.Dir = repo
+		command.Env = env
+		return command.CombinedOutput()
+	}
+	for name, tc := range map[string]struct {
+		over  map[string]string
+		unset string
+		dirty bool
+	}{
+		"missing provenance": {unset: "TI_OSV_REVISION"}, "test key": {over: map[string]string{"TI_KEY_ID": "test-fixture"}},
+		"nonmonotonic": {over: map[string]string{"TI_LAST_SEQUENCE": "42"}}, "existing tag": {over: map[string]string{"TI_RELEASE_TAG_EXISTS": "1"}},
+		"dirty tree": {dirty: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.dirty {
+				path := filepath.Join(repo, "README.md")
+				raw := mustRead(t, path)
+				if err := os.WriteFile(path, append(raw, []byte("\ndirty\n")...), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				defer os.WriteFile(path, raw, 0o644)
+			}
+			output := filepath.Join(repo, "out-"+strings.ReplaceAll(name, " ", "-"))
+			if err := os.Mkdir(output, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := run(tc.over, tc.unset, output); err == nil {
+				t.Fatalf("gate accepted invalid publication: %s", got)
+			}
+		})
+	}
+
+	outputs := []string{filepath.Join(repo, "repro-one"), filepath.Join(repo, "repro-two")}
+	for _, output := range outputs {
+		if err := os.Mkdir(output, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := run(nil, "", output); err != nil {
+			t.Fatalf("publication: %v: %s", err, got)
+		}
+	}
+	for _, name := range []string{"ti-manifest.json", "ti-manifest.sig", "ti-bundle.json", "ti-bundle.sig", "attribution-report.json", "source-provenance.json", "checksums.txt"} {
+		a, b := mustRead(t, filepath.Join(outputs[0], name)), mustRead(t, filepath.Join(outputs[1], name))
+		if !bytes.Equal(a, b) {
+			t.Fatalf("real publisher is not reproducible: %s", name)
+		}
+	}
+}
+
+func publicationSandbox(t *testing.T) string {
+	t.Helper()
+	source := repositoryRoot(t)
+	target := filepath.Join(t.TempDir(), "repo")
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.Mkdir(target, 0o700)
+		}
+		if entry.IsDir() && (entry.Name() == ".git" || entry.Name() == ".worktrees" || entry.Name() == "dist") {
+			return filepath.SkipDir
+		}
+		destination := filepath.Join(target, rel)
+		if entry.IsDir() {
+			return os.Mkdir(destination, 0o700)
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		inputErr := input.Close()
+		closeErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if inputErr != nil {
+			return inputErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"}} {
+		command := exec.Command("git", args...)
+		command.Dir = target
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	return target
 }
 
 func TestProductionBuildExcludesTIAcceptanceInjection(t *testing.T) {

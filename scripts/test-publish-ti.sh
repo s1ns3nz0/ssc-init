@@ -5,6 +5,13 @@ set -eu
 : "${TI_OPENSSF_SOURCE:?absolute pinned OpenSSF snapshot required}"
 : "${TI_OSV_SHA256:?OSV digest required}"
 : "${TI_OPENSSF_SHA256:?OpenSSF digest required}"
+: "${TI_OSV_REVISION:?OSV source revision required}"
+: "${TI_OPENSSF_REVISION:?OpenSSF source revision required}"
+: "${TI_OSV_LICENSE:?reviewed OSV license required}"
+: "${TI_OPENSSF_LICENSE:?reviewed OpenSSF license required}"
+: "${TI_SOURCE_RETRIEVED_AT:?source retrieval timestamp required}"
+: "${TI_OSV_PUBLIC_URL:?public OSV snapshot URL required}"
+: "${TI_OPENSSF_PUBLIC_URL:?public OpenSSF snapshot URL required}"
 : "${TI_VERSION:?version required}"
 : "${TI_SEQUENCE:?sequence required}"
 : "${TI_KEY_ID:?reviewed key ID required}"
@@ -33,8 +40,8 @@ if [ "${TI_RELEASE_TAG_EXISTS:-0}" = 1 ]; then
 fi
 
 go run ./cmd/ssc-init-ti-publisher \
-  --osv-source "$TI_OSV_SOURCE" --osv-license "${TI_OSV_LICENSE:-CC-BY-4.0}" --osv-base-url https://osv.dev/vulnerability/ \
-  --openssf-source "$TI_OPENSSF_SOURCE" --openssf-license "${TI_OPENSSF_LICENSE:-CC-BY-4.0}" --openssf-base-url https://github.com/ossf/malicious-packages/blob/main/osv/malicious/ \
+  --osv-source "$TI_OSV_SOURCE" --osv-license "$TI_OSV_LICENSE" --osv-base-url https://osv.dev/vulnerability/ \
+  --openssf-source "$TI_OPENSSF_SOURCE" --openssf-license "$TI_OPENSSF_LICENSE" --openssf-base-url https://github.com/ossf/malicious-packages/blob/main/osv/malicious/ \
   --version "$TI_VERSION" --sequence "$TI_SEQUENCE" --key-id "$TI_KEY_ID" \
   --generated-at "$TI_GENERATED_AT" --valid-from "$TI_VALID_FROM" --valid-until "$TI_VALID_UNTIL" --output-dir "$TI_OUTPUT_DIR"
 
@@ -45,7 +52,8 @@ go run ./cmd/ssc-init-ti-publisher sign \
 for file in ti-manifest.json ti-manifest.sig ti-bundle.json ti-bundle.sig attribution-report.json; do
   [ -s "$TI_OUTPUT_DIR/$file" ] || { echo "publication artifact missing" >&2; exit 1; }
 done
-printf '%s  %s\n' "$TI_OSV_SHA256" "$TI_OSV_SOURCE" > "$TI_OUTPUT_DIR/source-provenance.txt"
-printf '%s  %s\n' "$TI_OPENSSF_SHA256" "$TI_OPENSSF_SOURCE" >> "$TI_OUTPUT_DIR/source-provenance.txt"
-(cd "$TI_OUTPUT_DIR" && shasum -a 256 ti-manifest.json ti-bundle.json attribution-report.json > checksums.txt)
+go run ./scripts/write-ti-provenance.go "$TI_OUTPUT_DIR/source-provenance.json" \
+  "$TI_SOURCE_RETRIEVED_AT" "$TI_OSV_REVISION" "$TI_OSV_SHA256" "$TI_OSV_LICENSE" "$TI_OSV_PUBLIC_URL" \
+  "$TI_OPENSSF_REVISION" "$TI_OPENSSF_SHA256" "$TI_OPENSSF_LICENSE" "$TI_OPENSSF_PUBLIC_URL"
+(cd "$TI_OUTPUT_DIR" && shasum -a 256 ti-manifest.json ti-manifest.sig ti-bundle.json ti-bundle.sig attribution-report.json source-provenance.json > checksums.txt)
 printf 'prepared immutable TI release %s\n' "$tag"

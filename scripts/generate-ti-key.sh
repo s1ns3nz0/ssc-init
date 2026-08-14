@@ -35,13 +35,8 @@ printf 'Configure TI_KEY_ID as a reviewed repository variable.\n'
 printf 'Store the raw 64-byte private key as TI_ED25519_PRIVATE_KEY using your secret manager/GitHub UI; never paste it into logs or source control.\n'
 
 if [ -n "$private_output" ]; then
-  parent=$(dirname "$private_output")
-  [ -d "$parent" ] || { echo "private output parent does not exist" >&2; exit 1; }
-  [ ! -e "$private_output" ] || { echo "private output already exists" >&2; exit 1; }
-  seed=$(openssl pkey -in "$private_tmp" -outform DER | tail -c 32 | base64 | tr -d '\n')
-  # Publisher accepts Go's raw 64-byte Ed25519 private key. Derive it without
-  # ever placing the value on stdout.
-  go run ./scripts/ti-key-expand.go "$seed" "$private_output"
-  chmod 600 "$private_output"
+  # Seed bytes travel only through the pipe, never argv, environment, shell
+  # variables, stdout, or an additional filesystem object.
+  openssl pkey -in "$private_tmp" -outform DER | tail -c 32 | go run ./scripts/ti-key-expand.go "$private_output"
   printf 'Private key written to the explicit path (mode 0600). Move it directly to the protected secret store.\n'
 fi

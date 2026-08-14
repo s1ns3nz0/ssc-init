@@ -93,12 +93,22 @@ func runVerify(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	verifiedBundle, err := (bundle.Verifier{Keys: keys}).Verify(bundleRaw, bundleSig, now)
-	if err != nil || verifiedBundle.Envelope.Sequence != verifiedManifest.Manifest.Sequence || verifiedBundle.Envelope.KeyID != verifiedManifest.Manifest.KeyID || hex.EncodeToString(verifiedBundle.Digest[:]) != verifiedManifest.Manifest.SHA256 {
+	if err != nil || !publicationArtifactsMatch(verifiedManifest.Manifest, verifiedBundle, bundleRaw) {
 		fmt.Fprintln(stderr, "publication verification failed")
 		return 1
 	}
 	fmt.Fprintf(stdout, "verified TI release %s with compiled key %s\n", verifiedManifest.Manifest.ReleaseTag, verifiedManifest.Manifest.KeyID)
 	return 0
+}
+
+func publicationArtifactsMatch(manifest bundle.Manifest, verified bundle.Verified, raw []byte) bool {
+	envelope := verified.Envelope
+	return manifest.Family == bundle.FamilyTI && envelope.Family == bundle.FamilyTI &&
+		envelope.SchemaVersion == bundle.SchemaVersion &&
+		envelope.Version == manifest.Version && envelope.Sequence == manifest.Sequence && envelope.KeyID == manifest.KeyID &&
+		envelope.GeneratedAt.Equal(manifest.GeneratedAt) && envelope.ValidFrom.Equal(manifest.ValidFrom) && envelope.ValidUntil.Equal(manifest.ValidUntil) &&
+		int64(len(raw)) == manifest.Length && hex.EncodeToString(verified.Digest[:]) == manifest.SHA256 &&
+		envelope.TI != nil && len(envelope.TI.Records) <= 100_000
 }
 
 func publicationVerificationPaths(paths ...string) bool {

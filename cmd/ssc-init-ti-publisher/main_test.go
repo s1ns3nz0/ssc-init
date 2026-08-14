@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,69 @@ func TestPublisherVerifyUsesOnlyCompiledProductionTrust(t *testing.T) {
 	if code := run(args, &stdout, &stderr); code != 1 || stdout.Len() != 0 || strings.Contains(stderr.String(), output) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+}
+
+func TestPublisherVerifyRejectsEveryManifestBundleBindingMismatch(t *testing.T) {
+	now := time.Date(2026, 8, 14, 1, 0, 0, 0, time.UTC)
+	seed := sha256.Sum256([]byte("compiled binding adversary"))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	originalKeys := productionKeysForVerify
+	originalNow := signingNowForRun
+	t.Cleanup(func() { productionKeysForVerify = originalKeys; signingNowForRun = originalNow })
+	productionKeysForVerify = func() bundle.KeyRegistry {
+		return bundle.KeyRegistry{bundle.FamilyTI: {"ti-production-2026": privateKey.Public().(ed25519.PublicKey)}}
+	}
+	signingNowForRun = func() time.Time { return now }
+	for _, tc := range []struct {
+		name   string
+		mutate func(*bundle.Manifest)
+	}{
+		{"length", func(m *bundle.Manifest) { m.Length-- }},
+		{"version", func(m *bundle.Manifest) { m.Version = "different" }},
+		{"sequence", func(m *bundle.Manifest) { m.Sequence++; m.ReleaseTag = fmt.Sprintf("ti-%08d", m.Sequence) }},
+		{"key id", func(m *bundle.Manifest) { m.KeyID = "ti-production-other" }},
+		{"generated", func(m *bundle.Manifest) { m.GeneratedAt = m.GeneratedAt.Add(time.Minute) }},
+		{"valid from", func(m *bundle.Manifest) { m.ValidFrom = m.ValidFrom.Add(-time.Minute) }},
+		{"valid until", func(m *bundle.Manifest) { m.ValidUntil = m.ValidUntil.Add(time.Minute) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := t.TempDir()
+			if code := run(validArgs(t, output), new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+				t.Fatalf("publish=%d", code)
+			}
+			manifestRaw := mustReadPublisherFile(t, filepath.Join(output, "ti-manifest.json"))
+			var manifest bundle.Manifest
+			if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&manifest)
+			manifestRaw, _ = json.Marshal(manifest)
+			manifestRaw = append(manifestRaw, '\n')
+			if err := os.WriteFile(filepath.Join(output, "ti-manifest.json"), manifestRaw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bundleRaw := mustReadPublisherFile(t, filepath.Join(output, "ti-bundle.json"))
+			if err := os.WriteFile(filepath.Join(output, "ti-manifest.sig"), ed25519.Sign(privateKey, manifestRaw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(output, "ti-bundle.sig"), ed25519.Sign(privateKey, bundleRaw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"verify", "--manifest-file", filepath.Join(output, "ti-manifest.json"), "--manifest-signature", filepath.Join(output, "ti-manifest.sig"), "--bundle-file", filepath.Join(output, "ti-bundle.json"), "--bundle-signature", filepath.Join(output, "ti-bundle.sig")}
+			if code := run(args, new(bytes.Buffer), new(bytes.Buffer)); code != 1 {
+				t.Fatalf("verify accepted mismatch: %d", code)
+			}
+		})
+	}
+}
+
+func mustReadPublisherFile(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestPublisherSignsRejectsUnsafeKeysAndKeyConfusionWithoutLeaks(t *testing.T) {
