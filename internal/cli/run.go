@@ -52,6 +52,10 @@ type AuditService interface {
 	Fail(context.Context, audit.Run, audit.Stage, string) audit.Outcome
 }
 
+type intelligenceAuditService interface {
+	CompleteWithIntelligence(context.Context, audit.Run, model.ScanResult, model.Inventory, model.Delta, []model.Finding, *audit.IntelligenceUpdate) audit.Outcome
+}
+
 type PolicyStore interface {
 	Pins(context.Context) ([]policy.Pin, error)
 	SavePins(context.Context, []policy.Pin, time.Time) error
@@ -91,6 +95,12 @@ type BundleManager interface {
 
 type FindingService interface {
 	Evaluate(context.Context, model.Inventory) (finding.Result, error)
+}
+
+// TIUpdater is deliberately narrower than bundle.Updater so no CLI command can
+// supply a repository, URL, credential, or trust root.
+type TIUpdater interface {
+	Update(context.Context) bundle.UpdateResult
 }
 
 type WebhookDeliverer interface {
@@ -157,6 +167,7 @@ type App struct {
 	Now              func() time.Time
 	BundleManagers   map[bundle.Family]BundleManager
 	FindingService   FindingService
+	TIUpdater        TIUpdater
 	DeviceID         string
 	Webhook          WebhookDeliverer
 	AdapterInput     io.Reader
@@ -201,6 +212,18 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			fmt.Fprintln(stderr, "baseline scan is unavailable")
 			return 1
 		}
+		var update bundle.UpdateResult
+		if options.UpdateTI {
+			if a.TIUpdater == nil {
+				fmt.Fprintln(stderr, "threat intelligence update is unavailable")
+				return 1
+			}
+			update = a.TIUpdater.Update(ctx)
+			if update.ErrorCode == bundle.UpdateErrorCancellation {
+				fmt.Fprintln(stderr, "threat intelligence update cancelled")
+				return 1
+			}
+		}
 		var run audit.Run
 		var runErr error
 		if a.AuditService != nil {
@@ -223,27 +246,36 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		}
 		var outcome audit.Outcome
 		if a.AuditService != nil && runErr == nil {
-			outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
+			if options.UpdateTI {
+				if service, ok := a.AuditService.(intelligenceAuditService); ok {
+					outcome = service.CompleteWithIntelligence(ctx, run, scan, inventory, delta, findings, auditReceipt(update))
+				} else {
+					outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
+				}
+			} else {
+				outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
+			}
 		}
+		exitCode := findingExitCode(findings)
 		if options.Pretty {
 			if outcome.Record.SchemaVersion != "" {
 				if err := audit.WritePrettyStyled(stdout, outcome.Record, outcome.Stored, audit.Style{Color: a.Color}); err != nil {
 					fmt.Fprintln(stderr, "failed to write baseline output")
 					return 1
 				}
-				return 0
+				return exitCode
 			}
 			if err := report.WritePretty(stdout, scan, inventory, delta); err != nil {
 				fmt.Fprintln(stderr, "failed to write baseline output")
 				return 1
 			}
-			return 0
+			return exitCode
 		}
 		if err := report.WriteJSON(stdout, scan, inventory, delta); err != nil {
 			fmt.Fprintln(stderr, "failed to write baseline output")
 			return 1
 		}
-		return 0
+		return exitCode
 	case "audit":
 		return a.runAudit(ctx, options, stdout, stderr)
 	case "status":
@@ -550,6 +582,26 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 		return 0
 	case "bundle":
 		family := bundle.Family(options.BundleFamily)
+		if options.BundleCommand == "update" {
+			if family != bundle.FamilyTI || a.TIUpdater == nil {
+				fmt.Fprintln(stderr, "bundle update is unavailable")
+				return 1
+			}
+			result := a.TIUpdater.Update(ctx)
+			if options.Pretty {
+				if _, err := fmt.Fprintf(stdout, "THREAT INTELLIGENCE UPDATE\n  status      %s\n  freshness   %s\n  sequence    %d\n", result.Status, result.Freshness, result.Sequence); err != nil {
+					fmt.Fprintln(stderr, "failed to write bundle output")
+					return 1
+				}
+			} else if err := writeJSON(stdout, bundleUpdatePayload{SchemaVersion: "ssc-init.bundle-update.v1", UpdateResult: result}); err != nil {
+				fmt.Fprintln(stderr, "failed to write bundle output")
+				return 1
+			}
+			if result.ErrorCode == bundle.UpdateErrorCancellation {
+				return 1
+			}
+			return 0
+		}
 		manager := a.BundleManagers[family]
 		if manager == nil {
 			fmt.Fprintln(stderr, "bundle state is unavailable")
@@ -1044,6 +1096,27 @@ type bundlePayload struct {
 	SchemaVersion string        `json:"schemaVersion"`
 	Command       string        `json:"command"`
 	Status        bundle.Status `json:"status"`
+}
+
+type bundleUpdatePayload struct {
+	SchemaVersion string `json:"schemaVersion"`
+	bundle.UpdateResult
+}
+
+func findingExitCode(findings []model.Finding) int {
+	for _, item := range findings {
+		if item.Verdict == model.VerdictKnownMalicious || item.Verdict == model.VerdictBehaviorMalicious || item.Level == 2 {
+			return 4
+		}
+	}
+	if len(findings) > 0 {
+		return 3
+	}
+	return 0
+}
+
+func auditReceipt(result bundle.UpdateResult) *audit.IntelligenceUpdate {
+	return &audit.IntelligenceUpdate{Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID}
 }
 
 type statusPayload struct {

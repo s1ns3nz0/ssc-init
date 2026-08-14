@@ -29,6 +29,30 @@ func TestValidateRejectsEverySensitiveMarker(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOpenIntelligenceUpdateValues(t *testing.T) {
+	base := validRecord()
+	base.Intelligence = &IntelligenceUpdate{Status: "updated", Freshness: "fresh", Sequence: 1, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: base.Run.FinishedAt}
+	if err := Validate(base); err != nil {
+		t.Fatalf("valid receipt rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*IntelligenceUpdate){
+		"status": func(v *IntelligenceUpdate) { v.Status = "https://private.example" },
+		"error":  func(v *IntelligenceUpdate) { v.ErrorCode = "/Users/alice/private" },
+		"digest": func(v *IntelligenceUpdate) { v.Digest = "manifest bytes" },
+		"key":    func(v *IntelligenceUpdate) { v.KeyID = "PRIVATE KEY" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := base
+			value := *base.Intelligence
+			record.Intelligence = &value
+			mutate(record.Intelligence)
+			if Validate(record) == nil {
+				t.Fatal("accepted open receipt")
+			}
+		})
+	}
+}
+
 func TestValidateRejectsEmbeddedPrivateMarkersWithoutRejectingDottedDisplayNames(t *testing.T) {
 	for _, marker := range []string{"alice-macbook.local", "private workspace id", "workspace-secret", "see[/home/alice/private]", "endpoint 10.0.0.1:8443"} {
 		record := validRecord()

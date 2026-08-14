@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +39,11 @@ import (
 )
 
 var version = "dev"
+
+const (
+	productionTIBaseURL      = "https://github.com/s1ns3nz0/ssc-init-ti/"
+	productionTIRepositoryID = "" // provision only after the public feed repository exists and its immutable numeric ID is reviewed
+)
 
 type applicationStore interface {
 	scan.SnapshotStore
@@ -255,6 +262,13 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		if tiManager, policyManager, managerErr := findingManagers(home); managerErr == nil {
 			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+			if options.UpdateTI {
+				updater := productionTIUpdater(tiManager, environment.Now)
+				app.TIUpdater = updater
+			}
+		} else if options.UpdateTI {
+			fmt.Fprintln(stderr, "failed to initialize SSC Init")
+			return 1
 		}
 		policyContents, policyErr := os.ReadFile(paths.Install().PolicyFile)
 		if policyErr == nil {
@@ -346,6 +360,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			manager := &bundle.Manager{Layout: layout, Family: family, Verifier: bundle.Verifier{Keys: bundleKeysForRun}, Now: func() time.Time { return time.Now().UTC() }}
 			app.BundleManagers[family] = manager
+			if family == bundle.FamilyTI && options.BundleCommand == "update" {
+				updater := productionTIUpdater(manager, time.Now)
+				app.TIUpdater = updater
+			}
 		}
 		return app.RunOptions(ctx, options, stdout, stderr)
 	case "hook":
@@ -629,6 +647,14 @@ func findingManagers(home string) (*bundle.Manager, *bundle.Manager, error) {
 	}
 	organization, err := makeManager(bundle.FamilyPolicy)
 	return ti, organization, err
+}
+
+func productionTIUpdater(manager *bundle.Manager, now func() time.Time) bundle.Updater {
+	base, err := url.Parse(productionTIBaseURL)
+	if err != nil {
+		panic("invalid compiled TI feed base")
+	}
+	return bundle.Updater{Manager: manager, Client: &http.Client{}, Base: base, Keys: bundleKeysForRun, Now: func() time.Time { return now().UTC() }, RepositoryID: productionTIRepositoryID}
 }
 
 func scanConfiguration(ctx context.Context, home string, options cli.Options) (collector.Environment, []collector.Collector, error) {

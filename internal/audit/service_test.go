@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,16 @@ func TestServiceCompleteArchivesExactModelUsedForRendering(t *testing.T) {
 	}
 	if !reflect.DeepEqual(outcome.Record, verified.Record) {
 		t.Fatalf("render/archive records differ:\n%#v\n%#v", outcome.Record, verified.Record)
+	}
+}
+
+func TestServiceCompleteWithIntelligencePersistsClosedReceipt(t *testing.T) {
+	manager := newTestManager(t)
+	service := Service{Manager: manager, Product: "ssc-init", Version: "dev", DeviceID: validRun().DeviceID, Now: func() time.Time { return validRun().FinishedAt }}
+	receipt := &IntelligenceUpdate{Status: "updated", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", RecordedAt: validRun().FinishedAt.UTC()}
+	outcome := service.CompleteWithIntelligence(context.Background(), validRun(), model.ScanResult{ScanID: validRun().ScanID, Status: model.ScanComplete}, model.Inventory{}, model.Delta{}, nil, receipt)
+	if outcome.Stored == nil || outcome.Record.Intelligence == nil || outcome.Record.Intelligence.Sequence != 42 {
+		t.Fatalf("outcome=%+v", outcome)
 	}
 }
 

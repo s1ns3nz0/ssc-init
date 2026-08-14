@@ -40,13 +40,16 @@ func Validate(record Record) error {
 		return errors.New("invalid audit record")
 	}
 	if record.State == StateFailed {
-		if record.Failure == nil || !validFailure(record.Failure.Stage, record.Failure.Code) || !emptyFailurePayload(record) {
+		if record.Failure == nil || record.Intelligence != nil || !validFailure(record.Failure.Stage, record.Failure.Code) || !emptyFailurePayload(record) {
 			return errors.New("invalid failed audit record")
 		}
 		return nil
 	}
 	if (record.State != StateComplete && record.State != StatePartial) || record.Failure != nil || containsOriginalErrorText(record) {
 		return errors.New("invalid completed audit record")
+	}
+	if !validIntelligenceUpdate(record.Intelligence, record.Run) {
+		return errors.New("invalid intelligence update receipt")
 	}
 	if err := validateInventory(record.Profile, record.Inventory); err != nil {
 		return err
@@ -61,6 +64,49 @@ func Validate(record Record) error {
 		return errors.New("redacted audit record retains display identity")
 	}
 	return nil
+}
+
+func validIntelligenceUpdate(value *IntelligenceUpdate, run Run) bool {
+	if value == nil {
+		return true
+	}
+	switch value.Status {
+	case "updated", "current":
+		if value.ErrorCode != "" || value.Freshness != "fresh" && value.Freshness != "stale" {
+			return false
+		}
+	case "degraded":
+		if !validUpdateErrorCode(value.ErrorCode) || value.Freshness != "fresh" && value.Freshness != "stale" {
+			return false
+		}
+	case "unavailable":
+		if !validUpdateErrorCode(value.ErrorCode) || value.Freshness != "missing" && value.Freshness != "expired" {
+			return false
+		}
+	default:
+		return false
+	}
+	switch value.Freshness {
+	case "missing", "fresh", "stale", "expired":
+	default:
+		return false
+	}
+	if value.RecordedAt.IsZero() || value.RecordedAt.Location() != time.UTC || value.RecordedAt.Before(run.StartedAt) || value.RecordedAt.After(run.FinishedAt) {
+		return false
+	}
+	if value.Sequence == 0 {
+		return value.Digest == "" && value.KeyID == ""
+	}
+	return sha256Hex(value.Digest) && regexp.MustCompile(`\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z`).MatchString(value.KeyID)
+}
+
+func validUpdateErrorCode(value string) bool {
+	switch value {
+	case "network-unavailable", "redirect-rejected", "response-limit", "manifest-invalid", "signature-invalid", "bundle-invalid", "rollback-rejected", "activation-failed", "cancellation":
+		return true
+	default:
+		return false
+	}
 }
 
 func validProfile(value Profile) bool { return value == ProfileInternal || value == ProfileRedacted }

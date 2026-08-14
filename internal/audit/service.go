@@ -24,9 +24,20 @@ type Outcome struct {
 }
 
 func (s Service) Complete(ctx context.Context, run Run, scan model.ScanResult, inventory model.Inventory, delta model.Delta, findings []model.Finding) Outcome {
+	return s.CompleteWithIntelligence(ctx, run, scan, inventory, delta, findings, nil)
+}
+
+// CompleteWithIntelligence archives the scan and the closed result of an
+// explicit pre-scan TI update as one audit record.
+func (s Service) CompleteWithIntelligence(ctx context.Context, run Run, scan model.ScanResult, inventory model.Inventory, delta model.Delta, findings []model.Finding, intelligence *IntelligenceUpdate) Outcome {
 	run = s.finishRun(run)
 	run.ScanID = scan.ScanID
-	record, err := Build(scan, inventory, delta, findings, run)
+	if intelligence != nil {
+		value := *intelligence
+		value.RecordedAt = run.FinishedAt
+		intelligence = &value
+	}
+	record, err := Build(scan, inventory, delta, findings, run, intelligence)
 	if err != nil {
 		return Outcome{ArchiveErrorCode: CodeAuditUnavailable}
 	}
