@@ -78,7 +78,7 @@ func leftPadSequence(sequence uint64) string { return fmt.Sprintf("%08d", sequen
 func updaterForFeed(t *testing.T, f *updateFeed, publicKey ed25519.PublicKey) Updater {
 	t.Helper()
 	m := testManager(t, t.TempDir(), publicKey)
-	return Updater{Manager: &m, Client: f.server.Client(), Base: f.base, Keys: KeyRegistry{FamilyTI: {"ti-key": publicKey}}, Now: testBundleNow}
+	return Updater{Manager: &m, Client: f.server.Client(), Base: f.base, Keys: KeyRegistry{FamilyTI: {"ti-key": publicKey}}, Now: testBundleNow, RepositoryID: "123456789"}
 }
 
 func TestUpdaterMovesMissingToFreshAndNoOpsWhenCurrent(t *testing.T) {
@@ -225,6 +225,54 @@ func TestUpdaterRejectsAllowlistedAssetHostInvalidAuthorityAndPath(t *testing.T)
 				t.Fatalf("result=%+v", result)
 			}
 		})
+	}
+}
+
+func TestUpdaterBindsReleaseAssetRedirectsToExactRepositoryID(t *testing.T) {
+	base, _ := url.Parse("https://github.com/s1ns3nz0/ssc-init-ti/")
+	source := "/s1ns3nz0/ssc-init-ti/releases/download/ti-00000007/ti-bundle.json"
+	for _, raw := range []string{
+		"https://release-assets.githubusercontent.com/github-production-release-asset/123456789/uuid/ti-bundle.json",
+		"https://objects.githubusercontent.com/github-production-release-asset-2e65be/123456789/uuid/ti-bundle.json",
+		"https://github-releases.githubusercontent.com/123456789/uuid/ti-bundle.json",
+	} {
+		target, _ := url.Parse(raw)
+		if !validFetchURL(target, base, "ti-bundle.json", source, "123456789") {
+			t.Fatalf("exact feed ID rejected: %s", raw)
+		}
+	}
+	for _, raw := range []string{
+		"https://release-assets.githubusercontent.com/github-production-release-asset/987654321/uuid/ti-bundle.json",
+		"https://objects.githubusercontent.com/github-production-release-asset-2e65be/987654321/uuid/ti-bundle.json",
+		"https://github-releases.githubusercontent.com/987654321/uuid/ti-bundle.json",
+	} {
+		target, _ := url.Parse(raw)
+		if validFetchURL(target, base, "ti-bundle.json", source, "123456789") {
+			t.Fatalf("different repository ID accepted: %s", raw)
+		}
+	}
+}
+
+func TestUpdaterRejectsDifferentRepositoryIDRedirectBeforeNetwork(t *testing.T) {
+	f, key := newUpdateFeed(t)
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://release-assets.githubusercontent.com/github-production-release-asset/987654321/uuid/ti-manifest.json", http.StatusFound)
+	})
+	result := updaterForFeed(t, f, key).Update(context.Background())
+	if result.ErrorCode != UpdateErrorRedirectRejected {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestUpdaterFailsClosedWithoutCompiledRepositoryID(t *testing.T) {
+	f, key := newUpdateFeed(t)
+	hit := atomic.Bool{}
+	f.server.Config.Handler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) })
+	u := updaterForFeed(t, f, key)
+	u.RepositoryID = ""
+	result := u.Update(context.Background())
+	if result.Status != UpdateUnavailable || result.ErrorCode != UpdateErrorNetwork || hit.Load() {
+		t.Fatalf("result=%+v hit=%v", result, hit.Load())
 	}
 }
 

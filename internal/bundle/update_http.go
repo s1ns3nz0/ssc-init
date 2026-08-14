@@ -74,7 +74,7 @@ func (u Updater) fetchFile(ctx context.Context, relative string, limit int64, ex
 
 func (u Updater) open(ctx context.Context, relative string, limit int64, expectedName string) (*http.Response, context.Context, context.CancelFunc, UpdateErrorCode) {
 	target, err := u.Base.Parse(relative)
-	if err != nil || target.RawQuery != "" || !validFetchURL(target, u.Base, expectedName, target.Path) {
+	if err != nil || target.RawQuery != "" || !validFetchURL(target, u.Base, expectedName, target.Path, u.RepositoryID) {
 		return nil, nil, func() {}, UpdateErrorRedirectRejected
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -89,7 +89,7 @@ func (u Updater) open(ctx context.Context, relative string, limit int64, expecte
 	client.Jar = nil
 	priorRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) > 2 || !validFetchURL(req.URL, u.Base, expectedName, target.Path) {
+		if len(via) > 2 || !validFetchURL(req.URL, u.Base, expectedName, target.Path, u.RepositoryID) {
 			return errUpdateRedirect
 		}
 		req.Header.Del("Authorization")
@@ -133,7 +133,7 @@ func networkCode(parent, _ context.Context) UpdateErrorCode {
 	return UpdateErrorNetwork
 }
 
-func validFetchURL(target, base *url.URL, expectedName, sourcePath string) bool {
+func validFetchURL(target, base *url.URL, expectedName, sourcePath, repositoryID string) bool {
 	if target == nil || target.Scheme != "https" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || path.Base(target.Path) != expectedName {
 		return false
 	}
@@ -148,23 +148,23 @@ func validFetchURL(target, base *url.URL, expectedName, sourcePath string) bool 
 	case "github.com":
 		return target.Path == sourcePath && strings.HasPrefix(target.Path, "/s1ns3nz0/ssc-init-ti/releases/")
 	case "release-assets.githubusercontent.com":
-		return validAssetPath(target.Path, "/github-production-release-asset/", 3)
+		return validAssetPath(target.Path, "/github-production-release-asset/", repositoryID)
 	case "objects.githubusercontent.com":
-		return validAssetPath(target.Path, "/github-production-release-asset-2e65be/", 3)
+		return validAssetPath(target.Path, "/github-production-release-asset-2e65be/", repositoryID)
 	case "github-releases.githubusercontent.com":
 		parts := strings.Split(strings.TrimPrefix(target.Path, "/"), "/")
-		return len(parts) >= 3 && asciiDigits(parts[0])
+		return len(parts) >= 3 && parts[0] == repositoryID
 	default:
 		return false
 	}
 }
 
-func validAssetPath(value, prefix string, minimumParts int) bool {
+func validAssetPath(value, prefix, repositoryID string) bool {
 	if !strings.HasPrefix(value, prefix) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(value, prefix), "/")
-	if len(parts) < minimumParts {
+	if len(parts) < 3 || parts[0] != repositoryID {
 		return false
 	}
 	for _, part := range parts {
@@ -173,6 +173,10 @@ func validAssetPath(value, prefix string, minimumParts int) bool {
 		}
 	}
 	return true
+}
+
+func validRepositoryID(value string) bool {
+	return len(value) > 0 && len(value) <= 20 && value[0] != '0' && asciiDigits(value)
 }
 
 func asciiDigits(value string) bool {

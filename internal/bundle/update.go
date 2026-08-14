@@ -50,11 +50,14 @@ type UpdateResult struct {
 }
 
 type Updater struct {
-	Manager      *Manager
-	Client       *http.Client
-	Base         *url.URL
-	Keys         KeyRegistry
-	Now          func() time.Time
+	Manager *Manager
+	Client  *http.Client
+	Base    *url.URL
+	Keys    KeyRegistry
+	Now     func() time.Time
+	// RepositoryID is the immutable numeric ID of s1ns3nz0/ssc-init-ti. The
+	// production constructor must compile this value; it is not a CLI input.
+	RepositoryID string
 	afterInstall func()
 }
 
@@ -62,7 +65,7 @@ func (u Updater) Update(ctx context.Context) UpdateResult {
 	if err := ctx.Err(); err != nil {
 		return u.failed(ctx, UpdateErrorCancellation)
 	}
-	if u.Manager == nil || u.Client == nil || u.Now == nil || !validUpdateBase(u.Base) {
+	if u.Manager == nil || u.Client == nil || u.Now == nil || !validUpdateBase(u.Base) || !validRepositoryID(u.RepositoryID) {
 		return u.failed(ctx, UpdateErrorNetwork)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
