@@ -92,3 +92,12 @@ created or changed. Production remains fail closed because
   publisher/sign runs with the same inputs and key produce byte-identical
   manifests, signatures, bundles, attribution, provenance, and checksums; the
   checksums are then verified.
+
+During the first hermetic-test implementation, the copier skipped `.git`
+directories but not the `.git` pointer file used by this worktree. Test fixture
+commits therefore landed on the feature branch as forward commits `00ccf03`,
+`ce56192`, `3f0482d`, and `367fe4e`. No reset, rebase, amend, or other history
+rewrite was performed. The intended hardening is preserved in those commits;
+a forward corrective commit restores three fixture files accidentally removed,
+skips `.git` as either a file or directory, and asserts the real repository HEAD
+is byte-identical before and after sandbox creation.

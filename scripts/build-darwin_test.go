@@ -169,7 +169,12 @@ func TestGenerateTIKeyKeepsSeedOffArgvAndRejectsUnsafeTargets(t *testing.T) {
 }
 
 func TestPublishTIScriptExecutableFailureGatesAndReproducibility(t *testing.T) {
+	realRepo := repositoryRoot(t)
+	headBefore := gitHead(t, realRepo)
 	repo := publicationSandbox(t)
+	if headAfter := gitHead(t, realRepo); headAfter != headBefore {
+		t.Fatalf("sandbox mutated real HEAD: before=%s after=%s", headBefore, headAfter)
+	}
 	osv := filepath.Join(repo, "internal/tipublish/testdata/osv-vulnerable.json")
 	openssf := filepath.Join(repo, "internal/tipublish/testdata/openssf-malicious.json")
 	osvDigest := fmt.Sprintf("%x", sha256.Sum256(mustRead(t, osv)))
@@ -274,6 +279,17 @@ func TestPublishTIScriptExecutableFailureGatesAndReproducibility(t *testing.T) {
 	}
 }
 
+func gitHead(t *testing.T, repo string) string {
+	t.Helper()
+	command := exec.Command("git", "rev-parse", "HEAD")
+	command.Dir = repo
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func publicationSandbox(t *testing.T) string {
 	t.Helper()
 	source := repositoryRoot(t)
@@ -289,8 +305,11 @@ func publicationSandbox(t *testing.T) string {
 		if rel == "." {
 			return os.Mkdir(target, 0o700)
 		}
-		if entry.IsDir() && (entry.Name() == ".git" || entry.Name() == ".worktrees" || entry.Name() == "dist") {
-			return filepath.SkipDir
+		if entry.Name() == ".git" || entry.Name() == ".worktrees" || entry.Name() == "dist" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		destination := filepath.Join(target, rel)
 		if entry.IsDir() {
