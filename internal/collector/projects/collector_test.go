@@ -115,6 +115,26 @@ func TestMalformedLaunchConfigKeepsHashEvidenceAndMarksOnlyProjectPartial(t *tes
 	}
 }
 
+func TestVueStyleLaunchJSONCIsComplete(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeProjectFile(t, filepath.Join(root, "app", ".vscode", "launch.json"), `{
+  // VS Code launch files use JSONC.
+  "version": "0.2.0",
+  "configurations": [
+    {"type":"node", "request":"launch", "url":"https://example.test/a//b",},
+  ],
+}`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete || len(result.Errors) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
 func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")

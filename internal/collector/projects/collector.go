@@ -5,7 +5,6 @@ package projects
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -702,7 +701,7 @@ func validLaunchConfig(ctx context.Context, projectRoot platform.RootedDirectory
 	after, statErr := file.Stat()
 	postName, nameErr := parent.Lstat(components[len(components)-1])
 	available := statErr == nil && nameErr == nil && after != nil && postName != nil && os.SameFile(expected, postName) && os.SameFile(opened, after)
-	valid := available && json.Valid(contents)
+	valid := available && validLaunchJSONC(contents)
 	clear(contents)
 	return valid, available
 }

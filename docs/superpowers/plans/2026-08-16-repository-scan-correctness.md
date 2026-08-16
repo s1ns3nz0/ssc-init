@@ -180,11 +180,11 @@ git commit -m "fix: merge valid Cargo source duplicates"
 - Produces: `validLaunchJSONC([]byte) bool`.
 - Changes: `validLaunchConfig` validates exact verified bytes with JSONC rules before its existing post-read identity checks.
 
-- [ ] **Step 1: Add failing Vue-shaped tests**
+- [x] **Step 1: Add failing Vue-shaped tests**
 
 Use a literal launch file with `//` comments, a block comment, URLs inside strings, and trailing commas; assert accepted. Add duplicate key, unterminated comment, comment marker in an escaped string, malformed escape, raw control byte, and multiple-root-value cases. Assert duplicate keys remain rejected after comment removal.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/collector/projects -run 'Test.*(JSONC|LaunchConfig)' -count=1 -v
@@ -192,11 +192,11 @@ go test ./internal/collector/projects -run 'Test.*(JSONC|LaunchConfig)' -count=1
 
 Expected: Vue-style comments fail strict `json.Valid`.
 
-- [ ] **Step 3: Implement a launch-only state machine**
+- [x] **Step 3: Implement a launch-only state machine**
 
 Strip comments and trailing commas into a bounded scratch buffer while preserving string contents and byte positions needed for escape correctness. Pass normalized bytes through the existing recursive unique-key JSON validator or an equivalent package-private exact-key validator. Clear scratch bytes after validation.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/collector/projects ./internal/provenance -count=1
