@@ -101,7 +101,7 @@ go test -race ./internal/findingdisplay ./internal/report ./internal/audit -coun
 
 Temporarily derive aliases from input order; confirm shuffle determinism fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/findingdisplay/project_alias.go internal/findingdisplay/project_alias_test.go internal/report internal/audit/render.go internal/audit/render_test.go
@@ -121,21 +121,21 @@ git commit -m "feat: distinguish projects with private aliases"
 **Interfaces:**
 - Produces a counted, closed incidental-symlink exclusion separate from required evidence target failures.
 
-- [ ] **Step 1: Add failing boundary tests**
+- [x] **Step 1: Add failing boundary tests**
 
 Create one unrelated symlink during a bounded walk and assert it is not followed, collector status remains complete, and one safe exclusion is reported without its name. Create a symlink at a required `Cargo.lock`/`package-lock.json` target and assert partial plus `symlink_rejected`. Add swap-after-discovery mutation coverage to preserve identity rejection.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/collector/projects ./internal/audit -run 'Test.*Symlink.*(Incidental|Required|Skipped)' -count=1 -v
 ```
 
-- [ ] **Step 3: Separate walk exclusions from target failures**
+- [x] **Step 3: Separate walk exclusions from target failures**
 
 Count incidental symlinks without issuing an unavailable evidence target. Preserve required target status and post-open identity checks. Render only the count in pretty output; keep raw names absent from JSON/audit.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/collector/projects ./internal/audit ./internal/acceptance -count=1

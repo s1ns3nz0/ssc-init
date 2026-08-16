@@ -552,7 +552,7 @@ func validAnalyzerFact(profile Profile, fact model.AnalyzerFact, assetIDs, evide
 }
 
 func validTarget(profile Profile, target model.TargetCoverage) bool {
-	return validReference(profile, target.TargetID) && validTargetInstance(profile, target.InstanceRef) && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && validCoverageErrors(target.Errors)
+	return validReference(profile, target.TargetID) && validTargetInstance(profile, target.InstanceRef) && validTargetStatus(target.Status) && target.Assets >= 0 && target.Observations >= 0 && target.SkippedSymlinks >= 0 && target.SkippedSymlinks <= 100_000 && validCoverageErrors(target.Errors)
 }
 
 func validTargetInstance(profile Profile, value string) bool {

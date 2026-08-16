@@ -55,12 +55,13 @@ type TargetSpec struct {
 }
 
 type TargetCoverage struct {
-	TargetID     string          `json:"targetId"`
-	InstanceRef  string          `json:"instanceRef,omitempty"`
-	Status       TargetStatus    `json:"status"`
-	Assets       int             `json:"assets"`
-	Observations int             `json:"observations"`
-	Errors       []CoverageError `json:"errors,omitempty"`
+	TargetID        string          `json:"targetId"`
+	InstanceRef     string          `json:"instanceRef,omitempty"`
+	Status          TargetStatus    `json:"status"`
+	Assets          int             `json:"assets"`
+	Observations    int             `json:"observations"`
+	SkippedSymlinks int             `json:"skippedSymlinks,omitempty"`
+	Errors          []CoverageError `json:"errors,omitempty"`
 }
 
 type ScanScopeMode string

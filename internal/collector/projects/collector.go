@@ -245,7 +245,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		}
 		target := model.TargetCoverage{
 			TargetID: projectRootTargetID, InstanceRef: root.Ref,
-			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
+			Status: walked.status, SkippedSymlinks: walked.skippedSymlinks, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
 			assetStart, observationStart := len(result.Assets), len(result.Observations)

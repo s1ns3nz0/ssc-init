@@ -475,6 +475,17 @@ func (p *auditPrinter) coverageDetails(record Record) {
 	p.line("COVERAGE")
 	for _, result := range record.Coverage {
 		p.line(fmt.Sprintf("  %-20s %-12s targets=%d errors=%d", result.Collector, result.Status, len(result.Targets), len(result.Errors)))
+		skippedSymlinks := 0
+		for _, target := range result.Targets {
+			skippedSymlinks += target.SkippedSymlinks
+		}
+		if skippedSymlinks > 0 {
+			label := "symlink"
+			if skippedSymlinks != 1 {
+				label = "symlinks"
+			}
+			p.line(fmt.Sprintf("    %d %s safely skipped", skippedSymlinks, label))
+		}
 		for _, issue := range result.Errors {
 			p.line("    error " + issue.Code)
 		}

@@ -37,6 +37,18 @@ func TestAssetDisplaysUsePrivateDeterministicProjectAliases(t *testing.T) {
 	}
 }
 
+func TestCoverageSectionReportsOnlySafeIncidentalSymlinkCount(t *testing.T) {
+	record := graphRecord()
+	record.Coverage[0].Targets[0].SkippedSymlinks = 3
+	var output bytes.Buffer
+	if err := WriteSection(&output, record, SectionCoverage); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "3 symlinks safely skipped") || strings.Contains(output.String(), "private-link-name") {
+		t.Fatalf("coverage output=%q", output.String())
+	}
+}
+
 func TestWritePrettyLeadsWithActionAssessmentAndPriorityFinding(t *testing.T) {
 	record := graphRecord()
 	record.Findings[0].Verdict = model.VerdictKnownMalicious
