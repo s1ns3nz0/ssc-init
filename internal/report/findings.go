@@ -57,11 +57,15 @@ func WriteFindingsPretty(writer io.Writer, data FindingData, color bool) error {
 		return err
 	}
 	assets := make(map[string]string, len(data.Assets))
+	projectAliases := findingdisplay.ProjectAliases(data.Assets)
 	for _, asset := range data.Assets {
 		if asset.ID == "" || asset.Name == "" || privacy.ContainsSensitiveValue(asset.Name) {
 			return errors.New("invalid finding asset")
 		}
 		assets[asset.ID] = asset.Name
+		if alias := projectAliases[asset.ID]; alias != "" {
+			assets[asset.ID] = alias
+		}
 	}
 	rows := append([]model.Finding(nil), data.Findings...)
 	sort.Slice(rows, func(i, j int) bool {

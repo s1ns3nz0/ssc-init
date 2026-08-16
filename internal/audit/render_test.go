@@ -23,6 +23,20 @@ func TestWritePrettyRendersProgressiveAuditSummary(t *testing.T) {
 	}
 }
 
+func TestAssetDisplaysUsePrivateDeterministicProjectAliases(t *testing.T) {
+	projectA := "project:sha256:" + strings.Repeat("a", 64)
+	projectB := "project:sha256:" + strings.Repeat("b", 64)
+	record := Record{Inventory: model.Inventory{Assets: []model.Asset{
+		{ID: projectB, Type: model.AssetProject, Name: "project", Path: "/Users/alice/private/repo"},
+		{ID: "tool:one", Type: model.AssetTool, Name: "public-tool"},
+		{ID: projectA, Type: model.AssetProject, Name: "project"},
+	}}}
+	got := assetDisplays(record)
+	if got[projectA] != "project-1" || got[projectB] != "project-2" || got["tool:one"] != "public-tool" {
+		t.Fatalf("displays=%v", got)
+	}
+}
+
 func TestWritePrettyLeadsWithActionAssessmentAndPriorityFinding(t *testing.T) {
 	record := graphRecord()
 	record.Findings[0].Verdict = model.VerdictKnownMalicious

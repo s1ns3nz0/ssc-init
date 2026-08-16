@@ -494,8 +494,9 @@ func (p *auditPrinter) assetDetails(record Record) {
 		}
 		return rows[i].ID < rows[j].ID
 	})
+	aliases := findingdisplay.ProjectAliases(record.Inventory.Assets)
 	for _, asset := range rows {
-		p.line(fmt.Sprintf("  %-20s %-28s %s", asset.Type, displayName(asset), asset.Version))
+		p.line(fmt.Sprintf("  %-20s %-28s %s", asset.Type, displayName(asset, aliases), asset.Version))
 	}
 	if len(rows) == 0 {
 		p.line("  (none)")
@@ -519,13 +520,17 @@ func (p *auditPrinter) evidenceDetails(record Record) {
 
 func assetDisplays(record Record) map[string]string {
 	result := make(map[string]string, len(record.Inventory.Assets))
+	aliases := findingdisplay.ProjectAliases(record.Inventory.Assets)
 	for _, asset := range record.Inventory.Assets {
-		result[asset.ID] = displayName(asset)
+		result[asset.ID] = displayName(asset, aliases)
 	}
 	return result
 }
 
-func displayName(asset model.Asset) string {
+func displayName(asset model.Asset, projectAliases map[string]string) string {
+	if alias := projectAliases[asset.ID]; asset.Type == model.AssetProject && alias != "" {
+		return alias
+	}
 	if asset.Name == "" {
 		return "(redacted)"
 	}

@@ -58,7 +58,7 @@ go test -race ./internal/cli ./internal/scanconfig ./cmd/ssc-init ./internal/sca
 
 Temporarily append the agents collector in project-only mode; confirm the fatal host-read test fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/cli internal/scanconfig cmd/ssc-init internal/model/scan.go internal/model/scan_test.go
@@ -79,21 +79,21 @@ git commit -m "feat: add explicit project-only scans"
 - Produces: `findingdisplay.ProjectAliases([]model.Asset) map[string]string`.
 - Aliases sorted project asset IDs as `project-1`, `project-2`, ... for presentation only.
 
-- [ ] **Step 1: Add failing ordering/privacy tests**
+- [x] **Step 1: Add failing ordering/privacy tests**
 
 Create three project assets in shuffled orders and assert identical aliases. Render findings twice and assert aliases identify separate projects without containing root paths, relative directories, hashes, location refs, or opaque evidence IDs. Assert non-project asset names are unchanged.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/findingdisplay ./internal/report ./internal/audit -run 'Test.*ProjectAlias' -count=1 -v
 ```
 
-- [ ] **Step 3: Implement presentation-only aliases**
+- [x] **Step 3: Implement presentation-only aliases**
 
 Sort copies of canonical project IDs, assign ordinals, and consult the mapping only when rendering an asset of type project. Do not mutate inventory or finding identities.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/findingdisplay ./internal/report ./internal/audit -count=1
