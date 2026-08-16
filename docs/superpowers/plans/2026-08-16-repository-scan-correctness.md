@@ -32,7 +32,7 @@
 - Consumes: `evidence.SealedContent.Subject() string`.
 - Produces: `contentClass(subject string) analyzerContentClass` and a scanner that returns no behavior facts for dependency subjects.
 
-- [ ] **Step 1: Add failing corpus-derived tests**
+- [x] **Step 1: Add failing corpus-derived tests**
 
 Add table tests sealing these exact subjects and representative contents:
 
@@ -53,7 +53,7 @@ Add table tests sealing these exact subjects and representative contents:
 
 Assert zero facts. Retain a source-like agent payload fixture containing a real `os.getenv(` plus `fetch(` and assert the existing credential/egress facts still appear.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -63,11 +63,11 @@ go test ./internal/analyzer ./internal/acceptance -run 'Test.*(DependencyEvidenc
 
 Expected: dependency fixtures currently emit obfuscation or credential-access facts.
 
-- [ ] **Step 3: Implement closed subject classification**
+- [x] **Step 3: Implement closed subject classification**
 
 Map subjects beginning `project-lockfile:` to dependency-lockfile and `project-manifest:` to dependency-manifest, and return no generic behavior facts for those two classes. Preserve current behavior for every pre-existing exact `model.EvidenceSubject*` value so this task cannot silently suppress agent, IDE, package, shell, hook, MCP, or credential-config coverage. Unknown subjects return no facts. Do not persist the raw subject in a fact or error.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 Run:
 
@@ -77,7 +77,7 @@ go test -race ./internal/analyzer ./internal/evidence ./internal/acceptance -cou
 
 Temporarily route dependency-lockfile to the source analyzer; confirm the Cargo checksum test fails, restore, and rerun GREEN.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/analyzer/scanner.go internal/analyzer/scanner_test.go internal/acceptance/analyzer_test.go
