@@ -170,6 +170,35 @@ func TestProjectCollectorPreservesNpmSHA512AsSourceIntegrity(t *testing.T) {
 	t.Fatalf("package observation missing: %+v", result.Observations)
 }
 
+func TestProjectCollectorAcceptsCargoWorkspaceAndRegistryDuplicate(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	digest := strings.Repeat("a", 64)
+	writeProjectFile(t, filepath.Join(root, "Cargo.lock"), `[[package]]
+name = "clap"
+version = "4.6.6"
+
+[[package]]
+name = "clap"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "`+digest+`"
+`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete {
+		t.Fatalf("result=%+v", result)
+	}
+	for _, asset := range result.Assets {
+		if asset.ID == "pkg:cargo/clap@4.6.6" {
+			if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceImmutable || asset.Provenance.Integrity != "sha256:"+digest {
+				t.Fatalf("asset=%+v", asset)
+			}
+			return
+		}
+	}
+	t.Fatalf("clap package missing: %+v", result.Assets)
+}
+
 func TestProjectCollectorGoSumAssetMatchesVersionRangeTI(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")

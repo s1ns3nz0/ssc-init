@@ -192,6 +192,7 @@ func parseCargo(contents []byte) ([]Record, error) {
 		Packages []struct {
 			Name     string `toml:"name"`
 			Version  string `toml:"version"`
+			Source   string `toml:"source"`
 			Checksum string `toml:"checksum"`
 		} `toml:"package"`
 	}
@@ -199,11 +200,18 @@ func parseCargo(contents []byte) ([]Record, error) {
 	if err := decoder.Decode(&lock); err != nil {
 		return nil, ErrMalformed
 	}
-	seen := make(map[string]Record)
+	type cargoRecord struct {
+		record Record
+		source string
+	}
+	seen := make(map[string]cargoRecord)
 	for _, entry := range lock.Packages {
 		record, ok := packageRecord("cargo", entry.Name, entry.Version)
-		if !ok {
+		if !ok || !validCargoSource(entry.Source) {
 			return nil, ErrMalformed
+		}
+		if strings.HasPrefix(entry.Source, "git+") {
+			record.Provenance.Status = model.ProvenanceMutable
 		}
 		if entry.Checksum != "" {
 			if !lowercaseSHA256(entry.Checksum) {
@@ -212,15 +220,46 @@ func parseCargo(contents []byte) ([]Record, error) {
 			record.Provenance.Status = model.ProvenanceImmutable
 			record.Provenance.Integrity = "sha256:" + entry.Checksum
 		}
-		if err := addRecord(seen, record); err != nil {
-			return nil, err
+		key := record.Ecosystem + "\x00" + record.Name + "\x00" + record.Version
+		candidate := cargoRecord{record: record, source: entry.Source}
+		if existing, exists := seen[key]; exists {
+			merged, mergeOK := mergeCargoRecord(existing, candidate)
+			if !mergeOK {
+				return nil, ErrMalformed
+			}
+			seen[key] = merged
+		} else {
+			seen[key] = candidate
 		}
 	}
 	records := make([]Record, 0, len(seen))
-	for _, record := range seen {
-		records = append(records, record)
+	for _, entry := range seen {
+		records = append(records, entry.record)
 	}
 	return records, nil
+}
+
+func validCargoSource(value string) bool {
+	return value == "" || safeCoordinate(value) && (strings.HasPrefix(value, "registry+") || strings.HasPrefix(value, "sparse+") || strings.HasPrefix(value, "git+"))
+}
+
+func mergeCargoRecord(left, right struct {
+	record Record
+	source string
+}) (struct {
+	record Record
+	source string
+}, bool) {
+	if left.source == right.source {
+		return left, left.record == right.record
+	}
+	if left.source == "" && right.source != "" && right.record.Provenance.Integrity != "" {
+		return right, true
+	}
+	if right.source == "" && left.source != "" && left.record.Provenance.Integrity != "" {
+		return left, true
+	}
+	return left, false
 }
 
 func parseGoSum(contents []byte) ([]Record, error) {

@@ -55,6 +55,57 @@ func TestParseNpmSRIRejectsUnapprovedMalformedAndWrongLengthValues(t *testing.T)
 	}
 }
 
+func TestParseCargoMergesLocalAndRegistryDuplicate(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	input := `[[package]]
+name = "clap"
+version = "4.6.6"
+
+[[package]]
+name = "clap"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "` + digest + `"
+`
+	records, err := Parse(context.Background(), FormatCargo, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "clap" || records[0].Version != "4.6.6" || records[0].Provenance.Status != model.ProvenanceImmutable || records[0].Provenance.Integrity != "sha256:"+digest {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseCargoRejectsConflictingDuplicateSourcesAndChecksums(t *testing.T) {
+	for name, input := range map[string]string{
+		"checksum": `[[package]]
+name = "demo"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "` + strings.Repeat("a", 64) + `"
+[[package]]
+name = "demo"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "` + strings.Repeat("b", 64) + `"
+`,
+		"registry source": `[[package]]
+name = "demo"
+version = "1.0.0"
+source = "registry+https://registry-one.example/index"
+checksum = "` + strings.Repeat("a", 64) + `"
+[[package]]
+name = "demo"
+version = "1.0.0"
+source = "registry+https://registry-two.example/index"
+checksum = "` + strings.Repeat("a", 64) + `"
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(context.Background(), FormatCargo, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestParseSupportedLockfiles(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	tests := []struct {

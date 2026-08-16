@@ -137,11 +137,11 @@ git commit -m "fix: parse modern npm integrity records"
 - Extends the private Cargo decode struct with `Source string`.
 - Produces a single `Record` for an allowed local-plus-registry name/version pair.
 
-- [ ] **Step 1: Add failing Clap-shaped tests**
+- [x] **Step 1: Add failing Clap-shaped tests**
 
 Add a Cargo.lock fixture containing two `clap 4.6.6` entries: one local entry without source/checksum and one `registry+...` entry with a lowercase SHA-256 checksum. Assert one immutable record. Add rejection tests for different non-empty checksums, two different registry sources, malformed checksum, and source strings containing control bytes.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/provenance ./internal/collector/projects -run 'Test.*Cargo.*(Duplicate|Workspace|Conflict)' -count=1 -v
@@ -149,11 +149,11 @@ go test ./internal/provenance ./internal/collector/projects -run 'Test.*Cargo.*(
 
 Expected: the valid local-plus-registry fixture returns `ErrMalformed`.
 
-- [ ] **Step 3: Implement safe merge**
+- [x] **Step 3: Implement safe merge**
 
 Parse source only for classification and never persist it. Merge same name/version records when one has no checksum and the other has an approved checksum, preferring the immutable record. Collapse exact duplicates. Reject differing non-empty checksums and incompatible non-local sources.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/provenance ./internal/collector/projects -count=1
@@ -161,7 +161,7 @@ go test -race ./internal/provenance ./internal/collector/projects -count=1
 
 Temporarily allow two different checksums; confirm the conflict test fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/provenance/parser.go internal/provenance/parser_test.go internal/collector/projects/collector_test.go
