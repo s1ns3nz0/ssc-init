@@ -44,8 +44,9 @@ declarative dependency manifests. A package name containing `credential` is
 not credential access, and a registry checksum that happens to decode as
 Base64 is not obfuscation.
 
-`evidence.SealedContent` gains a closed content class derived by the evidence
-issuer, not guessed from bytes:
+The analyzer maps the existing privacy-safe `evidence.SealedContent.Subject()`
+onto a closed content class. The class is derived from the evidence issuer's
+closed subject catalog, not guessed from bytes:
 
 - `source`: executable or script-like content on which lexical and obfuscation
   rules may run;
