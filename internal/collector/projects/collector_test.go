@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -145,6 +146,28 @@ func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testin
 	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
 		t.Fatalf("manifest evidence was not preserved: %+v", collection)
 	}
+}
+
+func TestProjectCollectorPreservesNpmSHA512AsSourceIntegrity(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	digest := []byte(strings.Repeat("x", 64))
+	integrity := "sha512-" + base64.StdEncoding.EncodeToString(digest)
+	writeProjectFile(t, filepath.Join(root, "package-lock.json"), `{"packages":{"node_modules/demo":{"name":"demo","version":"1.2.3","integrity":"`+integrity+`"}}}`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete {
+		t.Fatalf("result=%+v", result)
+	}
+	want := "sha512:" + strings.Repeat("78", 64)
+	for _, observation := range result.Observations {
+		if observation.AssetID == "pkg:npm/demo@1.2.3" {
+			if observation.Metadata["source_integrity"] != want {
+				t.Fatalf("observation=%+v want=%q", observation, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("package observation missing: %+v", result.Observations)
 }
 
 func TestProjectCollectorGoSumAssetMatchesVersionRangeTI(t *testing.T) {

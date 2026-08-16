@@ -35,8 +35,9 @@ var (
 )
 
 // Record contains only a normalized package coordinate and closed provenance
-// facts. SourceIntegrity holds an approved non-SHA-256 lockfile fact (currently
-// Go h1) which must not be mislabeled as Asset.Provenance.Integrity.
+// facts. SourceIntegrity holds an approved non-SHA-256 lockfile fact (Go h1 or
+// npm SHA-384/SHA-512) which must not be mislabeled as
+// Asset.Provenance.Integrity.
 type Record struct {
 	Ecosystem       string
 	Name            string
@@ -138,12 +139,16 @@ func parseNPM(contents []byte) ([]Record, error) {
 			return nil, ErrMalformed
 		}
 		if entry.Integrity != "" {
-			digest, ok := decodeSHA256SRI(entry.Integrity)
+			algorithm, digest, ok := decodeNpmSRI(entry.Integrity)
 			if !ok {
 				return nil, ErrMalformed
 			}
 			record.Provenance.Status = model.ProvenanceImmutable
-			record.Provenance.Integrity = "sha256:" + digest
+			if algorithm == "sha256" {
+				record.Provenance.Integrity = algorithm + ":" + digest
+			} else {
+				record.SourceIntegrity = algorithm + ":" + digest
+			}
 		}
 		if err := addRecord(seen, record); err != nil {
 			return nil, err
@@ -163,13 +168,23 @@ func npmNameFromPath(path string) string {
 	return path[index+len("node_modules/"):]
 }
 
-func decodeSHA256SRI(value string) (string, bool) {
-	encoded, ok := strings.CutPrefix(value, "sha256-")
-	if !ok || strings.ContainsAny(encoded, " \t\r\n") {
-		return "", false
+func decodeNpmSRI(value string) (string, string, bool) {
+	if strings.ContainsAny(value, " \t\r\n") {
+		return "", "", false
+	}
+	algorithm, encoded, ok := strings.Cut(value, "-")
+	wantBytes := map[string]int{"sha256": 32, "sha384": 48, "sha512": 64}[algorithm]
+	if !ok || wantBytes == 0 || encoded == "" {
+		return "", "", false
 	}
 	digest, err := base64.StdEncoding.DecodeString(encoded)
-	return hex.EncodeToString(digest), err == nil && len(digest) == 32
+	if err != nil || len(digest) != wantBytes {
+		clear(digest)
+		return "", "", false
+	}
+	result := hex.EncodeToString(digest)
+	clear(digest)
+	return algorithm, result, true
 }
 
 func parseCargo(contents []byte) ([]Record, error) {

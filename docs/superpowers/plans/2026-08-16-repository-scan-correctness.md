@@ -95,11 +95,11 @@ git commit -m "fix: classify analyzer inputs by evidence subject"
 - Produces: `decodeNpmSRI(string) (algorithm string, digest string, ok bool)`.
 - Preserves: SHA-256 in `Record.Provenance.Integrity`; SHA-384/512 in `Record.SourceIntegrity`.
 
-- [ ] **Step 1: Add failing exact-digest tests**
+- [x] **Step 1: Add failing exact-digest tests**
 
 Build literal package-lock v3 fixtures for SHA-256, SHA-384, and SHA-512 using `base64.StdEncoding.EncodeToString`. Assert immutable status and exact lowercase hex. Add rejection cases for SHA-1, wrong digest length, whitespace, multiple SRI tokens, and malformed Base64. Add an Axios-shaped SHA-512 collector fixture and assert complete project coverage plus package assets.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/provenance ./internal/collector/projects -run 'Test.*(NpmSRI|SHA512|PackageLock)' -count=1 -v
@@ -107,11 +107,11 @@ go test ./internal/provenance ./internal/collector/projects -run 'Test.*(NpmSRI|
 
 Expected: SHA-384/512 fixtures return `ErrMalformed`.
 
-- [ ] **Step 3: Implement exact closed SRI decoding**
+- [x] **Step 3: Implement exact closed SRI decoding**
 
 Replace `decodeSHA256SRI` with algorithm dispatch for `sha256`, `sha384`, and `sha512`; require decoded lengths 32, 48, and 64 respectively. Keep unknown algorithms malformed. Populate canonical asset integrity only for SHA-256 and use `SourceIntegrity` for SHA-384/512.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/provenance ./internal/collector/projects ./internal/store -count=1
@@ -119,7 +119,7 @@ go test -race ./internal/provenance ./internal/collector/projects ./internal/sto
 
 Temporarily accept any decoded length for SHA-512; confirm the wrong-length test fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/provenance/parser.go internal/provenance/parser_test.go internal/collector/projects/collector_test.go
