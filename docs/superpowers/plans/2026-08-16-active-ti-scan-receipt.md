@@ -65,7 +65,7 @@ go test -race ./internal/cli ./internal/audit ./internal/acceptance ./cmd/ssc-in
 
 Mutation 1: call the updater in the default branch; zero-network test must fail. Mutation 2: clear active identity before audit completion; receipt/finding consistency test must fail. Restore and rerun GREEN.
 
-- [ ] **Step 6: Commit and final corpus gate**
+- [x] **Step 6: Commit and final corpus gate**
 
 ```bash
 git add internal/cli/run.go internal/cli/run_test.go internal/audit internal/acceptance/ti_update_test.go
@@ -79,3 +79,5 @@ go test ./scripts -count=1
 ```
 
 Rerun all 20 retained repositories with `--project-only`. Require zero dependency-manifest/lockfile behavior findings, zero malformed errors for the 12 known-valid lockfiles, complete Vue launch coverage, no host collectors, deterministic repeated project result sets, and a clean worktree.
+
+Execution evidence (2026-08-16): all 20 scans persisted successfully and exposed only project-scoped coverage; dependency manifest/lockfile behavior findings were zero; Axios SHA-512, Clap duplicate Cargo source, and Vue JSONC cases were complete; and all 20 canonical result documents were byte-identical on a second isolated-HOME run. Django, Flask, Pydantic, and Ruff retained only the pre-existing closed mutable/unpinned provenance advisories, not content-behavior findings.

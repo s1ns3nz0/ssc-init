@@ -399,6 +399,59 @@ func TestBaselineCollectsUserMCPWithoutProjectMCPAssets(t *testing.T) {
 	}
 }
 
+func TestBaselineProjectOnlyDoesNotSynthesizeHostMCPCoverage(t *testing.T) {
+	home := t.TempDir()
+	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime, Scope: model.ScanScope{Mode: model.ScanScopeProjectOnly}}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, Targets: []model.TargetCoverage{{TargetID: "projects.root", Status: model.TargetComplete}}}},
+	}}, &memorySnapshots{}, fixedTime, fixedUUID, env)
+	result, _, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Coverage) != 1 || result.Coverage[0].Collector != "projects" {
+		t.Fatalf("project-only synthesized host coverage: %+v", result.Coverage)
+	}
+}
+
+func TestBaselineProjectOnlyMCPFollowUpReadsOnlyIssuedProjectTarget(t *testing.T) {
+	home := t.TempDir()
+	projectConfig := filepath.Join(home, "Projects", "sample", ".mcp.json")
+	userConfig := filepath.Join(home, ".cursor", "mcp.json")
+	for path, contents := range map[string]string{projectConfig: `{"mcpServers":{"project-only":{"command":"tool"}}}`, userConfig: `{"mcpServers":{"must-not-read":{"command":"host-tool"}}}`} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := model.LocalTarget{TargetID: "mcp.shared.project", InstanceRef: "$HOME/Projects/sample/.mcp.json", Path: projectConfig, Format: "json", Host: "shared", Consumers: []string{"claude-code", "vscode"}}
+	roots, err := projects.ResolveRoots(home, []string{"$HOME/Projects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := collector.Environment{Home: home, FS: platform.OSFileSystem{}, Runner: platform.ExecRunner{}, Now: fixedTime, Scope: model.ScanScope{Mode: model.ScanScopeProjectOnly, ProjectRoots: projects.RootRefs(roots)}}
+	service := NewService(collector.Orchestrator{Collectors: []collector.Collector{
+		projects.New(roots),
+		fixedCollector{name: "projects", result: model.CollectorResult{Status: model.CoverageComplete, LocalTargets: []model.LocalTarget{target}}},
+	}}, &memorySnapshots{}, fixedTime, fixedUUID, env)
+	result, inventory, _, _, err := service.Baseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range inventory.Assets {
+		if asset.ID == "mcp:cursor:must-not-read" {
+			t.Fatalf("project-only read host MCP target: %+v", inventory.Assets)
+		}
+	}
+	for _, coverage := range result.Coverage {
+		if coverage.Collector == "mcp" && (len(coverage.Targets) != 1 || coverage.Targets[0].TargetID != "mcp.shared.project") {
+			t.Fatalf("project-only MCP coverage=%+v", coverage)
+		}
+	}
+}
+
 func TestBaselineParsesProjectLocalTargetsAndClearsRawPaths(t *testing.T) {
 	home := t.TempDir()
 	projectConfig := filepath.Join(home, "Projects", "sample", ".mcp.json")

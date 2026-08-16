@@ -855,6 +855,13 @@ func provenancePackageAsset(record provenance.Record) model.Asset {
 	}
 	version := strings.ReplaceAll(url.PathEscape(record.Version), "@", "%40")
 	provenanceFact := record.Provenance
+	// SHA-384/SHA-512 SRI remains exact source-integrity evidence on the
+	// observation, but the canonical asset provenance field is deliberately
+	// SHA-256-only. Avoid persisting an impossible immutable-without-SHA256
+	// tuple while retaining the stronger source digest beside its observation.
+	if record.SourceIntegrity != "" && provenanceFact.Integrity == "" {
+		provenanceFact.Status = model.ProvenanceUnknown
+	}
 	return model.Asset{
 		ID:   "pkg:" + record.Ecosystem + "/" + strings.Join(parts, "/") + "@" + version,
 		Type: model.AssetPackage, Name: record.Name, Version: record.Version, Provenance: &provenanceFact,

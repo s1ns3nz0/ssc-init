@@ -179,6 +179,18 @@ func TestProjectCollectorPreservesNpmSHA512AsSourceIntegrity(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 	want := "sha512:" + strings.Repeat("78", 64)
+	assetFound := false
+	for _, asset := range result.Assets {
+		if asset.ID == "pkg:npm/demo@1.2.3" {
+			assetFound = true
+			if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceUnknown || asset.Provenance.Integrity != "" {
+				t.Fatalf("non-SHA256 package asset made an invalid canonical integrity claim: %+v", asset)
+			}
+		}
+	}
+	if !assetFound {
+		t.Fatalf("package asset missing: %+v", result.Assets)
+	}
 	for _, observation := range result.Observations {
 		if observation.AssetID == "pkg:npm/demo@1.2.3" {
 			if observation.Metadata["source_integrity"] != want {
