@@ -52,6 +52,9 @@ func Validate(record Record) error {
 	if !validIntelligenceUpdate(record.Intelligence, record.Run) {
 		return errors.New("invalid intelligence update receipt")
 	}
+	if !validIntelligenceFindingBinding(record.Profile, record.Intelligence, record.Findings) {
+		return errors.New("intelligence receipt does not match findings")
+	}
 	if err := validateInventory(record.Profile, record.Inventory); err != nil {
 		return err
 	}
@@ -65,6 +68,26 @@ func Validate(record Record) error {
 		return errors.New("redacted audit record retains display identity")
 	}
 	return nil
+}
+
+func validIntelligenceFindingBinding(profile Profile, receipt *IntelligenceUpdate, findings []model.Finding) bool {
+	if receipt == nil {
+		return true
+	}
+	for _, finding := range findings {
+		for _, reference := range finding.Bundles {
+			if reference.Family != "ti" {
+				continue
+			}
+			if reference.Sequence != receipt.Sequence {
+				return false
+			}
+			if profile == ProfileInternal && reference.Digest != receipt.Digest {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validIntelligenceUpdate(value *IntelligenceUpdate, run Run) bool {
@@ -82,6 +105,14 @@ func validIntelligenceUpdate(value *IntelligenceUpdate, run Run) bool {
 		return false
 	}
 	switch value.Status {
+	case "not-requested":
+		if value.ErrorCode != "" {
+			return false
+		}
+		if value.Freshness == "fresh" || value.Freshness == "stale" || value.Freshness == "expired" {
+			return hasIdentity
+		}
+		return (value.Freshness == "missing" || value.Freshness == "unavailable") && hasNoIdentity
 	case "updated", "current":
 		return value.ErrorCode == "" && value.Freshness == "fresh" && hasIdentity
 	case "degraded":

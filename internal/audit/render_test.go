@@ -113,6 +113,23 @@ func TestWritePrettyShowsDegradedAndUnavailableIntelligenceWithoutLeaking(t *tes
 	}
 }
 
+func TestWritePrettySeparatesNotRequestedUpdateFromActiveTIFreshness(t *testing.T) {
+	record := graphRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "not-requested", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: record.Run.FinishedAt}
+	var output bytes.Buffer
+	if err := WritePretty(&output, record, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"update     not requested", "freshness  fresh", "sequence   7", "records    4"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, output.String())
+		}
+	}
+	if strings.Contains(output.String(), record.Intelligence.Digest) {
+		t.Fatalf("digest leaked:\n%s", output.String())
+	}
+}
+
 func TestReportTextIntelligenceIsANSIFree(t *testing.T) {
 	record := graphRecord()
 	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "current", Freshness: "fresh", Sequence: 42, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", RecordedAt: record.Run.FinishedAt}

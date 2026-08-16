@@ -235,7 +235,8 @@ func (p *auditPrinter) intelligence(record Record) {
 	if (update.Status == "updated" || update.Status == "current") && update.Freshness == "fresh" {
 		statusColor, freshnessColor = ansiGreen, ansiGreen
 	}
-	p.field("update", p.styled(update.Status, statusColor))
+	statusLabel := strings.ReplaceAll(update.Status, "-", " ")
+	p.field("update", p.styled(statusLabel, statusColor))
 	p.field("freshness", p.styled(update.Freshness, freshnessColor))
 	if update.Sequence > 0 {
 		p.field("sequence", fmt.Sprintf("%d", update.Sequence))

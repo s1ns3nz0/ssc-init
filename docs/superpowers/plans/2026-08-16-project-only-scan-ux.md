@@ -143,7 +143,7 @@ go test -race ./internal/collector/projects ./internal/audit ./internal/acceptan
 
 Temporarily follow the incidental symlink; confirm the no-follow probe fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit and program gate**
+- [x] **Step 5: Commit and program gate**
 
 ```bash
 git add internal/collector/projects internal/audit/render.go internal/audit/render_test.go

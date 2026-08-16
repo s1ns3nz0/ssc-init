@@ -37,11 +37,11 @@
 - Adds a local status seam to `cli.App`, returning `bundle.Status` without update/network capability.
 - Produces a receipt status `not-requested` with closed freshness and optional complete active identity.
 
-- [ ] **Step 1: Add failing real-state matrix tests**
+- [x] **Step 1: Add failing real-state matrix tests**
 
 Test fresh and stale active status with sequence/digest/key/counts, missing with zero identity, expired with complete historical identity, and invalid partial tuples. In CLI acceptance, inject an updater that panics if called, a local status returning sequence 7, and a finding service returning a TI finding bound to sequence 7. Assert zero updater calls and matching receipt/finding identity.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/cli ./internal/audit ./internal/acceptance -run 'Test.*(NotRequested|ActiveTIReceipt|DefaultScanTI)' -count=1 -v
@@ -49,15 +49,15 @@ go test ./internal/cli ./internal/audit ./internal/acceptance -run 'Test.*(NotRe
 
 Expected: the current receipt says unavailable or omits active identity while the finding cites it.
 
-- [ ] **Step 3: Implement one local status snapshot**
+- [x] **Step 3: Implement one local status snapshot**
 
 Before baseline collection, read status through the local manager seam. Do not call `Update`. Convert fresh/stale status to `not-requested` with complete identity/counts; convert missing to an empty tuple; preserve expired identity only if the existing status contract supplies a complete verified historical tuple. Pass the receipt through audit completion and rendering.
 
-- [ ] **Step 4: Extend closed validation and pretty output**
+- [x] **Step 4: Extend closed validation and pretty output**
 
 Accept only the specified `not-requested` matrix. Render update activity separately from freshness. Ensure digest remains JSON/archive-only and all count invariants remain enforced.
 
-- [ ] **Step 5: Verify GREEN and two mutations**
+- [x] **Step 5: Verify GREEN and two mutations**
 
 ```bash
 go test -race ./internal/cli ./internal/audit ./internal/acceptance ./cmd/ssc-init -count=1
