@@ -121,8 +121,8 @@ Run: `go test -race ./internal/provenance ./internal/collector/projects -count=1
 - [x] **Step 1: Rebuild and rescan Biome, Maturin, Ruff, and Kustomize in fresh isolated homes**
 - [x] **Step 2: Require zero pinned-git findings and zero malformed errors for the three valid npm locks**
 - [x] **Step 3: Re-run the expanded 12 repositories and compare stable result summaries**
-- [ ] **Step 4: Run `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `go mod verify`, `git diff --check`, and `go test ./scripts -count=1`**
-- [ ] **Step 5: Commit and push the PR branch**
+- [x] **Step 4: Run `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `go mod verify`, `git diff --check`, and `go test ./scripts -count=1`**
+- [x] **Step 5: Commit and push the PR branch**
 
 ## Execution evidence
 
