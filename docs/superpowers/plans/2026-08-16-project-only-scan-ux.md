@@ -36,21 +36,21 @@
 - Adds: `cli.Options.ProjectOnly bool`.
 - Adds: a closed scope mode field with values `host` and `project-only`.
 
-- [ ] **Step 1: Add failing parser and zero-host-read tests**
+- [x] **Step 1: Add failing parser and zero-host-read tests**
 
 Accept only `scan --baseline --project-only --project-root <root> --json|--pretty`. Reject missing roots, automatic discovery, `--external-probes`, `--update-ti`, duplicate flag, and non-scan commands. Inject fatal host collectors and assert project-only configuration constructs/invokes only `projects`; assert ordinary explicit-root scan still constructs the full collector list.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test ./internal/cli ./internal/scanconfig ./cmd/ssc-init -run 'Test.*ProjectOnly' -count=1 -v
 ```
 
-- [ ] **Step 3: Implement minimal mode selection**
+- [x] **Step 3: Implement minimal mode selection**
 
 Parse the flag, require explicit roots, write the closed mode into scope, and choose only the projects collector before orchestrator construction. Do not instantiate or probe host collector filesystems in this branch.
 
-- [ ] **Step 4: Verify GREEN and mutation**
+- [x] **Step 4: Verify GREEN and mutation**
 
 ```bash
 go test -race ./internal/cli ./internal/scanconfig ./cmd/ssc-init ./internal/scan -count=1

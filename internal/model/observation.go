@@ -63,11 +63,23 @@ type TargetCoverage struct {
 	Errors       []CoverageError `json:"errors,omitempty"`
 }
 
+type ScanScopeMode string
+
+const (
+	ScanScopeHost        ScanScopeMode = "host"
+	ScanScopeProjectOnly ScanScopeMode = "project-only"
+)
+
+func (mode ScanScopeMode) Valid() bool {
+	return mode == ScanScopeHost || mode == ScanScopeProjectOnly
+}
+
 type ScanScope struct {
-	Platform       string   `json:"platform"`
-	CatalogVersion string   `json:"catalogVersion"`
-	ProjectRoots   []string `json:"projectRoots"`
-	ExternalProbes bool     `json:"externalProbes"`
+	Mode           ScanScopeMode `json:"mode,omitempty"`
+	Platform       string        `json:"platform"`
+	CatalogVersion string        `json:"catalogVersion"`
+	ProjectRoots   []string      `json:"projectRoots"`
+	ExternalProbes bool          `json:"externalProbes"`
 }
 
 type LocalTarget struct {

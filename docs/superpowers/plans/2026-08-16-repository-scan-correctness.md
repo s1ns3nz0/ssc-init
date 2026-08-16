@@ -204,7 +204,7 @@ go test -race ./internal/collector/projects ./internal/provenance -count=1
 
 Temporarily skip duplicate-key validation; confirm the adversarial test fails, restore, rerun GREEN.
 
-- [ ] **Step 5: Commit and run program gate**
+- [x] **Step 5: Commit and run program gate**
 
 ```bash
 git add internal/collector/projects/jsonc.go internal/collector/projects/jsonc_test.go internal/collector/projects/collector.go internal/collector/projects/collector_test.go

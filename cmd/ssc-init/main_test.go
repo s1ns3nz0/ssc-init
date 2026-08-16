@@ -453,6 +453,7 @@ func TestScanExplicitRootCarriesResolvedScopeAndProjectCollector(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantScope := model.ScanScope{
+		Mode:     model.ScanScopeHost,
 		Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
 		ProjectRoots: []string{"$HOME/Projects", "external-root-1"}, ExternalProbes: true,
 	}
@@ -473,6 +474,28 @@ func TestScanExplicitRootCarriesResolvedScopeAndProjectCollector(t *testing.T) {
 	targeted, ok := collectors[2].(collector.TargetedCollector)
 	if !ok || len(targeted.Targets()) != 1 || targeted.Targets()[0].ID != "projects.root" {
 		t.Fatalf("project collector=%T targets=%+v", collectors[2], targeted)
+	}
+}
+
+func TestScanProjectOnlyConstructsNoHostCollectors(t *testing.T) {
+	oldDiscover := discoverRootsForRun
+	t.Cleanup(func() { discoverRootsForRun = oldDiscover })
+	discoverRootsForRun = func(context.Context, collector.Environment) (projects.Discovery, error) {
+		t.Fatal("project-only invoked automatic discovery")
+		return projects.Discovery{}, errors.New("automatic discovery must not run")
+	}
+	home := t.TempDir()
+	environment, configured, err := scanConfiguration(context.Background(), home, cli.Options{
+		Command: "scan", Baseline: true, JSON: true, ProjectOnly: true, ProjectRoots: []string{"$HOME/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment.Scope.Mode != model.ScanScopeProjectOnly || len(configured) != 1 || configured[0].Name() != "projects" {
+		t.Fatalf("scope=%+v collectors=%v", environment.Scope, configured)
+	}
+	if environment.Inspector != nil || environment.SignatureInspector != nil {
+		t.Fatal("project-only constructed external host inspectors")
 	}
 }
 
@@ -554,6 +577,7 @@ func TestScanConfigurationAutomaticDiscoveryFinalizesScopeAndCoverage(t *testing
 		t.Fatal(err)
 	}
 	wantScope := model.ScanScope{
+		Mode:     model.ScanScopeHost,
 		Platform: runtime.GOOS, CatalogVersion: collector.CatalogVersion,
 		ProjectRoots: []string{"$HOME/work/automatic"},
 	}

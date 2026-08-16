@@ -38,13 +38,21 @@ func Configure(ctx context.Context, environment collector.Environment, options c
 	if err != nil {
 		return collector.Environment{}, nil, err
 	}
+	mode := model.ScanScopeHost
+	if options.ProjectOnly {
+		mode = model.ScanScopeProjectOnly
+	}
 	environment.Scope = model.ScanScope{
+		Mode:     mode,
 		Platform: environment.Platform, CatalogVersion: collector.CatalogVersion,
 		ProjectRoots: projects.RootRefs(roots), ExternalProbes: options.ExternalProbes,
 	}
 	projectCollector := projects.New(roots)
 	if len(options.ProjectRoots) == 0 {
 		projectCollector = projects.NewWithDiscovery(roots, discoveryCoverage)
+	}
+	if options.ProjectOnly {
+		return environment, []collector.Collector{projectCollector}, nil
 	}
 	configured := []collector.Collector{
 		agents.New(), ide.New(), projectCollector, surfaces.New(), packages.New(), runtimecollector.New(),
