@@ -42,7 +42,7 @@ func TestParseNpmSRIUsesExactApprovedDigestAlgorithms(t *testing.T) {
 
 func TestParseNpmSRIRejectsUnapprovedMalformedAndWrongLengthValues(t *testing.T) {
 	values := []string{
-		"sha1-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 20))),
+		"sha1-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 19))),
 		"sha512-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 63))),
 		"sha384-not-base64",
 		"sha512-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 64))) + " sha256-extra",
@@ -52,6 +52,89 @@ func TestParseNpmSRIRejectsUnapprovedMalformedAndWrongLengthValues(t *testing.T)
 		if _, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("integrity=%q err=%v", integrity, err)
 		}
+	}
+}
+
+func TestParseNPMSkipsWorkspaceLinksWithoutDroppingPackages(t *testing.T) {
+	input := `{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/demo-workspace": {"resolved":"packages/demo", "link":true},
+			"node_modules/real-package": {"version":"1.2.3", "integrity":"sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo="}
+		}
+	}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "real-package" || records[0].Version != "1.2.3" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseNPMSkipsNamedWorkspacePathsWithoutExternalCoordinates(t *testing.T) {
+	input := `{
+		"lockfileVersion":3,
+		"packages":{
+			"packages/local-workspace":{"version":"0.1.0"},
+			"node_modules/real-package":{"version":"1.2.3"}
+		}
+	}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "real-package" || records[0].Version != "1.2.3" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseNPMV3IgnoresPackageDependencyMetadata(t *testing.T) {
+	input := `{"lockfileVersion":3,"packages":{"node_modules/demo":{"version":"1.2.3","dependencies":{"child":"^2.0.0"}}}}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "demo" || records[0].Version != "1.2.3" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseNPMMergesDuplicateCoordinateWithSourceIntegrity(t *testing.T) {
+	input := `{
+		"lockfileVersion":3,
+		"packages":{
+			"node_modules/parent/node_modules/tslib":{"version":"2.8.1"},
+			"node_modules/tslib":{"version":"2.8.1","integrity":"sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="}
+		}
+	}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 || records[0].Name != "tslib" || records[0].Version != "2.8.1" || records[0].SourceIntegrity != "sha512:a0916ef781d06fe29576e49440bef09e99aa9df98bb0e03f9c087a6fa107d30084a0ad3f98f79753a737c0a0d5f373243ae1cf447b525ca294f7d2016b34bfdb" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseNPMV1FlattensNestedDependencies(t *testing.T) {
+	input := `{
+		"lockfileVersion": 1,
+		"dependencies": {
+			"parent": {
+				"version": "1.0.0",
+				"integrity": "sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=",
+				"dependencies": {
+					"child": {"version": "2.0.0"}
+				}
+			}
+		}
+	}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 2 || records[0].Name != "child" || records[0].Version != "2.0.0" || records[1].Name != "parent" || records[1].Version != "1.0.0" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseNPMRetainsExactSHA1AsSourceIntegrity(t *testing.T) {
+	digest := []byte(strings.Repeat("s", 20))
+	integrity := "sha1-" + base64.StdEncoding.EncodeToString(digest)
+	input := `{"lockfileVersion":2,"packages":{"node_modules/demo":{"version":"1.2.3","integrity":"` + integrity + `"}}}`
+	records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	want := "sha1:" + hex.EncodeToString(digest)
+	if records[0].Provenance.Status != model.ProvenanceUnknown || records[0].Provenance.Integrity != "" || records[0].SourceIntegrity != want {
+		t.Fatalf("record=%+v want source integrity=%q", records[0], want)
 	}
 }
 
@@ -70,6 +153,37 @@ checksum = "` + digest + `"
 	records, err := Parse(context.Background(), FormatCargo, strings.NewReader(input), 1<<20)
 	if err != nil || len(records) != 1 || records[0].Name != "clap" || records[0].Version != "4.6.6" || records[0].Provenance.Status != model.ProvenanceImmutable || records[0].Provenance.Integrity != "sha256:"+digest {
 		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestParseCargoDistinguishesPinnedAndFloatingGitSources(t *testing.T) {
+	pinned := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		name           string
+		source         string
+		wantStatus     model.ProvenanceStatus
+		wantSourceFact string
+	}{
+		{name: "exact commit", source: "git+https://github.com/example/demo?rev=" + pinned + "#" + pinned, wantStatus: model.ProvenanceUnknown, wantSourceFact: "git-sha1:" + pinned},
+		{name: "branch with resolved commit", source: "git+https://github.com/example/demo?branch=main#" + pinned, wantStatus: model.ProvenanceUnknown, wantSourceFact: "git-sha1:" + pinned},
+		{name: "floating branch", source: "git+https://github.com/example/demo?branch=main", wantStatus: model.ProvenanceMutable},
+		{name: "short revision", source: "git+https://github.com/example/demo#" + strings.Repeat("b", 39), wantStatus: model.ProvenanceMutable},
+		{name: "uppercase revision", source: "git+https://github.com/example/demo#" + strings.Repeat("A", 40), wantStatus: model.ProvenanceMutable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := `[[package]]
+name = "demo"
+version = "1.2.3"
+source = "` + test.source + `"
+`
+			records, err := Parse(context.Background(), FormatCargo, strings.NewReader(input), 1<<20)
+			if err != nil || len(records) != 1 {
+				t.Fatalf("records=%+v err=%v", records, err)
+			}
+			if records[0].Provenance.Status != test.wantStatus || records[0].Provenance.Integrity != "" || records[0].SourceIntegrity != test.wantSourceFact {
+				t.Fatalf("record=%+v want status=%q sourceFact=%q", records[0], test.wantStatus, test.wantSourceFact)
+			}
+		})
 	}
 }
 
