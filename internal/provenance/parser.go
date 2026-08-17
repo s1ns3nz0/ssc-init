@@ -212,7 +212,26 @@ func addNPMRecord(seen map[string]Record, name, version, integrity string) error
 	if existingHasIntegrity && !recordHasIntegrity {
 		return nil
 	}
+	if existingHasIntegrity && recordHasIntegrity {
+		existingRank := npmIntegrityRank(existing)
+		recordRank := npmIntegrityRank(record)
+		if existingRank != recordRank {
+			if recordRank > existingRank {
+				seen[key] = record
+			}
+			return nil
+		}
+	}
 	return ErrMalformed
+}
+
+func npmIntegrityRank(record Record) int {
+	value := record.SourceIntegrity
+	if value == "" {
+		value = record.Provenance.Integrity
+	}
+	algorithm, _, _ := strings.Cut(value, ":")
+	return map[string]int{"sha1": 1, "sha256": 2, "sha384": 3, "sha512": 4}[algorithm]
 }
 
 func npmNameFromPath(path string) string {

@@ -105,6 +105,43 @@ func TestParseNPMMergesDuplicateCoordinateWithSourceIntegrity(t *testing.T) {
 	}
 }
 
+func TestParseNPMMergesDifferentIntegrityAlgorithmsDeterministically(t *testing.T) {
+	sha1 := "sha1-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 20)))
+	sha512 := "sha512-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 64)))
+	for _, test := range []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "sha1 then sha512", first: sha1, second: sha512},
+		{name: "sha512 then sha1", first: sha512, second: sha1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := `{"lockfileVersion":3,"packages":{` +
+				`"node_modules/parent/node_modules/demo":{"version":"1.0.0","integrity":"` + test.first + `"},` +
+				`"node_modules/demo":{"version":"1.0.0","integrity":"` + test.second + `"}` +
+				`}}`
+			records, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20)
+			want := "sha512:" + strings.Repeat("62", 64)
+			if err != nil || len(records) != 1 || records[0].SourceIntegrity != want || records[0].Provenance.Integrity != "" {
+				t.Fatalf("records=%+v err=%v want source integrity=%q", records, err, want)
+			}
+		})
+	}
+}
+
+func TestParseNPMRejectsSameAlgorithmDigestConflict(t *testing.T) {
+	first := "sha512-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 64)))
+	second := "sha512-" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 64)))
+	input := `{"lockfileVersion":3,"packages":{` +
+		`"node_modules/parent/node_modules/demo":{"version":"1.0.0","integrity":"` + first + `"},` +
+		`"node_modules/demo":{"version":"1.0.0","integrity":"` + second + `"}` +
+		`}}`
+	if _, err := Parse(context.Background(), FormatNPM, strings.NewReader(input), 1<<20); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("conflicting SHA-512 digests accepted: %v", err)
+	}
+}
+
 func TestParseNPMV1FlattensNestedDependencies(t *testing.T) {
 	input := `{
 		"lockfileVersion": 1,

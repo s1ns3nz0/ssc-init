@@ -137,6 +137,10 @@ func parseRequirement(line string) (Record, bool, bool) {
 		record, ok := pythonRecord(stripPythonExtras(name), "", true, hashes)
 		return record, false, ok
 	}
+	value, valid = normalizeSpacedPythonRequirement(parts)
+	if !valid {
+		return Record{}, false, false
+	}
 	if strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.Contains(value, "://") || strings.HasPrefix(value, "git+") {
 		return Record{}, true, true
 	}
@@ -149,6 +153,40 @@ func parseRequirement(line string) (Record, bool, bool) {
 	}
 	record, ok := pythonRecord(stripPythonExtras(name), version, false, hashes)
 	return record, false, ok
+}
+
+func normalizeSpacedPythonRequirement(parts []string) (string, bool) {
+	if len(parts) == 1 {
+		return parts[0], true
+	}
+	if len(parts) < 3 || len(parts)%2 == 0 {
+		return "", false
+	}
+	var normalized strings.Builder
+	normalized.WriteString(parts[0])
+	for index := 1; index < len(parts); index += 2 {
+		operator := parts[index]
+		if operator != "==" && operator != "!=" && operator != "<=" && operator != ">=" && operator != "<" && operator != ">" && operator != "~=" && operator != "===" {
+			return "", false
+		}
+		version := parts[index+1]
+		comma := strings.HasSuffix(version, ",")
+		version = strings.TrimSuffix(version, ",")
+		if version == "" || strings.Contains(version, ",") {
+			return "", false
+		}
+		normalized.WriteString(operator)
+		normalized.WriteString(version)
+		if comma {
+			if index+2 >= len(parts) {
+				return "", false
+			}
+			normalized.WriteByte(',')
+		} else if index+2 < len(parts) {
+			return "", false
+		}
+	}
+	return normalized.String(), true
 }
 
 func extractRequirementHashes(fields []string) ([]string, []string, bool) {
