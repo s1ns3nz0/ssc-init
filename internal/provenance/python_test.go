@@ -32,6 +32,24 @@ func TestParseRequirementsNormalizesAndRedactsInput(t *testing.T) {
 	}
 }
 
+func TestParseRequirementsAcceptsPEP508WhitespaceMarkersAndComments(t *testing.T) {
+	input := `jinja2 >= 3.1.0  # minimum runtime
+resolvelib >= 0.8.0, < 2.0.0  # bounded dependency
+bcrypt < 5 ; python_version >= '3.13'
+typing_extensions; python_version < '3.11'
+`
+	records, err := Parse(context.Background(), FormatRequirements, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 4 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	want := []string{"bcrypt", "jinja2", "resolvelib", "typing-extensions"}
+	for index, record := range records {
+		if record.Name != want[index] || record.Version != "" || record.Provenance.Status != model.ProvenanceMutable {
+			t.Fatalf("record[%d]=%+v want name=%q mutable", index, record, want[index])
+		}
+	}
+}
+
 func TestParseRequirementsClassifiesHashesAndMutableReferences(t *testing.T) {
 	a := strings.Repeat("a", 64)
 	b := strings.Repeat("b", 64)
@@ -436,7 +454,7 @@ name = "missing-version"
 source = { registry = "https://example.invalid/simple" }
 `
 	records, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20)
-	if err != nil || len(records) != 5 {
+	if err != nil || len(records) != 4 {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 	for _, record := range records {
@@ -446,6 +464,31 @@ source = { registry = "https://example.invalid/simple" }
 	}
 	if strings.Contains(recordText(records), "secret") || strings.Contains(recordText(records), "private") {
 		t.Fatalf("mutable source text retained: %+v", records)
+	}
+}
+
+func TestParseUVOmitsVirtualWorkspacePackages(t *testing.T) {
+	input := `[[package]]
+name = "registry"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "workspace-root"
+version = "0.0.0"
+source = { virtual = "." }
+
+[[package]]
+name = "path-dependency"
+version = "2.0.0"
+source = { path = "../private-path" }
+`
+	records, err := Parse(context.Background(), FormatUV, strings.NewReader(input), 1<<20)
+	if err != nil || len(records) != 2 || records[0].Name != "path-dependency" || records[1].Name != "registry" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if records[0].Provenance.Status != model.ProvenanceMutable || records[1].Provenance.Status != model.ProvenanceUnknown {
+		t.Fatalf("records=%+v", records)
 	}
 }
 

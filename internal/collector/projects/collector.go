@@ -5,7 +5,6 @@ package projects
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -246,7 +245,7 @@ func (c *projectCollector) Collect(ctx context.Context, env collector.Environmen
 		}
 		target := model.TargetCoverage{
 			TargetID: projectRootTargetID, InstanceRef: root.Ref,
-			Status: walked.status, Errors: append([]model.CoverageError(nil), walked.errors...),
+			Status: walked.status, SkippedSymlinks: walked.skippedSymlinks, Errors: append([]model.CoverageError(nil), walked.errors...),
 		}
 		if walked.status != model.TargetNotPresent && walked.status != model.TargetUnavailable {
 			assetStart, observationStart := len(result.Assets), len(result.Observations)
@@ -702,7 +701,7 @@ func validLaunchConfig(ctx context.Context, projectRoot platform.RootedDirectory
 	after, statErr := file.Stat()
 	postName, nameErr := parent.Lstat(components[len(components)-1])
 	available := statErr == nil && nameErr == nil && after != nil && postName != nil && os.SameFile(expected, postName) && os.SameFile(opened, after)
-	valid := available && json.Valid(contents)
+	valid := available && validLaunchJSONC(contents)
 	clear(contents)
 	return valid, available
 }
@@ -856,6 +855,13 @@ func provenancePackageAsset(record provenance.Record) model.Asset {
 	}
 	version := strings.ReplaceAll(url.PathEscape(record.Version), "@", "%40")
 	provenanceFact := record.Provenance
+	// SHA-384/SHA-512 SRI remains exact source-integrity evidence on the
+	// observation, but the canonical asset provenance field is deliberately
+	// SHA-256-only. Avoid persisting an impossible immutable-without-SHA256
+	// tuple while retaining the stronger source digest beside its observation.
+	if record.SourceIntegrity != "" && provenanceFact.Integrity == "" {
+		provenanceFact.Status = model.ProvenanceUnknown
+	}
 	return model.Asset{
 		ID:   "pkg:" + record.Ecosystem + "/" + strings.Join(parts, "/") + "@" + version,
 		Type: model.AssetPackage, Name: record.Name, Version: record.Version, Provenance: &provenanceFact,

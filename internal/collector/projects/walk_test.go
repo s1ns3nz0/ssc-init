@@ -123,6 +123,60 @@ func TestWalkerNeverFollowsSymlinkedSubtreeOrConfig(t *testing.T) {
 	}
 }
 
+func TestWalkerSafelySkipsIncidentalSymlinkWithoutPartialCoverage(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "work")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "package.json"), []byte(`{"name":"must-not-follow"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"safe"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "unrelated-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	got := collectProjectTest(t, &projectCollector{
+		roots: []Root{{Path: root, Ref: "$HOME/work"}}, limits: defaultWalkLimits(),
+		beforeOpen: func(relative string) {
+			if relative == "unrelated-link" {
+				t.Fatal("attempted to open incidental symlink")
+			}
+		},
+	})
+	if got.Status != model.CoverageComplete || len(got.Targets) != 1 || got.Targets[0].Status != model.TargetComplete || got.Targets[0].SkippedSymlinks != 1 {
+		t.Fatalf("result=%+v", got)
+	}
+	for _, asset := range got.Assets {
+		if asset.Name == "must-not-follow" {
+			t.Fatalf("followed incidental symlink: %+v", asset)
+		}
+	}
+}
+
+func TestWalkerRequiredLockfileSymlinkRemainsPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "work")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "package-lock.json")
+	if err := os.WriteFile(outside, []byte(`{"lockfileVersion":3,"packages":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "package-lock.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	got := collectProjectTest(t, &projectCollector{roots: []Root{{Path: root, Ref: "$HOME/work"}}, limits: defaultWalkLimits()})
+	assertTargetIssue(t, got, "$HOME/work", model.TargetPartial, "symlink_rejected")
+	if got.Targets[0].SkippedSymlinks != 0 {
+		t.Fatalf("required target counted as incidental: %+v", got.Targets[0])
+	}
+}
+
 func TestWalkerExcludesSupplyChainEvidenceFromGeneratedAndDependencyTrees(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "Projects")

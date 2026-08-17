@@ -35,8 +35,9 @@ var (
 )
 
 // Record contains only a normalized package coordinate and closed provenance
-// facts. SourceIntegrity holds an approved non-SHA-256 lockfile fact (currently
-// Go h1) which must not be mislabeled as Asset.Provenance.Integrity.
+// facts. SourceIntegrity holds an approved non-SHA-256 lockfile fact (Go h1 or
+// npm SHA-384/SHA-512) which must not be mislabeled as
+// Asset.Provenance.Integrity.
 type Record struct {
 	Ecosystem       string
 	Name            string
@@ -112,47 +113,125 @@ func parseNPM(contents []byte) ([]Record, error) {
 	if !uniqueJSONKeys(contents) {
 		return nil, ErrMalformed
 	}
+	type npmPackageEntry struct {
+		Name      string `json:"name"`
+		Version   string `json:"version"`
+		Integrity string `json:"integrity"`
+		Link      bool   `json:"link"`
+	}
+	type npmV1Entry struct {
+		Version      string                `json:"version"`
+		Integrity    string                `json:"integrity"`
+		Dependencies map[string]npmV1Entry `json:"dependencies"`
+	}
 	var lock struct {
-		Packages map[string]struct {
-			Name      string `json:"name"`
-			Version   string `json:"version"`
-			Integrity string `json:"integrity"`
-		} `json:"packages"`
+		Packages     map[string]npmPackageEntry `json:"packages"`
+		Dependencies map[string]npmV1Entry      `json:"dependencies"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
-	if err := decoder.Decode(&lock); err != nil || lock.Packages == nil || decoder.Decode(&struct{}{}) != io.EOF {
+	if err := decoder.Decode(&lock); err != nil || decoder.Decode(&struct{}{}) != io.EOF || lock.Packages == nil && lock.Dependencies == nil {
 		return nil, ErrMalformed
 	}
-	records := make([]Record, 0, len(lock.Packages))
+	records := make([]Record, 0, len(lock.Packages)+len(lock.Dependencies))
 	seen := make(map[string]Record)
-	for path, entry := range lock.Packages {
-		if path == "" {
-			continue
-		}
-		name := entry.Name
-		if name == "" {
-			name = npmNameFromPath(path)
-		}
-		record, ok := packageRecord("npm", name, entry.Version)
-		if !ok {
-			return nil, ErrMalformed
-		}
-		if entry.Integrity != "" {
-			digest, ok := decodeSHA256SRI(entry.Integrity)
-			if !ok {
-				return nil, ErrMalformed
+	if lock.Packages != nil {
+		for path, entry := range lock.Packages {
+			if path == "" || entry.Link {
+				continue
 			}
-			record.Provenance.Status = model.ProvenanceImmutable
-			record.Provenance.Integrity = "sha256:" + digest
+			name := entry.Name
+			if name == "" {
+				name = npmNameFromPath(path)
+			}
+			if name == "" {
+				continue
+			}
+			if err := addNPMRecord(seen, name, entry.Version, entry.Integrity); err != nil {
+				return nil, err
+			}
 		}
-		if err := addRecord(seen, record); err != nil {
-			return nil, err
+	} else {
+		type namedEntry struct {
+			name  string
+			entry npmV1Entry
+		}
+		stack := make([]namedEntry, 0, len(lock.Dependencies))
+		for name, entry := range lock.Dependencies {
+			stack = append(stack, namedEntry{name: name, entry: entry})
+		}
+		for len(stack) > 0 {
+			last := len(stack) - 1
+			current := stack[last]
+			stack = stack[:last]
+			if err := addNPMRecord(seen, current.name, current.entry.Version, current.entry.Integrity); err != nil {
+				return nil, err
+			}
+			for name, entry := range current.entry.Dependencies {
+				stack = append(stack, namedEntry{name: name, entry: entry})
+			}
 		}
 	}
 	for _, record := range seen {
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+func addNPMRecord(seen map[string]Record, name, version, integrity string) error {
+	record, ok := packageRecord("npm", name, version)
+	if !ok {
+		return ErrMalformed
+	}
+	if integrity != "" {
+		algorithm, digest, ok := decodeNpmSRI(integrity)
+		if !ok {
+			return ErrMalformed
+		}
+		if algorithm == "sha256" {
+			record.Provenance.Status = model.ProvenanceImmutable
+			record.Provenance.Integrity = algorithm + ":" + digest
+		} else {
+			if algorithm != "sha1" {
+				record.Provenance.Status = model.ProvenanceImmutable
+			}
+			record.SourceIntegrity = algorithm + ":" + digest
+		}
+	}
+	key := record.Ecosystem + "\x00" + record.Name + "\x00" + record.Version
+	existing, exists := seen[key]
+	if !exists || existing == record {
+		seen[key] = record
+		return nil
+	}
+	existingHasIntegrity := existing.Provenance.Integrity != "" || existing.SourceIntegrity != ""
+	recordHasIntegrity := record.Provenance.Integrity != "" || record.SourceIntegrity != ""
+	if !existingHasIntegrity && recordHasIntegrity {
+		seen[key] = record
+		return nil
+	}
+	if existingHasIntegrity && !recordHasIntegrity {
+		return nil
+	}
+	if existingHasIntegrity && recordHasIntegrity {
+		existingRank := npmIntegrityRank(existing)
+		recordRank := npmIntegrityRank(record)
+		if existingRank != recordRank {
+			if recordRank > existingRank {
+				seen[key] = record
+			}
+			return nil
+		}
+	}
+	return ErrMalformed
+}
+
+func npmIntegrityRank(record Record) int {
+	value := record.SourceIntegrity
+	if value == "" {
+		value = record.Provenance.Integrity
+	}
+	algorithm, _, _ := strings.Cut(value, ":")
+	return map[string]int{"sha1": 1, "sha256": 2, "sha384": 3, "sha512": 4}[algorithm]
 }
 
 func npmNameFromPath(path string) string {
@@ -163,13 +242,23 @@ func npmNameFromPath(path string) string {
 	return path[index+len("node_modules/"):]
 }
 
-func decodeSHA256SRI(value string) (string, bool) {
-	encoded, ok := strings.CutPrefix(value, "sha256-")
-	if !ok || strings.ContainsAny(encoded, " \t\r\n") {
-		return "", false
+func decodeNpmSRI(value string) (string, string, bool) {
+	if strings.ContainsAny(value, " \t\r\n") {
+		return "", "", false
+	}
+	algorithm, encoded, ok := strings.Cut(value, "-")
+	wantBytes := map[string]int{"sha1": 20, "sha256": 32, "sha384": 48, "sha512": 64}[algorithm]
+	if !ok || wantBytes == 0 || encoded == "" {
+		return "", "", false
 	}
 	digest, err := base64.StdEncoding.DecodeString(encoded)
-	return hex.EncodeToString(digest), err == nil && len(digest) == 32
+	if err != nil || len(digest) != wantBytes {
+		clear(digest)
+		return "", "", false
+	}
+	result := hex.EncodeToString(digest)
+	clear(digest)
+	return algorithm, result, true
 }
 
 func parseCargo(contents []byte) ([]Record, error) {
@@ -177,6 +266,7 @@ func parseCargo(contents []byte) ([]Record, error) {
 		Packages []struct {
 			Name     string `toml:"name"`
 			Version  string `toml:"version"`
+			Source   string `toml:"source"`
 			Checksum string `toml:"checksum"`
 		} `toml:"package"`
 	}
@@ -184,11 +274,18 @@ func parseCargo(contents []byte) ([]Record, error) {
 	if err := decoder.Decode(&lock); err != nil {
 		return nil, ErrMalformed
 	}
-	seen := make(map[string]Record)
+	type cargoRecord struct {
+		record Record
+		source string
+	}
+	seen := make(map[string]cargoRecord)
 	for _, entry := range lock.Packages {
 		record, ok := packageRecord("cargo", entry.Name, entry.Version)
-		if !ok {
+		if !ok || !validCargoSource(entry.Source) {
 			return nil, ErrMalformed
+		}
+		if strings.HasPrefix(entry.Source, "git+") {
+			record.Provenance.Status, record.SourceIntegrity = cargoGitSourceFact(entry.Source)
 		}
 		if entry.Checksum != "" {
 			if !lowercaseSHA256(entry.Checksum) {
@@ -197,15 +294,68 @@ func parseCargo(contents []byte) ([]Record, error) {
 			record.Provenance.Status = model.ProvenanceImmutable
 			record.Provenance.Integrity = "sha256:" + entry.Checksum
 		}
-		if err := addRecord(seen, record); err != nil {
-			return nil, err
+		key := record.Ecosystem + "\x00" + record.Name + "\x00" + record.Version
+		candidate := cargoRecord{record: record, source: entry.Source}
+		if existing, exists := seen[key]; exists {
+			merged, mergeOK := mergeCargoRecord(existing, candidate)
+			if !mergeOK {
+				return nil, ErrMalformed
+			}
+			seen[key] = merged
+		} else {
+			seen[key] = candidate
 		}
 	}
 	records := make([]Record, 0, len(seen))
-	for _, record := range seen {
-		records = append(records, record)
+	for _, entry := range seen {
+		records = append(records, entry.record)
 	}
 	return records, nil
+}
+
+func cargoGitSourceFact(source string) (model.ProvenanceStatus, string) {
+	_, revision, found := strings.Cut(source, "#")
+	if !found || !lowercaseHex(revision, 40) {
+		return model.ProvenanceMutable, ""
+	}
+	return model.ProvenanceUnknown, "git-sha1:" + revision
+}
+
+func lowercaseHex(value string, size int) bool {
+	if len(value) != size {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validCargoSource(value string) bool {
+	return value == "" || safeCoordinate(value) && (strings.HasPrefix(value, "registry+") || strings.HasPrefix(value, "sparse+") || strings.HasPrefix(value, "git+"))
+}
+
+func mergeCargoRecord(left, right struct {
+	record Record
+	source string
+}) (struct {
+	record Record
+	source string
+}, bool) {
+	if left.source == right.source {
+		return left, left.record == right.record
+	}
+	if left.source == "" && right.source != "" && right.record.Provenance.Integrity != "" {
+		return right, true
+	}
+	if right.source == "" && left.source != "" && left.record.Provenance.Integrity != "" {
+		return left, true
+	}
+	return left, false
 }
 
 func parseGoSum(contents []byte) ([]Record, error) {

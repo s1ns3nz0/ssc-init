@@ -235,7 +235,8 @@ func (p *auditPrinter) intelligence(record Record) {
 	if (update.Status == "updated" || update.Status == "current") && update.Freshness == "fresh" {
 		statusColor, freshnessColor = ansiGreen, ansiGreen
 	}
-	p.field("update", p.styled(update.Status, statusColor))
+	statusLabel := strings.ReplaceAll(update.Status, "-", " ")
+	p.field("update", p.styled(statusLabel, statusColor))
 	p.field("freshness", p.styled(update.Freshness, freshnessColor))
 	if update.Sequence > 0 {
 		p.field("sequence", fmt.Sprintf("%d", update.Sequence))
@@ -475,6 +476,17 @@ func (p *auditPrinter) coverageDetails(record Record) {
 	p.line("COVERAGE")
 	for _, result := range record.Coverage {
 		p.line(fmt.Sprintf("  %-20s %-12s targets=%d errors=%d", result.Collector, result.Status, len(result.Targets), len(result.Errors)))
+		skippedSymlinks := 0
+		for _, target := range result.Targets {
+			skippedSymlinks += target.SkippedSymlinks
+		}
+		if skippedSymlinks > 0 {
+			label := "symlink"
+			if skippedSymlinks != 1 {
+				label = "symlinks"
+			}
+			p.line(fmt.Sprintf("    %d %s safely skipped", skippedSymlinks, label))
+		}
 		for _, issue := range result.Errors {
 			p.line("    error " + issue.Code)
 		}
@@ -494,8 +506,9 @@ func (p *auditPrinter) assetDetails(record Record) {
 		}
 		return rows[i].ID < rows[j].ID
 	})
+	aliases := findingdisplay.ProjectAliases(record.Inventory.Assets)
 	for _, asset := range rows {
-		p.line(fmt.Sprintf("  %-20s %-28s %s", asset.Type, displayName(asset), asset.Version))
+		p.line(fmt.Sprintf("  %-20s %-28s %s", asset.Type, displayName(asset, aliases), asset.Version))
 	}
 	if len(rows) == 0 {
 		p.line("  (none)")
@@ -519,13 +532,17 @@ func (p *auditPrinter) evidenceDetails(record Record) {
 
 func assetDisplays(record Record) map[string]string {
 	result := make(map[string]string, len(record.Inventory.Assets))
+	aliases := findingdisplay.ProjectAliases(record.Inventory.Assets)
 	for _, asset := range record.Inventory.Assets {
-		result[asset.ID] = displayName(asset)
+		result[asset.ID] = displayName(asset, aliases)
 	}
 	return result
 }
 
-func displayName(asset model.Asset) string {
+func displayName(asset model.Asset, projectAliases map[string]string) string {
+	if alias := projectAliases[asset.ID]; asset.Type == model.AssetProject && alias != "" {
+		return alias
+	}
 	if asset.Name == "" {
 		return "(redacted)"
 	}

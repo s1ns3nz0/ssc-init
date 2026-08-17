@@ -170,6 +170,53 @@ func TestValidateIntelligenceUpdateAcceptsOnlyEmittableStateMatrix(t *testing.T)
 	}
 }
 
+func TestValidateAcceptsOnlyClosedNotRequestedActiveTIReceiptMatrix(t *testing.T) {
+	identified := IntelligenceUpdate{Family: "ti", Status: "not-requested", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3}
+	valid := []IntelligenceUpdate{
+		identified,
+		func() IntelligenceUpdate { value := identified; value.Freshness = "stale"; return value }(),
+		func() IntelligenceUpdate { value := identified; value.Freshness = "expired"; return value }(),
+		{Family: "ti", Status: "not-requested", Freshness: "missing"},
+		{Family: "ti", Status: "not-requested", Freshness: "unavailable"},
+	}
+	for index, receipt := range valid {
+		record := validRecord()
+		receipt.RecordedAt = record.Run.FinishedAt
+		record.Intelligence = &receipt
+		if err := Validate(record); err != nil {
+			t.Fatalf("valid[%d]=%+v rejected: %v", index, receipt, err)
+		}
+	}
+	invalid := []IntelligenceUpdate{
+		{Family: "ti", Status: "not-requested", Freshness: "fresh"},
+		{Family: "ti", Status: "not-requested", Freshness: "missing", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1"},
+		{Family: "ti", Status: "not-requested", Freshness: "expired"},
+		{Family: "ti", Status: "not-requested", Freshness: "stale", Sequence: 7},
+		{Family: "ti", Status: "not-requested", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 2, Malicious: 1},
+	}
+	for index, receipt := range invalid {
+		record := validRecord()
+		receipt.RecordedAt = record.Run.FinishedAt
+		record.Intelligence = &receipt
+		if Validate(record) == nil {
+			t.Fatalf("invalid[%d]=%+v accepted", index, receipt)
+		}
+	}
+}
+
+func TestValidateRejectsActiveTIReceiptFindingSequenceMismatch(t *testing.T) {
+	record := graphRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "not-requested", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: record.Run.FinishedAt}
+	record.Findings[0].Bundles = []model.BundleReference{{Family: "ti", Sequence: 7, Digest: strings.Repeat("a", 64)}}
+	if err := Validate(record); err != nil {
+		t.Fatalf("matching binding rejected: %v", err)
+	}
+	record.Findings[0].Bundles[0].Sequence = 8
+	if Validate(record) == nil {
+		t.Fatal("mismatched TI finding sequence accepted")
+	}
+}
+
 func TestValidateRejectsEmbeddedPrivateMarkersWithoutRejectingDottedDisplayNames(t *testing.T) {
 	for _, marker := range []string{"alice-macbook.local", "private workspace id", "workspace-secret", "see[/home/alice/private]", "endpoint 10.0.0.1:8443"} {
 		record := validRecord()

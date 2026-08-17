@@ -264,6 +264,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		if tiManager, policyManager, managerErr := findingManagers(home); managerErr == nil {
 			app.FindingService = finding.Service{TI: tiManager, Policy: policyManager, Now: environment.Now}
+			app.TIStatusReader = tiManager
 			if options.UpdateTI {
 				updater := productionTIUpdater(tiManager, environment.Now)
 				app.TIUpdater = updater

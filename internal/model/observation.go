@@ -55,19 +55,32 @@ type TargetSpec struct {
 }
 
 type TargetCoverage struct {
-	TargetID     string          `json:"targetId"`
-	InstanceRef  string          `json:"instanceRef,omitempty"`
-	Status       TargetStatus    `json:"status"`
-	Assets       int             `json:"assets"`
-	Observations int             `json:"observations"`
-	Errors       []CoverageError `json:"errors,omitempty"`
+	TargetID        string          `json:"targetId"`
+	InstanceRef     string          `json:"instanceRef,omitempty"`
+	Status          TargetStatus    `json:"status"`
+	Assets          int             `json:"assets"`
+	Observations    int             `json:"observations"`
+	SkippedSymlinks int             `json:"skippedSymlinks,omitempty"`
+	Errors          []CoverageError `json:"errors,omitempty"`
+}
+
+type ScanScopeMode string
+
+const (
+	ScanScopeHost        ScanScopeMode = "host"
+	ScanScopeProjectOnly ScanScopeMode = "project-only"
+)
+
+func (mode ScanScopeMode) Valid() bool {
+	return mode == ScanScopeHost || mode == ScanScopeProjectOnly
 }
 
 type ScanScope struct {
-	Platform       string   `json:"platform"`
-	CatalogVersion string   `json:"catalogVersion"`
-	ProjectRoots   []string `json:"projectRoots"`
-	ExternalProbes bool     `json:"externalProbes"`
+	Mode           ScanScopeMode `json:"mode,omitempty"`
+	Platform       string        `json:"platform"`
+	CatalogVersion string        `json:"catalogVersion"`
+	ProjectRoots   []string      `json:"projectRoots"`
+	ExternalProbes bool          `json:"externalProbes"`
 }
 
 type LocalTarget struct {

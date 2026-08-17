@@ -252,8 +252,16 @@ func (s *Service) collectProjectMCP(ctx context.Context, results []model.Collect
 			localTargets[targetIndex] = model.LocalTarget{}
 		}
 	}
+	projectOnly := s.environment.Scope.Mode == model.ScanScopeProjectOnly
+	if projectOnly && len(projectTargets) == 0 {
+		return results
+	}
+	mcpCollector := mcp.New(projectTargets...)
+	if projectOnly {
+		mcpCollector = mcp.NewProjectOnly(projectTargets...)
+	}
 	followUp := collector.Orchestrator{
-		Collectors:    []collector.Collector{mcp.New(projectTargets...)},
+		Collectors:    []collector.Collector{mcpCollector},
 		Timeout:       s.orchestrator.Timeout,
 		MaxConcurrent: 1,
 	}.Collect(ctx, s.environment)

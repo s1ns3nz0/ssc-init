@@ -55,6 +55,33 @@ func TestWriteFindingsPrettyRendersActionTableWhileJSONContractStaysJSON(t *test
 	}
 }
 
+func TestWriteFindingsPrettyUsesPrivateDeterministicProjectAliases(t *testing.T) {
+	projectA := "project:sha256:" + strings.Repeat("a", 64)
+	projectB := "project:sha256:" + strings.Repeat("b", 64)
+	privateMarkers := []string{"/Users/alice/private/repo", "secret-workspace", projectA, projectB}
+	findings := []model.Finding{
+		{ID: "finding:b", AssetID: projectB, AssetType: model.AssetProject, Verdict: model.VerdictNeedsReview, Severity: model.SeverityMedium, Confidence: model.ConfidenceHigh, Level: 2, RuleIDs: []string{"rule:b"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory},
+		{ID: "finding:a", AssetID: projectA, AssetType: model.AssetProject, Verdict: model.VerdictNeedsReview, Severity: model.SeverityMedium, Confidence: model.ConfidenceHigh, Level: 2, RuleIDs: []string{"rule:a"}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory},
+	}
+	assets := []model.Asset{
+		{ID: projectB, Type: model.AssetProject, Name: "project", Path: privateMarkers[0], Metadata: map[string]string{"workspace": privateMarkers[1]}},
+		{ID: projectA, Type: model.AssetProject, Name: "project"},
+	}
+	var output bytes.Buffer
+	data := FindingData{DeviceID: "device:sha256:" + strings.Repeat("d", 64), Assets: assets, Findings: findings}
+	if err := WriteFindingsPretty(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "project-1") || !strings.Contains(output.String(), "project-2") {
+		t.Fatalf("aliases missing:\n%s", output.String())
+	}
+	for _, marker := range privateMarkers {
+		if strings.Contains(output.String(), marker) {
+			t.Fatalf("private marker %q leaked:\n%s", marker, output.String())
+		}
+	}
+}
+
 func TestWriteFindingsPrettyAddsHumanReasonWithoutChangingJSON(t *testing.T) {
 	assetID := "asset:sha256:" + strings.Repeat("b", 64)
 	finding := model.Finding{ID: "finding:z", AssetID: assetID, AssetType: model.AssetPackage, Verdict: model.VerdictSuspicious, Severity: model.SeverityHigh, Confidence: model.ConfidenceHigh, Level: 5, RuleIDs: []string{"ssc-init/api/credential-access"}, EvidenceIDs: []string{"evidence:sha256:" + strings.Repeat("c", 64)}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}

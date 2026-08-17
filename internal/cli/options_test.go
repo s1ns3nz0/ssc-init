@@ -144,6 +144,31 @@ func TestParseOptionsAcceptsOnlyDocumentedCommandForms(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsProjectOnlyWithExplicitRoots(t *testing.T) {
+	got, err := ParseOptions([]string{"scan", "--baseline", "--project-only", "--project-root", "$HOME/work", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Options{Command: "scan", Baseline: true, ProjectOnly: true, ProjectRoots: []string{"$HOME/work"}, JSON: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v want=%+v", got, want)
+	}
+}
+
+func TestParseOptionsRejectsInvalidProjectOnlyForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"scan", "--baseline", "--project-only", "--json"},
+		{"scan", "--baseline", "--project-only", "--project-only", "--project-root", "$HOME/work", "--json"},
+		{"scan", "--baseline", "--project-only", "--project-root", "$HOME/work", "--external-probes", "--json"},
+		{"scan", "--baseline", "--project-only", "--project-root", "$HOME/work", "--update-ti", "--json"},
+		{"status", "--project-only", "--json"},
+	} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("accepted %q", args)
+		}
+	}
+}
+
 func TestParseOptionsAcceptsInstallAndRollback(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	got, err := ParseOptions([]string{

@@ -22,6 +22,7 @@ type Options struct {
 	Baseline       bool
 	ExternalProbes bool
 	UpdateTI       bool
+	ProjectOnly    bool
 	ProjectRoots   []string
 	ScanLabel      string
 
@@ -493,6 +494,11 @@ func parseScanOptions(args []string, options *Options) error {
 				return ErrInvalidOptions
 			}
 			options.UpdateTI = true
+		case argument == "--project-only":
+			if options.ProjectOnly {
+				return ErrInvalidOptions
+			}
+			options.ProjectOnly = true
 		case argument == "--project-root":
 			index++
 			if index == len(args) || addProjectRoot(options, seenRoots, args[index]) != nil {
@@ -513,6 +519,9 @@ func parseScanOptions(args []string, options *Options) error {
 		}
 	}
 	if !options.Baseline || options.JSON == options.Pretty {
+		return ErrInvalidOptions
+	}
+	if options.ProjectOnly && (len(options.ProjectRoots) == 0 || options.ExternalProbes || options.UpdateTI) {
 		return ErrInvalidOptions
 	}
 	return nil

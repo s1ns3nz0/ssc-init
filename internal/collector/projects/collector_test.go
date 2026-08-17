@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -114,6 +115,26 @@ func TestMalformedLaunchConfigKeepsHashEvidenceAndMarksOnlyProjectPartial(t *tes
 	}
 }
 
+func TestVueStyleLaunchJSONCIsComplete(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "Projects")
+	writeProjectFile(t, filepath.Join(root, "app", ".vscode", "launch.json"), `{
+  // VS Code launch files use JSONC.
+  "version": "0.2.0",
+  "configurations": [
+    {"type":"node", "request":"launch", "url":"https://example.test/a//b",},
+  ],
+}`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete || len(result.Errors) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	collection := collectProjectEvidence(t, home, result)
+	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
+		t.Fatalf("collection=%+v", collection)
+	}
+}
+
 func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "workspace")
@@ -145,6 +166,69 @@ func TestProjectCollectorConnectsPackagesToImmutableLockfileProvenance(t *testin
 	if len(collection.Evidence) != 1 || collection.Evidence[0].Status != model.EvidenceComplete {
 		t.Fatalf("manifest evidence was not preserved: %+v", collection)
 	}
+}
+
+func TestProjectCollectorPreservesNpmSHA512AsSourceIntegrity(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	digest := []byte(strings.Repeat("x", 64))
+	integrity := "sha512-" + base64.StdEncoding.EncodeToString(digest)
+	writeProjectFile(t, filepath.Join(root, "package-lock.json"), `{"packages":{"node_modules/demo":{"name":"demo","version":"1.2.3","integrity":"`+integrity+`"}}}`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete {
+		t.Fatalf("result=%+v", result)
+	}
+	want := "sha512:" + strings.Repeat("78", 64)
+	assetFound := false
+	for _, asset := range result.Assets {
+		if asset.ID == "pkg:npm/demo@1.2.3" {
+			assetFound = true
+			if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceUnknown || asset.Provenance.Integrity != "" {
+				t.Fatalf("non-SHA256 package asset made an invalid canonical integrity claim: %+v", asset)
+			}
+		}
+	}
+	if !assetFound {
+		t.Fatalf("package asset missing: %+v", result.Assets)
+	}
+	for _, observation := range result.Observations {
+		if observation.AssetID == "pkg:npm/demo@1.2.3" {
+			if observation.Metadata["source_integrity"] != want {
+				t.Fatalf("observation=%+v want=%q", observation, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("package observation missing: %+v", result.Observations)
+}
+
+func TestProjectCollectorAcceptsCargoWorkspaceAndRegistryDuplicate(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "workspace")
+	digest := strings.Repeat("a", 64)
+	writeProjectFile(t, filepath.Join(root, "Cargo.lock"), `[[package]]
+name = "clap"
+version = "4.6.6"
+
+[[package]]
+name = "clap"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "`+digest+`"
+`)
+	result := collectProjectsAt(t, home, root)
+	if result.Status != model.CoverageComplete {
+		t.Fatalf("result=%+v", result)
+	}
+	for _, asset := range result.Assets {
+		if asset.ID == "pkg:cargo/clap@4.6.6" {
+			if asset.Provenance == nil || asset.Provenance.Status != model.ProvenanceImmutable || asset.Provenance.Integrity != "sha256:"+digest {
+				t.Fatalf("asset=%+v", asset)
+			}
+			return
+		}
+	}
+	t.Fatalf("clap package missing: %+v", result.Assets)
 }
 
 func TestProjectCollectorGoSumAssetMatchesVersionRangeTI(t *testing.T) {

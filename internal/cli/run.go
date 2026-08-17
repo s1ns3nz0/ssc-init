@@ -41,6 +41,12 @@ type StatusReader interface {
 	LatestSnapshot(context.Context) (model.Snapshot, bool, error)
 }
 
+// TIStatusReader reads only the locally active verified TI state. It has no
+// update or transport capability, so ordinary scans remain zero-network.
+type TIStatusReader interface {
+	Status(context.Context) (bundle.Status, error)
+}
+
 type AuditManager interface {
 	List(context.Context) ([]audit.Stored, error)
 	Open(context.Context, string) (audit.Verified, error)
@@ -168,6 +174,7 @@ type App struct {
 	BundleManagers   map[bundle.Family]BundleManager
 	FindingService   FindingService
 	TIUpdater        TIUpdater
+	TIStatusReader   TIStatusReader
 	DeviceID         string
 	Webhook          WebhookDeliverer
 	AdapterInput     io.Reader
@@ -213,6 +220,7 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			return 1
 		}
 		var update bundle.UpdateResult
+		var activeReceipt *audit.IntelligenceUpdate
 		if options.UpdateTI {
 			if a.TIUpdater == nil {
 				fmt.Fprintln(stderr, "threat intelligence update is unavailable")
@@ -223,6 +231,16 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 				fmt.Fprintln(stderr, "threat intelligence update cancelled")
 				return 1
 			}
+		} else if a.TIStatusReader != nil {
+			status, statusErr := a.TIStatusReader.Status(ctx)
+			if statusErr != nil {
+				if ctx.Err() != nil {
+					fmt.Fprintln(stderr, "threat intelligence status cancelled")
+					return 1
+				}
+				status = bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessUnavailable}
+			}
+			activeReceipt = auditReceiptFromStatus(status)
 		}
 		var run audit.Run
 		var runErr error
@@ -249,6 +267,12 @@ func (a App) RunOptions(ctx context.Context, options Options, stdout, stderr io.
 			if options.UpdateTI {
 				if service, ok := a.AuditService.(intelligenceAuditService); ok {
 					outcome = service.CompleteWithIntelligence(ctx, run, scan, inventory, delta, findings, auditReceipt(update))
+				} else {
+					outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
+				}
+			} else if activeReceipt != nil {
+				if service, ok := a.AuditService.(intelligenceAuditService); ok {
+					outcome = service.CompleteWithIntelligence(ctx, run, scan, inventory, delta, findings, activeReceipt)
 				} else {
 					outcome = a.AuditService.Complete(ctx, run, scan, inventory, delta, findings)
 				}
@@ -1130,6 +1154,10 @@ func findingExitCode(findings []model.Finding) int {
 
 func auditReceipt(result bundle.UpdateResult) *audit.IntelligenceUpdate {
 	return &audit.IntelligenceUpdate{Family: "ti", Status: string(result.Status), ErrorCode: string(result.ErrorCode), Freshness: string(result.Freshness), Sequence: result.Sequence, Digest: result.Digest, KeyID: result.KeyID, Records: result.Records, Malicious: result.Malicious, Vulnerable: result.Vulnerable}
+}
+
+func auditReceiptFromStatus(status bundle.Status) *audit.IntelligenceUpdate {
+	return &audit.IntelligenceUpdate{Family: "ti", Status: "not-requested", Freshness: string(status.Freshness), Sequence: status.Sequence, Digest: status.Digest, KeyID: status.KeyID, Records: status.Records, Malicious: status.Malicious, Vulnerable: status.Vulnerable}
 }
 
 func writeScanUpdateJSON(writer io.Writer, scan model.ScanResult, inventory model.Inventory, delta model.Delta, update bundle.UpdateResult) error {

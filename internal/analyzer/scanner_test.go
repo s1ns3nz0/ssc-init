@@ -10,14 +10,19 @@ import (
 	"github.com/s1ns3nz0/ssc-init/internal/model"
 )
 
-type scannerContent struct{ *bytes.Reader }
+type scannerContent struct {
+	*bytes.Reader
+	subject string
+}
 
 func newScannerContent(value string) scannerContent {
-	return scannerContent{bytes.NewReader([]byte(value))}
+	return scannerContent{Reader: bytes.NewReader([]byte(value)), subject: model.EvidenceSubjectEntrypointMain}
 }
-func (scannerContent) AssetID() string     { return "tool:fixture" }
-func (scannerContent) EvidenceID() string  { return "evidence:fixture" }
-func (scannerContent) Subject() string     { return model.EvidenceSubjectEntrypointMain }
+func (scannerContent) AssetID() string    { return "tool:fixture" }
+func (scannerContent) EvidenceID() string { return "evidence:fixture" }
+func (content scannerContent) Subject() string {
+	return content.subject
+}
 func (content scannerContent) Size() int64 { return content.Reader.Size() }
 
 var _ io.Reader = scannerContent{}
@@ -36,8 +41,31 @@ const docs = "child_process.exec(command)"; /* requests.post(secret) */`
 	}
 }
 
+func TestScannerSkipsGenericBehaviorRulesForDependencyEvidence(t *testing.T) {
+	tests := []struct {
+		subject string
+		raw     string
+	}{
+		{subject: "project-lockfile:Cargo.lock", raw: `checksum = "` + strings.Repeat("a", 64) + `"`},
+		{subject: "project-lockfile:go.sum", raw: "github.com/aws/aws-sdk-go-v2/credentials v1.0.0 h1:" + strings.Repeat("A", 44)},
+		{subject: "project-manifest:go.mod", raw: "require github.com/docker/docker-credential-helpers v0.9.3"},
+	}
+	for _, test := range tests {
+		content := scannerContent{Reader: bytes.NewReader([]byte(test.raw)), subject: test.subject}
+		facts, err := (Scanner{}).Analyze(context.Background(), content)
+		if err != nil || len(facts) != 0 {
+			t.Fatalf("subject=%q facts=%+v err=%v", test.subject, facts, err)
+		}
+	}
+
+	facts, err := (Scanner{}).Analyze(context.Background(), newScannerContent(`const secret = os.getenv("TOKEN"); fetch(endpoint, secret)`))
+	if err != nil || len(facts) == 0 {
+		t.Fatalf("source facts=%+v err=%v", facts, err)
+	}
+}
+
 func TestScannerRejectsOversizeInput(t *testing.T) {
-	content := scannerContent{bytes.NewReader(bytes.Repeat([]byte("a"), 1<<20+1))}
+	content := scannerContent{Reader: bytes.NewReader(bytes.Repeat([]byte("a"), 1<<20+1)), subject: model.EvidenceSubjectEntrypointMain}
 	if _, err := (Scanner{}).Analyze(context.Background(), content); err == nil {
 		t.Fatal("oversize accepted")
 	}

@@ -77,16 +77,18 @@ type rootWalk struct {
 	configs         []discoveredConfig
 	evidence        []discoveredProjectEvidence
 	errors          []model.CoverageError
+	skippedSymlinks int
 }
 
 type rootWalker struct {
-	ctx        context.Context
-	limits     walkLimits
-	beforeOpen func(string)
-	entries    int
-	configs    []discoveredConfig
-	evidence   []discoveredProjectEvidence
-	errors     []model.CoverageError
+	ctx             context.Context
+	limits          walkLimits
+	beforeOpen      func(string)
+	entries         int
+	configs         []discoveredConfig
+	evidence        []discoveredProjectEvidence
+	errors          []model.CoverageError
+	skippedSymlinks int
 }
 
 var gitHookCatalog = map[string]struct{}{
@@ -156,7 +158,7 @@ func walkConfiguredRoot(ctx context.Context, fileSystem platform.FileSystem, con
 	if len(walker.errors) > 0 {
 		status = model.TargetPartial
 	}
-	return rootWalk{status: status, rootFingerprint: rootFingerprint, configs: walker.configs, evidence: walker.evidence, errors: walker.errors}, nil
+	return rootWalk{status: status, rootFingerprint: rootFingerprint, configs: walker.configs, evidence: walker.evidence, errors: walker.errors, skippedSymlinks: walker.skippedSymlinks}, nil
 }
 
 func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory platform.RootedFile, relative string, depth int) (bool, error) {
@@ -185,6 +187,11 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 		if relative != "." {
 			entryRelative = filepath.Join(relative, name)
 		}
+		definition, projectRelative, recognized := recognizeConfig(filepath.ToSlash(entryRelative))
+		evidenceDefinition, evidenceRecognized := evidenceCatalog[name]
+		if name == "launch.json" && filepath.Base(relative) != ".vscode" {
+			evidenceRecognized = false
+		}
 		expected, err := root.Lstat(name)
 		if err != nil {
 			walker.addError("path_unavailable", "project entry is unavailable")
@@ -195,7 +202,11 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 			continue
 		}
 		if expected.Mode()&fs.ModeSymlink != 0 {
-			walker.addError("symlink_rejected", "symbolic link was not followed")
+			if recognized || evidenceRecognized {
+				walker.addError("symlink_rejected", "symbolic link was not followed")
+			} else {
+				walker.skippedSymlinks++
+			}
 			continue
 		}
 		if expected.IsDir() {
@@ -243,11 +254,6 @@ func (walker *rootWalker) walkDirectory(root platform.RootedDirectory, directory
 				return stop, walkErr
 			}
 			continue
-		}
-		definition, projectRelative, recognized := recognizeConfig(filepath.ToSlash(entryRelative))
-		evidenceDefinition, evidenceRecognized := evidenceCatalog[name]
-		if name == "launch.json" && filepath.Base(relative) != ".vscode" {
-			evidenceRecognized = false
 		}
 		if !recognized && !evidenceRecognized {
 			continue

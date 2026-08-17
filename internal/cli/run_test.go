@@ -305,6 +305,10 @@ type updaterFunc func(context.Context) bundle.UpdateResult
 
 func (f updaterFunc) Update(ctx context.Context) bundle.UpdateResult { return f(ctx) }
 
+type tiStatusReaderFunc func(context.Context) (bundle.Status, error)
+
+func (f tiStatusReaderFunc) Status(ctx context.Context) (bundle.Status, error) { return f(ctx) }
+
 type findingServiceFunc func(context.Context, model.Inventory) (finding.Result, error)
 
 func (f findingServiceFunc) Evaluate(ctx context.Context, inventory model.Inventory) (finding.Result, error) {
@@ -347,6 +351,47 @@ func TestDefaultScanAndOtherCommandsNeverInvokeTIUpdater(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--json"}, &out, &errOut); code != 0 || calls != 0 {
 		t.Fatalf("code=%d calls=%d err=%q", code, calls, errOut.String())
+	}
+}
+
+func TestDefaultScanArchivesActiveTIReceiptWithoutUpdating(t *testing.T) {
+	manager, service := cliAuditService(t)
+	asset := model.Asset{ID: "pkg:npm/bad@1.0.0", Type: model.AssetPackage, Name: "bad", Version: "1.0.0"}
+	findingItem := model.Finding{ID: "finding:test", AssetID: asset.ID, AssetType: asset.Type, Verdict: model.VerdictKnownMalicious, Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh, Level: 1, IntelligenceIDs: []string{"MAL-2026-0001"}, Bundles: []model.BundleReference{{Family: "ti", Sequence: 7, Digest: strings.Repeat("a", 64)}}, DetectedAt: time.Unix(1, 0).UTC(), Action: model.ActionAdvisory}
+	order := []string{}
+	app := App{
+		Version: "dev", DeviceID: service.DeviceID, Now: service.Now, Random: strings.NewReader(strings.Repeat("r", 64)), AuditService: service,
+		TIUpdater: updaterFunc(func(context.Context) bundle.UpdateResult {
+			t.Fatal("default scan invoked updater")
+			return bundle.UpdateResult{}
+		}),
+		TIStatusReader: tiStatusReaderFunc(func(context.Context) (bundle.Status, error) {
+			order = append(order, "status")
+			return bundle.Status{Family: bundle.FamilyTI, Freshness: bundle.FreshnessFresh, Sequence: 7, Digest: strings.Repeat("a", 64), KeyID: "ti-prod-1", Records: 1, Malicious: 1}, nil
+		}),
+		BaselineScanner: baselineScannerFunc(func(context.Context) (model.ScanResult, model.Inventory, model.Delta, bool, error) {
+			order = append(order, "scan")
+			return model.ScanResult{SchemaVersion: "ssc-init.scan.v7", ScanID: "scan:sha256:" + strings.Repeat("b", 64), Status: model.ScanComplete}, model.Inventory{Assets: []model.Asset{asset}}, model.Delta{}, false, nil
+		}),
+		FindingService: findingServiceFunc(func(context.Context, model.Inventory) (finding.Result, error) {
+			order = append(order, "finding")
+			return finding.Result{Intelligence: "fresh", Findings: []model.Finding{findingItem}}, nil
+		}),
+	}
+	var output, stderr bytes.Buffer
+	if code := app.Run(context.Background(), []string{"scan", "--baseline", "--pretty"}, &output, &stderr); code != 4 || stderr.Len() != 0 {
+		t.Fatalf("code=%d output=%q stderr=%q", code, output.String(), stderr.String())
+	}
+	if strings.Join(order, ",") != "status,scan,finding" {
+		t.Fatalf("order=%v", order)
+	}
+	listed, err := manager.List(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("listed=%+v err=%v", listed, err)
+	}
+	verified, err := manager.Open(context.Background(), listed[0].RunID)
+	if err != nil || verified.Record.Intelligence == nil || verified.Record.Intelligence.Status != "not-requested" || verified.Record.Intelligence.Sequence != 7 || len(verified.Record.Findings) != 1 || verified.Record.Findings[0].Bundles[0].Sequence != 7 {
+		t.Fatalf("verified=%+v err=%v", verified.Record, err)
 	}
 }
 

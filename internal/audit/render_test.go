@@ -23,6 +23,32 @@ func TestWritePrettyRendersProgressiveAuditSummary(t *testing.T) {
 	}
 }
 
+func TestAssetDisplaysUsePrivateDeterministicProjectAliases(t *testing.T) {
+	projectA := "project:sha256:" + strings.Repeat("a", 64)
+	projectB := "project:sha256:" + strings.Repeat("b", 64)
+	record := Record{Inventory: model.Inventory{Assets: []model.Asset{
+		{ID: projectB, Type: model.AssetProject, Name: "project", Path: "/Users/alice/private/repo"},
+		{ID: "tool:one", Type: model.AssetTool, Name: "public-tool"},
+		{ID: projectA, Type: model.AssetProject, Name: "project"},
+	}}}
+	got := assetDisplays(record)
+	if got[projectA] != "project-1" || got[projectB] != "project-2" || got["tool:one"] != "public-tool" {
+		t.Fatalf("displays=%v", got)
+	}
+}
+
+func TestCoverageSectionReportsOnlySafeIncidentalSymlinkCount(t *testing.T) {
+	record := graphRecord()
+	record.Coverage[0].Targets[0].SkippedSymlinks = 3
+	var output bytes.Buffer
+	if err := WriteSection(&output, record, SectionCoverage); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "3 symlinks safely skipped") || strings.Contains(output.String(), "private-link-name") {
+		t.Fatalf("coverage output=%q", output.String())
+	}
+}
+
 func TestWritePrettyLeadsWithActionAssessmentAndPriorityFinding(t *testing.T) {
 	record := graphRecord()
 	record.Findings[0].Verdict = model.VerdictKnownMalicious
@@ -84,6 +110,23 @@ func TestWritePrettyShowsDegradedAndUnavailableIntelligenceWithoutLeaking(t *tes
 				t.Fatalf("degraded/unavailable state lacks warning color: %q", output.String())
 			}
 		})
+	}
+}
+
+func TestWritePrettySeparatesNotRequestedUpdateFromActiveTIFreshness(t *testing.T) {
+	record := graphRecord()
+	record.Intelligence = &IntelligenceUpdate{Family: "ti", Status: "not-requested", Freshness: "fresh", Sequence: 7, Digest: strings.Repeat("d", 64), KeyID: "ti-prod-1", Records: 4, Malicious: 1, Vulnerable: 3, RecordedAt: record.Run.FinishedAt}
+	var output bytes.Buffer
+	if err := WritePretty(&output, record, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"update     not requested", "freshness  fresh", "sequence   7", "records    4"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, output.String())
+		}
+	}
+	if strings.Contains(output.String(), record.Intelligence.Digest) {
+		t.Fatalf("digest leaked:\n%s", output.String())
 	}
 }
 

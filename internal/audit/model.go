@@ -77,8 +77,9 @@ type Summary struct {
 	Changes         int `json:"changes"`
 }
 
-// IntelligenceUpdate is the deliberately closed receipt for the explicit TI
-// update that preceded a scan. It contains no transport or manifest material.
+// IntelligenceUpdate is the deliberately closed receipt for TI update
+// activity and the verified local bundle used by a scan. It contains no
+// transport or manifest material.
 type IntelligenceUpdate struct {
 	Family     string    `json:"family"`
 	Status     string    `json:"status"`

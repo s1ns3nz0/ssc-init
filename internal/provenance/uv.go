@@ -29,6 +29,9 @@ func parseUV(contents []byte) ([]Record, error) {
 	}
 	seen := make(map[string]Record)
 	for _, entry := range lock.Packages {
+		if uvVirtualSource(entry.Source) {
+			continue
+		}
 		hashes := make([]string, 0, len(entry.Wheels)+1)
 		if entry.Sdist != nil && entry.Sdist.Hash != nil {
 			hashes = append(hashes, *entry.Sdist.Hash)
@@ -59,4 +62,9 @@ func parseUV(contents []byte) ([]Record, error) {
 func uvRegistrySource(source map[string]any) bool {
 	registry, ok := source["registry"].(string)
 	return ok && registry != "" && len(source) == 1
+}
+
+func uvVirtualSource(source map[string]any) bool {
+	virtual, ok := source["virtual"].(string)
+	return ok && virtual != "" && len(source) == 1
 }

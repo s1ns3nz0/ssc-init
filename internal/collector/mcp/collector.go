@@ -31,6 +31,7 @@ const maxMCPSemanticFieldBytes = 4096
 
 type mcpCollector struct {
 	projectTargets []model.LocalTarget
+	projectOnly    bool
 }
 
 // New returns a catalog-targeted collector. Raw project paths are retained only
@@ -39,9 +40,27 @@ func New(projectTargets ...model.LocalTarget) collector.TargetedCollector {
 	return &mcpCollector{projectTargets: projectTargets}
 }
 
+// NewProjectOnly parses only the sealed project targets supplied by the
+// project collector. It never opens or advertises the user MCP catalog.
+func NewProjectOnly(projectTargets ...model.LocalTarget) collector.TargetedCollector {
+	return &mcpCollector{projectTargets: projectTargets, projectOnly: true}
+}
+
 func (*mcpCollector) Name() string { return "mcp" }
 
-func (*mcpCollector) Targets() []model.TargetSpec { return catalogSpecs() }
+func (c *mcpCollector) Targets() []model.TargetSpec {
+	if !c.projectOnly {
+		return catalogSpecs()
+	}
+	allowed := c.projectTargetIDs()
+	result := make([]model.TargetSpec, 0, len(allowed))
+	for _, spec := range catalogSpecs() {
+		if allowed[spec.ID] {
+			result = append(result, spec)
+		}
+	}
+	return result
+}
 
 func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (model.CollectorResult, error) {
 	result := model.CollectorResult{Collector: c.Name()}
@@ -52,7 +71,7 @@ func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (
 
 	rootedFilesystem, hasRootedFilesystem := env.FS.(platform.RootedFileSystem)
 	var homeRoot platform.RootedDirectory
-	if hasRootedFilesystem {
+	if hasRootedFilesystem && !c.projectOnly {
 		var err error
 		homeRoot, err = rootedFilesystem.OpenRoot(env.Home)
 		if err != nil {
@@ -64,9 +83,13 @@ func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (
 	}
 
 	projectTargets, invalidProjectTargets := c.validatedProjectTargets(env.Home)
+	allowedProjectTargets := c.projectTargetIDs()
 	declarations := catalogDeclarations()
 	for phase := 0; phase < 2; phase++ {
 		for _, declaration := range declarations {
+			if c.projectOnly && !allowedProjectTargets[declaration.spec.ID] {
+				continue
+			}
 			isExpandableProject := declaration.spec.Scope == model.ScopeProject && declaration.relativePath != ""
 			if isExpandableProject != (phase == 1) {
 				continue
@@ -116,6 +139,16 @@ func (c *mcpCollector) Collect(ctx context.Context, env collector.Environment) (
 	sortResult(&result)
 	result.Status = collector.AggregateTargetStatus(result.Targets)
 	return result, nil
+}
+
+func (c *mcpCollector) projectTargetIDs() map[string]bool {
+	result := make(map[string]bool, len(c.projectTargets))
+	for _, target := range c.projectTargets {
+		if target.TargetID != "" {
+			result[target.TargetID] = true
+		}
+	}
+	return result
 }
 
 func (c *mcpCollector) clearProjectTargets() {

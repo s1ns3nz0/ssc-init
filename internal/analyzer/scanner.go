@@ -29,6 +29,9 @@ var lexicalRules = []lexicalRule{
 }
 
 func (Scanner) Analyze(ctx context.Context, content evidence.SealedContent) ([]model.AnalyzerFact, error) {
+	if model.ProjectEvidenceSubject(content.Subject()) {
+		return nil, nil
+	}
 	raw, err := io.ReadAll(io.LimitReader(content, 1<<20+1))
 	defer clear(raw)
 	if err != nil || len(raw) > 1<<20 || ctx.Err() != nil {
