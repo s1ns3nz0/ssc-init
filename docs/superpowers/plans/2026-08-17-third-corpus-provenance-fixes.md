@@ -55,7 +55,7 @@
 - [x] Rescan Ansible, Bun, and Gitea in fresh isolated homes and require the targeted errors/findings to disappear.
 - [x] Re-run all 12 third-corpus repositories and compare result summaries.
 - [x] Run full build, vet, race, module, diff, and scripts gates on a clean commit.
-- [ ] Push the updated PR branch and record retained artifact paths.
+- [x] Push the updated PR branch and record retained artifact paths.
 
 ## Execution evidence
 
