@@ -54,7 +54,7 @@
 - [x] Run race tests for provenance, projects, findings, and store.
 - [x] Rescan Ansible, Bun, and Gitea in fresh isolated homes and require the targeted errors/findings to disappear.
 - [x] Re-run all 12 third-corpus repositories and compare result summaries.
-- [ ] Run full build, vet, race, module, diff, and scripts gates on a clean commit.
+- [x] Run full build, vet, race, module, diff, and scripts gates on a clean commit.
 - [ ] Push the updated PR branch and record retained artifact paths.
 
 ## Execution evidence
@@ -63,4 +63,5 @@
 - The scoped race suite passed for provenance, project collection, finding evaluation, and store persistence.
 - Fresh targeted scans removed Ansible's two malformed requirements errors, Bun's multi-algorithm integrity error, and Gitea's virtual-workspace finding.
 - The complete 12-repository rerun produced 12,264 assets with zero provenance parser errors. The remaining 24 findings are 12 Bun parser fixtures, 11 genuinely range/unpinned Ansible requirements, and one Cargo hostile git-source fixture.
+- Clean-tree `go test -race -count=1 ./...` passed, including store (80.214s), TI publication (69.324s), acceptance (48.983s), and release scripts (21.747s); build, vet, module verification, and diff checks also passed.
 - Result artifacts are retained under `/Users/s1ns3nz0/Library/Caches/ssc-init-public-corpus-20260817/results-fixed-all`.
